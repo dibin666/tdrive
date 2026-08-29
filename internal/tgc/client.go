@@ -153,7 +153,7 @@ func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	// send_message call.
 	middlewares := []telegram.Middleware{
 		floodwait.NewSimpleWaiter().WithMaxRetries(5).WithMaxWait(5 * time.Minute),
-		ratelimit.New(rate.Every(m.cfg.Telegram.RateLimit), m.cfg.Telegram.RateBurst),
+		ratelimit.New(rate.Every(settings.RateLimit), m.cfg.Telegram.RateBurst),
 	}
 
 	client := telegram.NewClient(appID, appHash, telegram.Options{

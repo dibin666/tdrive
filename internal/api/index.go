@@ -55,6 +55,10 @@ func WireIndexProgress(idx *indexer.Indexer, broker *events.Broker) {
 // detached from any request, so the only way a browser learns about them is
 // through the event stream.
 func WireRemoteProgress(svc *drive.Service, broker *events.Broker) {
+	wireRemoteProgress(svc, broker, nil)
+}
+
+func wireRemoteProgress(svc *drive.Service, broker *events.Broker, live *liveUploadProgress) {
 	var throttles sync.Map
 	svc.OnRemoteProgress = func(job database.UploadJob, uploaded, total int64, err error) {
 		status := database.JobRunning
@@ -62,8 +66,13 @@ func WireRemoteProgress(svc *drive.Service, broker *events.Broker) {
 		switch {
 		case err != nil:
 			status, message = database.JobFailed, err.Error()
-		case job.Status == database.JobComplete || total > 0 && uploaded >= total:
+		case job.Status == database.JobComplete:
 			status = database.JobComplete
+		}
+		if status == database.JobRunning {
+			live.update(job.ID, uploaded, total, status)
+		} else {
+			live.clear(job.ID)
 		}
 		// Terminal events always go out; intermediate ones are rate limited per job.
 		if status == database.JobRunning {

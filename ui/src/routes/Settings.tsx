@@ -266,6 +266,8 @@ function PasswordSection() {
 function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> }) {
   const [settings, setSettings] = useState<RuntimeSettings | null>(null)
   const [segmentMiB, setSegmentMiB] = useState('')
+  const [uploadPartKiB, setUploadPartKiB] = useState('')
+  const [rateLimitMs, setRateLimitMs] = useState('')
   const [poolSize, setPoolSize] = useState('')
   const [uploadThreads, setUploadThreads] = useState('')
   const [streamConcurrency, setStreamConcurrency] = useState('')
@@ -280,6 +282,8 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
       .then((value) => {
         setSettings(value)
         setSegmentMiB(String(value.segmentSize / (1024 * 1024)))
+        setUploadPartKiB(String(value.uploadPartSize / 1024))
+        setRateLimitMs(String(value.rateLimitMs))
         setPoolSize(String(value.poolSize))
         setUploadThreads(String(value.uploadThreads))
         setStreamConcurrency(String(value.streamConcurrency))
@@ -293,11 +297,32 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
     if (!settings) return
 
     const segment = Number(segmentMiB)
+    const partKiB = Number(uploadPartKiB)
+    const interval = Number(rateLimitMs)
     const pool = Number(poolSize)
     const uploads = Number(uploadThreads)
     const streams = Number(streamConcurrency)
     if (!Number.isFinite(segment) || segment <= 0 || !Number.isInteger(segment * 2) || segment > 2000) {
       setError('分片大小应为 0.5 到 2000 MiB 之间、以 0.5 MiB 为步长')
+      return
+    }
+    if (!Number.isInteger(partKiB) || partKiB < 1 || partKiB > 512 || 512 % partKiB !== 0) {
+      setError('Telegram 上传分片必须是 1 到 512 KiB 之间、且能整除 512 的整数')
+      return
+    }
+    const partBytes = partKiB * 1024
+    const segmentBytes = Math.round(segment * 1024 * 1024)
+    const maxSegmentMiB = (partBytes * 4000) / (1024 * 1024)
+    if (segmentBytes % partBytes !== 0) {
+      setError(`存储分片大小必须是 Telegram 上传分片的整数倍（当前应按 ${partKiB} KiB 设置）`)
+      return
+    }
+    if (segment > maxSegmentMiB) {
+      setError(`当前 Telegram 上传分片最多支持 ${maxSegmentMiB} MiB 的存储分片`)
+      return
+    }
+    if (!Number.isInteger(interval) || interval < 1 || interval > 60000) {
+      setError('Telegram 请求间隔必须是 1 到 60000 毫秒之间的整数')
       return
     }
     if (![pool, uploads, streams].every((value) => Number.isInteger(value) && value >= 1)) {
@@ -310,6 +335,8 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
     try {
       const saved = await api.updateSettings({
         segmentSize: Math.round(segment * 1024 * 1024),
+        uploadPartSize: partBytes,
+        rateLimitMs: interval,
         poolSize: pool,
         uploadThreads: uploads,
         streamConcurrency: streams,
@@ -318,6 +345,8 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
       })
       setSettings(saved)
       setSegmentMiB(String(saved.segmentSize / (1024 * 1024)))
+      setUploadPartKiB(String(saved.uploadPartSize / 1024))
+      setRateLimitMs(String(saved.rateLimitMs))
       setPoolSize(String(saved.poolSize))
       setUploadThreads(String(saved.uploadThreads))
       setStreamConcurrency(String(saved.streamConcurrency))
@@ -332,26 +361,53 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
     }
   }
 
+  const segmentLimitMiB = Math.min(2000, (Number(uploadPartKiB) * 4000) / 1024 || 2000)
+
   return (
     <Section
       icon={<SlidersHorizontal size={16} />}
       title="运行参数"
-      description="调整存储分片、上传下载并发、WebDAV 和日志级别。修改会立即生效；分片大小只影响新上传的文件。"
+      description="调整存储分片、Telegram 上传参数、上传下载并发、WebDAV 和日志级别。修改会立即生效；分片大小只影响新上传的文件。"
     >
       {settings === null ? (
         error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : <Spinner />
       ) : (
         <div className="space-y-4">
-          <Field label="分片大小（MiB）" hint="范围 0.5–2000，步长 0.5；已有文件不受影响">
+          <Field
+            label="存储分片大小（MiB）"
+            hint={`范围 0.5–${segmentLimitMiB}，步长 0.5；已有文件不受影响`}
+          >
             <Input
               type="number"
               min="0.5"
-              max="2000"
+              max={segmentLimitMiB}
               step="0.5"
               value={segmentMiB}
               onChange={(e) => setSegmentMiB(e.target.value)}
             />
           </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Telegram 上传分片（KiB）" hint="1–512 KiB；必须是 512 的约数，只影响新上传">
+              <Input
+                type="number"
+                min="1"
+                max="512"
+                step="1"
+                value={uploadPartKiB}
+                onChange={(e) => setUploadPartKiB(e.target.value)}
+              />
+            </Field>
+            <Field label="Telegram 请求间隔（ms）" hint="默认 100；越小吞吐越高，也更容易触发 Telegram 限流">
+              <Input
+                type="number"
+                min="1"
+                max="60000"
+                step="1"
+                value={rateLimitMs}
+                onChange={(e) => setRateLimitMs(e.target.value)}
+              />
+            </Field>
+          </div>
           <div className="grid gap-4 sm:grid-cols-3">
             <Field label="Telegram 连接池">
               <Input

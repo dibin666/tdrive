@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.uber.org/zap/zapcore"
 
@@ -20,6 +21,8 @@ type settingsBody struct {
 	SegmentSize       int64  `json:"segmentSize"`
 	PoolSize          int64  `json:"poolSize"`
 	UploadThreads     int    `json:"uploadThreads"`
+	UploadPartSize    int64  `json:"uploadPartSize"`
+	RateLimitMs       int64  `json:"rateLimitMs"`
 	StreamConcurrency int    `json:"streamConcurrency"`
 	WebDAVEnabled     bool   `json:"webdavEnabled"`
 	LogLevel          string `json:"logLevel"`
@@ -31,6 +34,8 @@ type settingsUpdateRequest struct {
 	SegmentSize       *int64  `json:"segmentSize"`
 	PoolSize          *int64  `json:"poolSize"`
 	UploadThreads     *int    `json:"uploadThreads"`
+	UploadPartSize    *int64  `json:"uploadPartSize"`
+	RateLimitMs       *int64  `json:"rateLimitMs"`
 	StreamConcurrency *int    `json:"streamConcurrency"`
 	WebDAVEnabled     *bool   `json:"webdavEnabled"`
 	LogLevel          *string `json:"logLevel"`
@@ -43,6 +48,8 @@ func toSettingsBody(s config.RuntimeSettings) settingsBody {
 		SegmentSize:       s.SegmentSize,
 		PoolSize:          s.PoolSize,
 		UploadThreads:     s.UploadThreads,
+		UploadPartSize:    s.UploadPartSize,
+		RateLimitMs:       s.RateLimit.Milliseconds(),
 		StreamConcurrency: s.StreamConcurrency,
 		WebDAVEnabled:     s.WebDAVEnabled,
 		LogLevel:          s.LogLevel,
@@ -81,6 +88,16 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.UploadThreads != nil {
 		next.UploadThreads = *req.UploadThreads
 	}
+	if req.UploadPartSize != nil {
+		next.UploadPartSize = *req.UploadPartSize
+	}
+	if req.RateLimitMs != nil {
+		if *req.RateLimitMs < 1 || *req.RateLimitMs > int64(time.Minute/time.Millisecond) {
+			writeError(w, http.StatusBadRequest, "telegram request interval must be between 1ms and 60000ms")
+			return
+		}
+		next.RateLimit = time.Duration(*req.RateLimitMs) * time.Millisecond
+	}
 	if req.StreamConcurrency != nil {
 		next.StreamConcurrency = *req.StreamConcurrency
 	}
@@ -112,6 +129,8 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		config.SettingSegmentSize:       strconv.FormatInt(next.SegmentSize, 10),
 		config.SettingTGPoolSize:        strconv.FormatInt(next.PoolSize, 10),
 		config.SettingUploadThreads:     strconv.Itoa(next.UploadThreads),
+		config.SettingTGUploadPartSize:  strconv.FormatInt(next.UploadPartSize, 10),
+		config.SettingTGRateLimit:       next.RateLimit.String(),
 		config.SettingStreamConcurrency: strconv.Itoa(next.StreamConcurrency),
 		config.SettingWebDAVEnabled:     strconv.FormatBool(next.WebDAVEnabled),
 		config.SettingLogLevel:          next.LogLevel,
@@ -137,7 +156,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		(!s.tg.Ready() && (req.AppID != nil || req.AppHash != nil) && next.AppID > 0 && next.AppHash != "")
 	if configureTelegram {
 		reconnectErr = s.tg.Configure(r.Context(), next.AppID, next.AppHash)
-	} else if next.PoolSize != current.PoolSize && s.tg.Ready() {
+	} else if (next.PoolSize != current.PoolSize || next.RateLimit != current.RateLimit) && s.tg.Ready() {
 		reconnectErr = s.tg.Reload(r.Context())
 	}
 	if reconnectErr != nil {

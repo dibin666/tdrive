@@ -16,7 +16,7 @@ import (
 )
 
 // The upload path follows the reference implementation step for step: a
-// progress-tracking reader feeds a streaming uploader that issues 512 KiB
+// progress-tracking reader feeds a streaming uploader that issues configured
 // saveBigFilePart calls, the resulting InputFile is wrapped in a document
 // message carrying the caption, and the send is retried with backoff on
 // FLOOD_WAIT (handled here by the floodwait middleware rather than by hand).

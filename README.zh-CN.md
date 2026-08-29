@@ -76,20 +76,24 @@ TDRIVE_DATA_DIR=./data ./tdrive
 | `TDRIVE_ADMIN_PASSWORD` | *（空）* | 初始管理员密码（≥8 位） |
 | `TDRIVE_LOCAL_PATH` | `./vps-files` | Docker 宿主机上用于 VPS 文件上传的目录；以只读方式挂载 |
 | `TDRIVE_LOCAL_DIR` | *（空）* | 应用容器内对应的本地目录；Compose 默认使用 `/vps` |
+| `TDRIVE_TG_UPLOAD_PART_SIZE` | `512KiB` | WebUI 首次配置前的 Telegram 上传分片默认值 |
+| `TDRIVE_TG_RATE_LIMIT` | `100ms` | WebUI 首次配置前的 Telegram 请求间隔默认值 |
 
 使用管理员账号登录后，其余运行参数可在 WebUI 的“设置”中配置：
 
 | WebUI 设置 | 默认值 | 说明 |
 |---|---|---|
 | Telegram `api_id` / `api_hash` | *（空）* | 来自 [my.telegram.org](https://my.telegram.org/apps) 的凭据 |
-| 分片大小 | `1900 MiB` | 每个 Telegram 对象的大小（上限 `2000 MiB`）；修改后只影响新上传文件 |
+| 存储分片大小 | `1900 MiB` | 每个 Telegram 对象的大小（上限取决于上传分片大小）；修改后只影响新上传文件 |
+| Telegram 上传分片 | `512 KiB` | 单个 `saveBigFilePart` 请求的大小；修改后只影响新上传文件 |
+| Telegram 请求间隔 | `100 ms` | Telegram RPC 请求之间的最小间隔，过小可能触发限流 |
 | Telegram 连接池 | `8` | MTProto 连接池大小 |
 | 上传线程 | `8` | 单分片内并发上传线程 |
 | 下载并发块数 | `6` | 并发下载块数 |
 | WebDAV | 启用 | 启用或禁用 WebDAV 挂载 |
 | 日志级别 | `info` | 运行时日志级别 |
 
-这些设置会保存在 SQLite 数据目录中，并且无需重启服务即可生效。连接池大小变化时，Telegram 连接池会自动重建。
+这些设置会保存在 SQLite 数据目录中，并且无需重启服务即可生效。连接池大小或请求间隔变化时，Telegram 连接会自动重建。
 
 `TDRIVE_LOCAL_PATH` 是 Docker Compose 的宿主机路径，不是容器内路径。若使用 `docker run`，请手动添加
 `-v /srv/repository:/vps:ro -e TDRIVE_LOCAL_DIR=/vps`。

@@ -21,20 +21,26 @@ import (
 // that product is exactly where the familiar "2 GB" free-account ceiling comes
 // from. Everything about segmenting is derived from these two numbers.
 const (
-	// UploadPartSize is the MTProto part size for upload.saveBigFilePart.
-	UploadPartSize = 512 * 1024
+	// DefaultUploadPartSize is the default MTProto part size for
+	// upload.saveBigFilePart. It is configurable at runtime, but Telegram only
+	// accepts sizes that divide this maximum.
+	DefaultUploadPartSize int64 = 512 * 1024
+	// UploadPartSize is kept as a compatibility alias for code and tests that
+	// refer to the historical fixed default.
+	UploadPartSize = DefaultUploadPartSize
 	// MaxUploadParts is the MTProto limit on file_total_parts.
 	MaxUploadParts = 4000
-	// TelegramFileLimit is the largest single object upload.saveBigFilePart
-	// can express: 4000 parts of 512 KiB is 2000 MiB. Premium raises the size
-	// a client may *send*, but not these two protocol limits, so this is the
-	// hard ceiling for one segment either way. Storing more than this is what
-	// segmenting is for.
-	TelegramFileLimit int64 = MaxUploadParts * UploadPartSize
+	// TelegramFileLimit is the absolute largest single object
+	// upload.saveBigFilePart can express with Telegram's maximum 512 KiB part:
+	// 4000 parts is 2000 MiB. A smaller configured part size lowers the limit for
+	// each new segment accordingly.
+	TelegramFileLimit int64 = MaxUploadParts * DefaultUploadPartSize
+	// DefaultRateLimit is the delay between Telegram RPC requests by default.
+	DefaultRateLimit = 100 * time.Millisecond
 
-	// DefaultSegmentSize is 1900 MiB, exactly 3800 upload parts. The 100 MiB of
-	// headroom under TelegramFileLimit keeps a segment from landing on the
-	// boundary where Telegram starts rejecting uploads.
+	// DefaultSegmentSize is 1900 MiB, exactly 3800 default-size upload parts. The
+	// 100 MiB of headroom under the default 2000 MiB object ceiling keeps a
+	// segment from landing on the boundary where Telegram starts rejecting it.
 	DefaultSegmentSize int64 = 1900 * 1024 * 1024
 
 	// DownloadChunkSize is the largest upload.getFile response Telegram will
@@ -100,6 +106,10 @@ type Telegram struct {
 	// UploadThreads is the concurrency inside one segment upload, i.e. how
 	// many saveBigFilePart calls are in flight at once.
 	UploadThreads int
+	// UploadPartSize is the size of each Telegram upload part. It is separate
+	// from Storage.SegmentSize: the latter is the logical file split shown by
+	// the drive, while this is the MTProto request payload size.
+	UploadPartSize int64
 
 	// RateLimit smooths request bursts so Telegram is less likely to answer
 	// with FLOOD_WAIT in the first place; the floodwait middleware handles the
@@ -189,12 +199,13 @@ func Load() (*Config, error) {
 			BootstrapPassword: envStr("TDRIVE_ADMIN_PASSWORD", ""),
 		},
 		Telegram: Telegram{
-			AppHash:       envStr("TDRIVE_TG_APP_HASH", ""),
-			PoolSize:      int64(envInt("TDRIVE_TG_POOL_SIZE", 8)),
-			UploadThreads: envInt("TDRIVE_UPLOAD_THREADS", 8),
-			RateLimit:     envDur("TDRIVE_TG_RATE_LIMIT", 100*time.Millisecond),
-			RateBurst:     envInt("TDRIVE_TG_RATE_BURST", 5),
-			SessionFile:   filepath.Join(dataDir, "session.json"),
+			AppHash:        envStr("TDRIVE_TG_APP_HASH", ""),
+			PoolSize:       int64(envInt("TDRIVE_TG_POOL_SIZE", 8)),
+			UploadThreads:  envInt("TDRIVE_UPLOAD_THREADS", 8),
+			UploadPartSize: envSize("TDRIVE_TG_UPLOAD_PART_SIZE", DefaultUploadPartSize),
+			RateLimit:      envDur("TDRIVE_TG_RATE_LIMIT", DefaultRateLimit),
+			RateBurst:      envInt("TDRIVE_TG_RATE_BURST", 5),
+			SessionFile:    filepath.Join(dataDir, "session.json"),
 		},
 		Storage: Storage{
 			SegmentSize:        envSize("TDRIVE_SEGMENT_SIZE", DefaultSegmentSize),

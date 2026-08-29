@@ -24,6 +24,10 @@ services:
       # Set this when behind a reverse proxy so session cookies are marked
       # Secure and the WebDAV address shown in settings is correct.
       TDRIVE_BASE_URL: ${TDRIVE_BASE_URL:-}
+      # Optional initial Telegram upload defaults; saved WebUI settings take
+      # precedence after the first change.
+      TDRIVE_TG_UPLOAD_PART_SIZE: ${TDRIVE_TG_UPLOAD_PART_SIZE:-512KiB}
+      TDRIVE_TG_RATE_LIMIT: ${TDRIVE_TG_RATE_LIMIT:-100ms}
 
 volumes:
   tdrive-data:

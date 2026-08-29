@@ -93,6 +93,7 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "read job")
 		return
 	}
+	s.progress.merge(&job)
 	file, err := s.db.FileByID(r.Context(), job.FileID)
 	if err != nil {
 		s.fail(w, err, "read job")
@@ -115,6 +116,9 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	if jobs == nil {
 		jobs = []database.UploadJob{}
+	}
+	for i := range jobs {
+		s.progress.merge(&jobs[i])
 	}
 	writeJSON(w, http.StatusOK, jobs)
 }
@@ -166,6 +170,7 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 	base := int64(index-1) * file.SegmentSize
 	throttle := newProgressThrottle()
 	err = s.drive.PutSegment(r.Context(), job, index, r.Body, want, func(uploaded, _ int64) {
+		s.progress.update(job.ID, base+uploaded, file.Size, database.JobRunning)
 		if !throttle.ready() {
 			return
 		}
@@ -181,6 +186,7 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
+		s.progress.clear(job.ID)
 		s.events.Publish(events.Event{
 			Type:   events.TypeUpload,
 			UserID: job.UserID,
@@ -198,6 +204,11 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err, "put segment")
 		return
+	}
+	if updated.Status == database.JobComplete {
+		s.progress.clear(job.ID)
+	} else {
+		s.progress.update(job.ID, updated.UploadedBytes, updated.TotalSize, updated.Status)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"segment": index,
@@ -218,6 +229,7 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "complete upload")
 		return
 	}
+	s.progress.clear(job.ID)
 
 	s.events.Publish(events.Event{
 		Type:   events.TypeUpload,
@@ -247,6 +259,7 @@ func (s *Server) handleCancelUpload(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "cancel upload")
 		return
 	}
+	s.progress.clear(job.ID)
 	s.events.Publish(events.Event{
 		Type:   events.TypeUpload,
 		UserID: job.UserID,
@@ -303,7 +316,7 @@ func (s *Server) jobForUser(r *http.Request, id string) (database.UploadJob, err
 }
 
 // progressThrottle limits how often progress events go out. gotd reports every
-// 512 KiB part, which on a fast link is hundreds of events a second per file —
+// upload part, which on a fast link is hundreds of events a second per file —
 // far more than a browser can use.
 //
 // The callback runs on every upload thread at once, so the timestamp is

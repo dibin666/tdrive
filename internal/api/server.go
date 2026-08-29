@@ -31,6 +31,7 @@ type Server struct {
 	log         *zap.Logger
 	setLogLevel func(string) error
 	settingsMu  sync.Mutex
+	progress    *liveUploadProgress
 }
 
 func New(
@@ -48,10 +49,13 @@ func New(
 	if len(setLogLevel) > 0 {
 		applyLogLevel = setLogLevel[0]
 	}
-	return &Server{
+	server := &Server{
 		cfg: cfg, db: db, auth: authSvc, drive: driveSvc,
 		tg: tgm, index: idx, events: broker, log: log, setLogLevel: applyLogLevel,
+		progress: newLiveUploadProgress(),
 	}
+	wireRemoteProgress(driveSvc, broker, server.progress)
+	return server
 }
 
 // Routes builds the /api subtree. WebDAV and the static UI are mounted by the

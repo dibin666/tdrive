@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // RuntimeSettings are the settings that may be changed from the WebUI. The
@@ -19,6 +20,8 @@ type RuntimeSettings struct {
 	SegmentSize       int64
 	PoolSize          int64
 	UploadThreads     int
+	UploadPartSize    int64
+	RateLimit         time.Duration
 	StreamConcurrency int
 	WebDAVEnabled     bool
 	LogLevel          string
@@ -52,18 +55,30 @@ func (r *RuntimeConfig) Set(settings RuntimeSettings) {
 // useful for tests and for callers that construct Config literals directly.
 func (c *Config) RuntimeSettings() RuntimeSettings {
 	if c.Runtime != nil {
-		return c.Runtime.Snapshot()
+		return withRuntimeDefaults(c.Runtime.Snapshot())
 	}
-	return RuntimeSettings{
+	return withRuntimeDefaults(RuntimeSettings{
 		AppID:             c.Telegram.AppID,
 		AppHash:           c.Telegram.AppHash,
 		SegmentSize:       c.Storage.SegmentSize,
 		PoolSize:          c.Telegram.PoolSize,
 		UploadThreads:     c.Telegram.UploadThreads,
+		UploadPartSize:    c.Telegram.UploadPartSize,
+		RateLimit:         c.Telegram.RateLimit,
 		StreamConcurrency: c.Stream.Concurrency,
 		WebDAVEnabled:     c.WebDAV.Enabled,
 		LogLevel:          c.LogLevel,
+	})
+}
+
+func withRuntimeDefaults(settings RuntimeSettings) RuntimeSettings {
+	if settings.UploadPartSize <= 0 {
+		settings.UploadPartSize = DefaultUploadPartSize
 	}
+	if settings.RateLimit <= 0 {
+		settings.RateLimit = DefaultRateLimit
+	}
+	return settings
 }
 
 // SetRuntimeSettings publishes a new WebUI-adjustable snapshot.
@@ -80,15 +95,27 @@ func (s RuntimeSettings) Validate() error {
 	switch {
 	case s.AppID < 0:
 		return fmt.Errorf("telegram app id must not be negative")
+	case s.UploadPartSize <= 0:
+		return fmt.Errorf("telegram upload part size must be positive, got %d", s.UploadPartSize)
+	case s.UploadPartSize%1024 != 0:
+		return fmt.Errorf("telegram upload part size %d must be a multiple of 1024 bytes", s.UploadPartSize)
+	case s.UploadPartSize > DefaultUploadPartSize:
+		return fmt.Errorf("telegram upload part size %d exceeds the %d byte maximum", s.UploadPartSize, DefaultUploadPartSize)
+	case DefaultUploadPartSize%s.UploadPartSize != 0:
+		return fmt.Errorf("telegram upload part size %d must divide the %d byte maximum", s.UploadPartSize, DefaultUploadPartSize)
+	case s.RateLimit < time.Millisecond:
+		return fmt.Errorf("telegram request interval must be at least 1ms, got %s", s.RateLimit)
+	case s.RateLimit > time.Minute:
+		return fmt.Errorf("telegram request interval must not exceed 1m, got %s", s.RateLimit)
 	case s.SegmentSize <= 0:
 		return fmt.Errorf("segment size must be positive, got %d", s.SegmentSize)
-	case s.SegmentSize > TelegramFileLimit:
+	case s.SegmentSize > MaxSegmentSize(s.UploadPartSize):
 		return fmt.Errorf(
 			"segment size %d exceeds the %d byte ceiling of one Telegram object (%d parts of %d bytes)",
-			s.SegmentSize, TelegramFileLimit, MaxUploadParts, UploadPartSize)
-	case s.SegmentSize%UploadPartSize != 0:
-		return fmt.Errorf("segment size %d must be a multiple of the %d byte upload part size",
-			s.SegmentSize, UploadPartSize)
+			s.SegmentSize, MaxSegmentSize(s.UploadPartSize), MaxUploadParts, s.UploadPartSize)
+	case s.SegmentSize%s.UploadPartSize != 0:
+		return fmt.Errorf("segment size %d must be a multiple of the %d byte Telegram upload part size",
+			s.SegmentSize, s.UploadPartSize)
 	case s.PoolSize < 1:
 		return fmt.Errorf("telegram pool size must be at least 1, got %d", s.PoolSize)
 	case s.UploadThreads < 1:
@@ -118,6 +145,8 @@ const (
 	SettingSegmentSize       = "storage.segment_size"
 	SettingTGPoolSize        = "telegram.pool_size"
 	SettingUploadThreads     = "telegram.upload_threads"
+	SettingTGUploadPartSize  = "telegram.upload_part_size"
+	SettingTGRateLimit       = "telegram.rate_limit"
 	SettingStreamConcurrency = "stream.concurrency"
 	SettingWebDAVEnabled     = "webdav.enabled"
 	SettingLogLevel          = "log.level"
@@ -165,6 +194,20 @@ func (c *Config) ApplyStoredRuntimeSettings(ctx context.Context, store RuntimeSe
 		}
 		s.UploadThreads = n
 	}
+	if value := store.SettingOr(ctx, SettingTGUploadPartSize, ""); value != "" {
+		n, err := ParseSize(value)
+		if err != nil {
+			return fmt.Errorf("stored telegram upload part size %q is invalid: %w", value, err)
+		}
+		s.UploadPartSize = n
+	}
+	if value := store.SettingOr(ctx, SettingTGRateLimit, ""); value != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("stored telegram request interval %q is invalid: %w", value, err)
+		}
+		s.RateLimit = d
+	}
 	if value := store.SettingOr(ctx, SettingStreamConcurrency, ""); value != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
@@ -188,4 +231,10 @@ func (c *Config) ApplyStoredRuntimeSettings(ctx context.Context, store RuntimeSe
 	}
 	c.SetRuntimeSettings(s)
 	return nil
+}
+
+// MaxSegmentSize is the largest logical segment that can fit into one
+// Telegram object for the selected upload part size.
+func MaxSegmentSize(partSize int64) int64 {
+	return int64(MaxUploadParts) * partSize
 }

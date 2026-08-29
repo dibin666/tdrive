@@ -25,6 +25,8 @@ const (
 	// WebUI and are applied without restarting the process.
 	SettingTGPoolSize        = "telegram.pool_size"
 	SettingUploadThreads     = "telegram.upload_threads"
+	SettingTGUploadPartSize  = "telegram.upload_part_size"
+	SettingTGRateLimit       = "telegram.rate_limit"
 	SettingStreamConcurrency = "stream.concurrency"
 	SettingWebDAVEnabled     = "webdav.enabled"
 	SettingLogLevel          = "log.level"

@@ -75,20 +75,24 @@ Visit `http://localhost:8080` after launch; a setup wizard will appear on first 
 | `TDRIVE_ADMIN_PASSWORD` | *(empty)* | Bootstrap admin password (≥8 characters) |
 | `TDRIVE_LOCAL_PATH` | `./vps-files` | Host directory exposed as a read-only VPS upload source in Docker Compose |
 | `TDRIVE_LOCAL_DIR` | *(empty)* | Container-side local source directory; Compose sets this to `/vps` |
+| `TDRIVE_TG_UPLOAD_PART_SIZE` | `512KiB` | Initial Telegram upload part-size fallback before WebUI settings are saved |
+| `TDRIVE_TG_RATE_LIMIT` | `100ms` | Initial Telegram request-interval fallback before WebUI settings are saved |
 
 After logging in as an administrator, configure the remaining runtime settings in **Settings**:
 
 | WebUI setting | Default | Description |
 |---|---|---|
 | Telegram `api_id` / `api_hash` | *(empty)* | Credentials from [my.telegram.org](https://my.telegram.org/apps) |
-| Segment size | `1900 MiB` | Size of each Telegram object (maximum `2000 MiB`); only new uploads use a changed value |
+| Storage segment size | `1900 MiB` | Size of each Telegram object (maximum depends on upload part size); only new uploads use a changed value |
+| Telegram upload part size | `512 KiB` | Size of one `saveBigFilePart` request; only new uploads use a changed value |
+| Telegram request interval | `100 ms` | Minimum delay between Telegram RPC requests; smaller values may trigger rate limits |
 | Telegram connection pool | `8` | MTProto connection pool size |
 | Upload threads | `8` | Concurrent upload threads per segment |
 | Download concurrency | `6` | Concurrent download chunks |
 | WebDAV | Enabled | Enable or disable the WebDAV mount |
 | Log level | `info` | Runtime log level |
 
-These settings are stored in the SQLite data directory and take effect without restarting the server. The Telegram connection pool is rebuilt automatically when its size changes.
+These settings are stored in the SQLite data directory and take effect without restarting the server. The Telegram connection is rebuilt automatically when its pool size or request interval changes.
 
 `TDRIVE_LOCAL_PATH` is the host-side Compose path. With `docker run`, add `-v /srv/repository:/vps:ro -e TDRIVE_LOCAL_DIR=/vps` manually.
 

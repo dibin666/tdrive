@@ -87,7 +87,14 @@ func run() error {
 	driveSvc := drive.New(cfg, db, tgm, log.Named("drive"))
 	idx := indexer.New(db, tgm, log.Named("indexer"))
 	api.WireIndexProgress(idx, broker)
-	api.WireRemoteProgress(driveSvc, broker)
+	apiServer := api.New(cfg, db, authSvc, driveSvc, tgm, idx, broker, log.Named("api"), func(level string) error {
+		parsed, err := zapcore.ParseLevel(level)
+		if err != nil {
+			return fmt.Errorf("invalid log level %q", level)
+		}
+		logLevel.SetLevel(parsed)
+		return nil
+	})
 
 	// A failure to connect here is not fatal: the WebUI still needs to come
 	// up so an administrator can fix the credentials.
@@ -99,15 +106,6 @@ func run() error {
 	if tgm.Ready() {
 		driveSvc.ResumeRemotes(ctx)
 	}
-
-	apiServer := api.New(cfg, db, authSvc, driveSvc, tgm, idx, broker, log.Named("api"), func(level string) error {
-		parsed, err := zapcore.ParseLevel(level)
-		if err != nil {
-			return fmt.Errorf("invalid log level %q", level)
-		}
-		logLevel.SetLevel(parsed)
-		return nil
-	})
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", apiServer.Routes()))

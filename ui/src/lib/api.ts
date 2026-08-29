@@ -87,6 +87,8 @@ export interface RuntimeSettings {
   segmentSize: number
   poolSize: number
   uploadThreads: number
+  uploadPartSize: number
+  rateLimitMs: number
   streamConcurrency: number
   webdavEnabled: boolean
   logLevel: string

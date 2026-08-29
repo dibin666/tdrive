@@ -6,7 +6,6 @@ import (
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 
-	"github.com/dibin/tdrive/internal/config"
 	"github.com/dibin/tdrive/internal/drive"
 )
 
@@ -17,7 +16,7 @@ var _ drive.Backend = (*Manager)(nil)
 // Upload streams one document into a channel.
 //
 // This is the reference implementation's upload path, step for step: a
-// streaming uploader issuing 512 KiB saveBigFilePart calls, then a document
+// streaming uploader issuing configured-size saveBigFilePart calls, then a document
 // message carrying the caption. The one addition is WithThreads, which keeps
 // several parts in flight instead of sending them one at a time.
 func (m *Manager) Upload(ctx context.Context, ch drive.ChannelRef, spec drive.UploadSpec) (drive.StoredDoc, error) {
@@ -28,7 +27,7 @@ func (m *Manager) Upload(ctx context.Context, ch drive.ChannelRef, spec drive.Up
 
 	settings := m.cfg.RuntimeSettings()
 	up := uploader.NewUploader(api).
-		WithPartSize(config.UploadPartSize).
+		WithPartSize(int(settings.UploadPartSize)).
 		WithThreads(settings.UploadThreads)
 	if spec.Progress != nil {
 		up = up.WithProgress(progressAdapter(spec.Progress))

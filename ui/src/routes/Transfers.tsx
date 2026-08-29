@@ -21,8 +21,36 @@ export function Transfers() {
 
   useEffect(() => {
     const history = new Map<string, { bytes: number; time: number; speed: number }>()
+    let knownJobs: UploadJob[] = []
 
-    const calculateSpeed = (id: string, uploadedBytes: number, status: string) => {
+    const terminal = (status: UploadJob['status']) =>
+      status === 'complete' || status === 'failed' || status === 'cancelled'
+
+    // The jobs endpoint is backed by completed-segment state and can therefore
+    // lag behind the SSE stream. Keep progress monotonic when those two sources
+    // cross in flight, otherwise a refresh briefly produces a fake speed spike.
+    const mergeJob = (current: UploadJob | undefined, incoming: UploadJob): UploadJob => {
+      if (!current) return incoming
+
+      let status = incoming.status
+      if (terminal(current.status) && !terminal(incoming.status)) {
+        status = current.status
+      } else if (!terminal(current.status) && !terminal(incoming.status)) {
+        status = current.status === 'running' || incoming.status === 'running' ? 'running' : 'pending'
+      }
+
+      return {
+        ...current,
+        ...incoming,
+        uploadedBytes: Math.max(current.uploadedBytes, incoming.uploadedBytes),
+        totalSize: incoming.totalSize || current.totalSize,
+        segmentSize: incoming.segmentSize || current.segmentSize,
+        segmentCount: incoming.segmentCount || current.segmentCount,
+        status,
+      }
+    }
+
+    const calculateSpeed = (id: string, uploadedBytes: number, status: UploadJob['status']) => {
       const now = performance.now()
       if (status !== 'running' && status !== 'pending') {
         history.delete(id)
@@ -48,23 +76,44 @@ export function Transfers() {
       }
     }
 
-    const updateJobs = (next: UploadJob[]) => {
-      const currentIds = new Set(next.map((j) => j.id))
+    const publishJobs = (next: UploadJob[]) => {
+      knownJobs = next
+      const currentIds = new Set(knownJobs.map((j) => j.id))
       for (const id of history.keys()) {
         if (!currentIds.has(id)) history.delete(id)
       }
       const speeds: Record<string, number> = {}
-      for (const j of next) {
+      for (const j of knownJobs) {
         speeds[j.id] = calculateSpeed(j.id, j.uploadedBytes, j.status)
       }
-      setJobs(next)
+      setJobs(knownJobs)
       setRemoteSpeeds(speeds)
     }
 
-    const load = () => void api.jobs().then(updateJobs).catch(() => {})
-    load()
+    const updateJobs = (next: UploadJob[]) => {
+      const incomingIds = new Set(next.map((j) => j.id))
+      const merged = next.map((j) => mergeJob(knownJobs.find((current) => current.id === j.id), j))
+      // Do not let a stale list response discard an event that arrived before it.
+      merged.push(...knownJobs.filter((j) => !incomingIds.has(j.id)))
+      publishJobs(merged)
+    }
 
-    return events.subscribe((event) => {
+    const updateJob = (incoming: UploadJob) => {
+      const idx = knownJobs.findIndex((j) => j.id === incoming.id)
+      if (idx < 0) {
+        publishJobs([incoming, ...knownJobs])
+        return
+      }
+      const next = [...knownJobs]
+      next[idx] = mergeJob(next[idx], incoming)
+      publishJobs(next)
+    }
+
+    const load = () => void api.jobs().then(updateJobs).catch(() => {})
+
+    // Subscribe first so an upload event cannot arrive between the initial
+    // snapshot request and the subscription being established.
+    const unsubscribe = events.subscribe((event) => {
       if (event.type === 'upload') {
         const data = event.data as {
           jobId: string
@@ -82,46 +131,30 @@ export function Transfers() {
           load()
           return
         }
-        const speed = calculateSpeed(data.jobId, data.uploaded, data.status)
-        setRemoteSpeeds((prev) => ({ ...prev, [data.jobId]: speed }))
-        setJobs((prev) => {
-          const idx = prev.findIndex((j) => j.id === data.jobId)
-          if (idx >= 0) {
-            const updated = [...prev]
-            updated[idx] = {
-              ...updated[idx],
-              uploadedBytes: data.uploaded,
-              totalSize: data.total || updated[idx].totalSize,
-              status: data.status,
-              error: data.error,
-              source: data.source || updated[idx].source,
-              sourceUrl: data.sourceUrl || updated[idx].sourceUrl,
-              updatedAt: new Date().toISOString(),
-            }
-            return updated
-          } else {
-            return [
-              {
-                id: data.jobId,
-                fileId: data.fileId,
-                name: data.name,
-                totalSize: data.total,
-                segmentSize: 0,
-                segmentCount: data.segmentCount,
-                uploadedBytes: data.uploaded,
-                status: data.status,
-                error: data.error,
-                source: data.source,
-                sourceUrl: data.sourceUrl,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              },
-              ...prev,
-            ]
-          }
+
+        const current = knownJobs.find((j) => j.id === data.jobId)
+        const now = new Date().toISOString()
+        updateJob({
+          id: data.jobId,
+          fileId: data.fileId || current?.fileId,
+          dirId: current?.dirId,
+          name: data.name || current?.name || '上传',
+          totalSize: data.total || current?.totalSize || 0,
+          segmentSize: current?.segmentSize || 0,
+          segmentCount: data.segmentCount || current?.segmentCount || 0,
+          uploadedBytes: Math.max(0, data.uploaded || 0),
+          status: data.status,
+          error: data.error,
+          source: data.source || current?.source,
+          sourceUrl: data.sourceUrl || current?.sourceUrl,
+          createdAt: current?.createdAt || now,
+          updatedAt: now,
         })
       }
     })
+
+    load()
+    return unsubscribe
   }, [])
   // A job this browser is already showing locally would otherwise appear
   // twice, once with live progress and once with the server's last snapshot.
