@@ -10,21 +10,28 @@ import (
 )
 
 // RuntimeSettings are the settings that may be changed from the WebUI. The
-// deployment settings (data directory, local source directory, listen address,
-// public URL and the first administrator) remain environment-only because
-// changing them would require moving files, rebinding the server or changing
-// the current account.
+// deployment settings (data directory, listen address, public URL and the
+// first administrator) remain environment-only because changing them would
+// require moving files, rebinding the server or changing the current account.
 type RuntimeSettings struct {
-	AppID             int
-	AppHash           string
+	AppID   int
+	AppHash string
+	// LocalRoot is the absolute directory exposed by the VPS-local upload
+	// picker. It may point at a Docker bind mount and can be changed without a
+	// restart.
+	LocalRoot         string
 	SegmentSize       int64
 	PoolSize          int64
 	UploadThreads     int
 	UploadPartSize    int64
 	RateLimit         time.Duration
 	StreamConcurrency int
-	WebDAVEnabled     bool
-	LogLevel          string
+	// UploadConcurrency and DownloadConcurrency limit whole-file tasks. The
+	// Telegram part/chunk settings above remain per-task limits.
+	UploadConcurrency   int
+	DownloadConcurrency int
+	WebDAVEnabled       bool
+	LogLevel            string
 }
 
 // RuntimeConfig keeps WebUI changes safe while uploads and downloads are
@@ -58,16 +65,19 @@ func (c *Config) RuntimeSettings() RuntimeSettings {
 		return withRuntimeDefaults(c.Runtime.Snapshot())
 	}
 	return withRuntimeDefaults(RuntimeSettings{
-		AppID:             c.Telegram.AppID,
-		AppHash:           c.Telegram.AppHash,
-		SegmentSize:       c.Storage.SegmentSize,
-		PoolSize:          c.Telegram.PoolSize,
-		UploadThreads:     c.Telegram.UploadThreads,
-		UploadPartSize:    c.Telegram.UploadPartSize,
-		RateLimit:         c.Telegram.RateLimit,
-		StreamConcurrency: c.Stream.Concurrency,
-		WebDAVEnabled:     c.WebDAV.Enabled,
-		LogLevel:          c.LogLevel,
+		AppID:               c.Telegram.AppID,
+		AppHash:             c.Telegram.AppHash,
+		LocalRoot:           c.Local.Root,
+		SegmentSize:         c.Storage.SegmentSize,
+		PoolSize:            c.Telegram.PoolSize,
+		UploadThreads:       c.Telegram.UploadThreads,
+		UploadPartSize:      c.Telegram.UploadPartSize,
+		RateLimit:           c.Telegram.RateLimit,
+		StreamConcurrency:   c.Stream.Concurrency,
+		UploadConcurrency:   c.Transfer.UploadConcurrency,
+		DownloadConcurrency: c.Transfer.DownloadConcurrency,
+		WebDAVEnabled:       c.WebDAV.Enabled,
+		LogLevel:            c.LogLevel,
 	})
 }
 
@@ -77,6 +87,12 @@ func withRuntimeDefaults(settings RuntimeSettings) RuntimeSettings {
 	}
 	if settings.RateLimit <= 0 {
 		settings.RateLimit = DefaultRateLimit
+	}
+	if settings.UploadConcurrency <= 0 {
+		settings.UploadConcurrency = DefaultUploadConcurrency
+	}
+	if settings.DownloadConcurrency <= 0 {
+		settings.DownloadConcurrency = DefaultDownloadConcurrency
 	}
 	return settings
 }
@@ -122,6 +138,10 @@ func (s RuntimeSettings) Validate() error {
 		return fmt.Errorf("upload threads must be at least 1, got %d", s.UploadThreads)
 	case s.StreamConcurrency < 1:
 		return fmt.Errorf("stream concurrency must be at least 1, got %d", s.StreamConcurrency)
+	case s.UploadConcurrency < 1:
+		return fmt.Errorf("upload task concurrency must be at least 1, got %d", s.UploadConcurrency)
+	case s.DownloadConcurrency < 1:
+		return fmt.Errorf("download task concurrency must be at least 1, got %d", s.DownloadConcurrency)
 	case s.LogLevel != "" && !validLogLevel(s.LogLevel):
 		return fmt.Errorf("invalid log level %q", s.LogLevel)
 	}
@@ -140,16 +160,19 @@ func validLogLevel(level string) bool {
 // Runtime setting keys are shared with the database settings table. They are
 // kept here too so startup loading and API validation use one vocabulary.
 const (
-	SettingTGAppID           = "telegram.app_id"
-	SettingTGAppHash         = "telegram.app_hash"
-	SettingSegmentSize       = "storage.segment_size"
-	SettingTGPoolSize        = "telegram.pool_size"
-	SettingUploadThreads     = "telegram.upload_threads"
-	SettingTGUploadPartSize  = "telegram.upload_part_size"
-	SettingTGRateLimit       = "telegram.rate_limit"
-	SettingStreamConcurrency = "stream.concurrency"
-	SettingWebDAVEnabled     = "webdav.enabled"
-	SettingLogLevel          = "log.level"
+	SettingTGAppID             = "telegram.app_id"
+	SettingTGAppHash           = "telegram.app_hash"
+	SettingLocalRoot           = "local.root"
+	SettingSegmentSize         = "storage.segment_size"
+	SettingTGPoolSize          = "telegram.pool_size"
+	SettingUploadThreads       = "telegram.upload_threads"
+	SettingTGUploadPartSize    = "telegram.upload_part_size"
+	SettingTGRateLimit         = "telegram.rate_limit"
+	SettingStreamConcurrency   = "stream.concurrency"
+	SettingUploadConcurrency   = "transfer.upload_concurrency"
+	SettingDownloadConcurrency = "transfer.download_concurrency"
+	SettingWebDAVEnabled       = "webdav.enabled"
+	SettingLogLevel            = "log.level"
 )
 
 // RuntimeSettingStore is the small part of the database API needed at startup.
@@ -162,6 +185,9 @@ type RuntimeSettingStore interface {
 // continue to work and a saved WebUI value takes precedence over them.
 func (c *Config) ApplyStoredRuntimeSettings(ctx context.Context, store RuntimeSettingStore) error {
 	s := c.RuntimeSettings()
+	// A stored empty string is meaningful: it explicitly disables local
+	// uploads, even if a legacy TDRIVE_LOCAL_DIR environment fallback exists.
+	const missingSetting = "\x00"
 
 	if value := store.SettingOr(ctx, SettingTGAppID, ""); value != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(value))
@@ -172,6 +198,13 @@ func (c *Config) ApplyStoredRuntimeSettings(ctx context.Context, store RuntimeSe
 	}
 	if value := store.SettingOr(ctx, SettingTGAppHash, ""); value != "" {
 		s.AppHash = value
+	}
+	if value := store.SettingOr(ctx, SettingLocalRoot, missingSetting); value != missingSetting {
+		localRoot, err := NormalizeLocalRoot(value)
+		if err != nil {
+			return fmt.Errorf("stored local directory %q is invalid: %w", value, err)
+		}
+		s.LocalRoot = localRoot
 	}
 	if value := store.SettingOr(ctx, SettingSegmentSize, ""); value != "" {
 		n, err := ParseSize(value)
@@ -214,6 +247,20 @@ func (c *Config) ApplyStoredRuntimeSettings(ctx context.Context, store RuntimeSe
 			return fmt.Errorf("stored stream concurrency %q is invalid: %w", value, err)
 		}
 		s.StreamConcurrency = n
+	}
+	if value := store.SettingOr(ctx, SettingUploadConcurrency, ""); value != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("stored upload task concurrency %q is invalid: %w", value, err)
+		}
+		s.UploadConcurrency = n
+	}
+	if value := store.SettingOr(ctx, SettingDownloadConcurrency, ""); value != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("stored download task concurrency %q is invalid: %w", value, err)
+		}
+		s.DownloadConcurrency = n
 	}
 	if value := store.SettingOr(ctx, SettingWebDAVEnabled, ""); value != "" {
 		enabled, err := strconv.ParseBool(strings.TrimSpace(value))

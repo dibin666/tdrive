@@ -37,6 +37,14 @@ const (
 	TelegramFileLimit int64 = MaxUploadParts * DefaultUploadPartSize
 	// DefaultRateLimit is the delay between Telegram RPC requests by default.
 	DefaultRateLimit = 100 * time.Millisecond
+	// DefaultUploadConcurrency is the number of whole-file upload tasks allowed
+	// to use Telegram at once. Parts inside one task are governed separately by
+	// UploadThreads and the browser's segment pipeline.
+	DefaultUploadConcurrency = 2
+	// DefaultDownloadConcurrency is the number of whole-file download tasks
+	// allowed to read Telegram at once. Chunk prefetch inside one task is
+	// governed separately by Stream.Concurrency.
+	DefaultDownloadConcurrency = 2
 
 	// DefaultSegmentSize is 1900 MiB, exactly 3800 default-size upload parts. The
 	// 100 MiB of headroom under the default 2000 MiB object ceiling keeps a
@@ -56,6 +64,7 @@ type Config struct {
 	Telegram Telegram
 	Storage  Storage
 	Stream   Stream
+	Transfer Transfer
 	WebDAV   WebDAV
 	Local    Local
 	LogLevel string
@@ -151,15 +160,23 @@ type Stream struct {
 	LocationTTL time.Duration
 }
 
+// Transfer holds the task-level concurrency limits. These limits are distinct
+// from the per-task Telegram part/chunk concurrency above: one file consumes
+// one task slot for its entire upload or download.
+type Transfer struct {
+	UploadConcurrency   int
+	DownloadConcurrency int
+}
+
 type WebDAV struct {
 	Enabled bool
 	Prefix  string
 }
 
 // Local describes the optional read-only directory exposed as a source for
-// server-side uploads. In Docker this is normally a bind mount such as
-// /vps-files; it is deliberately separate from DataDir so an accidental path
-// change cannot expose the application's database and session files.
+// server-side uploads. Root is the legacy environment fallback; the effective
+// value lives in RuntimeSettings so an administrator can change it in the
+// WebUI without restarting the process.
 type Local struct {
 	Root string
 }
@@ -176,12 +193,9 @@ func Load() (*Config, error) {
 	}
 	dataDir = abs
 
-	localRoot := strings.TrimSpace(os.Getenv("TDRIVE_LOCAL_DIR"))
-	if localRoot != "" {
-		localRoot, err = filepath.Abs(localRoot)
-		if err != nil {
-			return nil, fmt.Errorf("resolve local directory %q: %w", localRoot, err)
-		}
+	localRoot, err := NormalizeLocalRoot(os.Getenv("TDRIVE_LOCAL_DIR"))
+	if err != nil {
+		return nil, err
 	}
 
 	cfg := &Config{
@@ -219,6 +233,10 @@ func Load() (*Config, error) {
 			ChunkTimeout: envDur("TDRIVE_CHUNK_TIMEOUT", 30*time.Second),
 			LocationTTL:  envDur("TDRIVE_LOCATION_TTL", 30*time.Minute),
 		},
+		Transfer: Transfer{
+			UploadConcurrency:   envInt("TDRIVE_UPLOAD_CONCURRENCY", DefaultUploadConcurrency),
+			DownloadConcurrency: envInt("TDRIVE_DOWNLOAD_CONCURRENCY", DefaultDownloadConcurrency),
+		},
 		WebDAV: WebDAV{
 			Enabled: envBool("TDRIVE_WEBDAV_ENABLED", true),
 			Prefix:  "/dav",
@@ -242,6 +260,22 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// NormalizeLocalRoot converts a WebUI or environment-provided local source
+// directory into a stable absolute path. An empty value disables VPS-local
+// uploads. The directory is intentionally not required to exist here because a
+// Docker bind mount may be added after the process starts.
+func NormalizeLocalRoot(root string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return "", nil
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve local directory %q: %w", root, err)
+	}
+	return absolute, nil
 }
 
 // Validate rejects settings that would fail later in a confusing place, such as

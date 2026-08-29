@@ -50,15 +50,26 @@ type Service struct {
 	// same folder would otherwise both send a Telegram message and one would
 	// lose the unique-index race, leaving an orphaned record in the channel.
 	mkdirMu sync.Mutex
+
+	// Task limiters count whole logical file transfers. The upload job leases
+	// below let concurrent browser segment requests share one upload slot.
+	uploadLimiter   *taskLimiter
+	downloadLimiter *taskLimiter
+	uploadJobsMu    sync.Mutex
+	uploadJobs      map[string]*uploadJobLease
 }
 
 func New(cfg *config.Config, db *database.DB, backend Backend, log *zap.Logger) *Service {
+	settings := cfg.RuntimeSettings()
 	return &Service{
-		cfg:  cfg,
-		db:   db,
-		tg:   backend,
-		log:  log,
-		refs: newRefCache(cfg.Stream.LocationTTL),
+		cfg:             cfg,
+		db:              db,
+		tg:              backend,
+		log:             log,
+		refs:            newRefCache(cfg.Stream.LocationTTL),
+		uploadLimiter:   newTaskLimiter(settings.UploadConcurrency),
+		downloadLimiter: newTaskLimiter(settings.DownloadConcurrency),
+		uploadJobs:      make(map[string]*uploadJobLease),
 	}
 }
 

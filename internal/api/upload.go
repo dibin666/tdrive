@@ -162,7 +162,19 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A browser upload is one task even though its segments are sent by
+	// multiple HTTP requests at once. The job lease makes those requests share
+	// one global upload slot while still allowing the segments to run in
+	// parallel inside that task.
+	releaseRequest, err := s.drive.AcquireUploadJob(r.Context(), job.ID)
+	if err != nil {
+		s.fail(w, err, "put segment")
+		return
+	}
+	defer releaseRequest()
+
 	if err := s.db.SetJobStatus(r.Context(), job.ID, database.JobRunning, ""); err != nil {
+		s.drive.ReleaseUploadJob(job.ID)
 		s.fail(w, err, "put segment")
 		return
 	}
@@ -186,6 +198,7 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
+		s.drive.ReleaseUploadJob(job.ID)
 		s.progress.clear(job.ID)
 		s.events.Publish(events.Event{
 			Type:   events.TypeUpload,
@@ -202,6 +215,7 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := s.db.JobByID(r.Context(), job.ID)
 	if err != nil {
+		s.drive.ReleaseUploadJob(job.ID)
 		s.fail(w, err, "put segment")
 		return
 	}
@@ -223,7 +237,6 @@ func (s *Server) handleCompleteUpload(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "complete upload")
 		return
 	}
-
 	file, err := s.drive.Complete(r.Context(), job.ID)
 	if err != nil {
 		s.fail(w, err, "complete upload")

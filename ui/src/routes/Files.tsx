@@ -185,19 +185,21 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
         toast(`已添加 ${list.length} 个文件到上传队列`, 'info')
       }
 
-      for (const file of list) {
-        try {
-          await uploads.upload(file, path, () => {
-            toast(`"${file.name}" 上传完成`, 'success')
-            void load()
-          })
-        } catch (err) {
-          toast(
-            `${file.name} 上传失败：${err instanceof Error ? err.message : String(err)}`,
-            'error',
-          )
-        }
-      }
+      await Promise.all(
+        list.map(async (file) => {
+          try {
+            await uploads.upload(file, path, () => {
+              toast(`"${file.name}" 上传完成`, 'success')
+              void load()
+            })
+          } catch (err) {
+            toast(
+              `${file.name} 上传失败：${err instanceof Error ? err.message : String(err)}`,
+              'error',
+            )
+          }
+        }),
+      )
     },
     [path, load],
   )
@@ -1169,8 +1171,8 @@ function UploadModal({
 
           {!localEnabled ? (
             <p className="rounded-[var(--radius-card)] bg-[var(--sunk)] p-4 text-xs leading-relaxed text-[var(--muted)]">
-              尚未配置 VPS 文件目录。请在 Docker Compose 中把宿主机目录挂载到容器，并设置
-              <span className="mx-1 font-[family-name:var(--font-mono)]">TDRIVE_LOCAL_DIR</span>。
+              尚未配置 VPS 文件目录。请管理员前往“设置 → 运行参数”填写服务器目录（Docker 下通常为
+              <span className="mx-1 font-[family-name:var(--font-mono)]">/vps</span>），并确保该目录已挂载且可读。
             </p>
           ) : (
             <div className="rounded-[var(--radius-card)] border border-[var(--line)]">

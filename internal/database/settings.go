@@ -18,18 +18,23 @@ const (
 	// legacy environment fallback once it exists.
 	SettingTGAppID   = "telegram.app_id"
 	SettingTGAppHash = "telegram.app_hash"
+	// SettingLocalRoot is the server-side directory shown in the VPS upload
+	// picker. An empty stored value explicitly disables the picker.
+	SettingLocalRoot = "local.root"
 	// SettingSegmentSize records the current default split size. Existing files
 	// keep their own segment_size, so changing this only affects new uploads.
 	SettingSegmentSize = "storage.segment_size"
 	// The remaining runtime settings are editable by an administrator in the
 	// WebUI and are applied without restarting the process.
-	SettingTGPoolSize        = "telegram.pool_size"
-	SettingUploadThreads     = "telegram.upload_threads"
-	SettingTGUploadPartSize  = "telegram.upload_part_size"
-	SettingTGRateLimit       = "telegram.rate_limit"
-	SettingStreamConcurrency = "stream.concurrency"
-	SettingWebDAVEnabled     = "webdav.enabled"
-	SettingLogLevel          = "log.level"
+	SettingTGPoolSize          = "telegram.pool_size"
+	SettingUploadThreads       = "telegram.upload_threads"
+	SettingTGUploadPartSize    = "telegram.upload_part_size"
+	SettingTGRateLimit         = "telegram.rate_limit"
+	SettingStreamConcurrency   = "stream.concurrency"
+	SettingUploadConcurrency   = "transfer.upload_concurrency"
+	SettingDownloadConcurrency = "transfer.download_concurrency"
+	SettingWebDAVEnabled       = "webdav.enabled"
+	SettingLogLevel            = "log.level"
 	// SettingSetupComplete flips once the wizard has run to completion.
 	SettingSetupComplete = "setup.complete"
 )

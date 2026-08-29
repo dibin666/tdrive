@@ -17,35 +17,44 @@ import (
 // readHandle serves GET. The reader underneath stitches segments together, so
 // nothing here is aware that a file might be split.
 //
-// The stream is opened lazily. webdav.Handler calls http.ServeContent, which
-// seeks to the end and back purely to measure the file, and a PROPFIND-heavy
-// client would otherwise open a Telegram connection for every entry it looks at.
+// The stream and its download-task lease are opened lazily. webdav.Handler calls
+// http.ServeContent, which seeks to the end and back purely to measure the file,
+// and a PROPFIND-heavy client would otherwise open a Telegram connection for
+// every entry it looks at.
 type readHandle struct {
 	fs   *FileSystem
 	ctx  context.Context
 	file database.File
 	info fileInfo
 
-	mu     sync.Mutex
-	stream *reader.File
-	pos    int64
+	mu      sync.Mutex
+	stream  *reader.File
+	release func()
+	pos     int64
 }
 
 func (h *readHandle) ensure() error {
 	if h.stream != nil {
 		return nil
 	}
+	release, err := h.fs.drive.AcquireDownloadTask(h.ctx)
+	if err != nil {
+		return translate(err)
+	}
 	stream, err := h.fs.drive.OpenFile(h.ctx, h.file)
 	if err != nil {
+		release()
 		return translate(err)
 	}
 	if h.pos != 0 {
 		if _, err := stream.Seek(h.pos, io.SeekStart); err != nil {
 			stream.Close()
+			release()
 			return err
 		}
 	}
 	h.stream = stream
+	h.release = release
 	return nil
 }
 
@@ -94,12 +103,19 @@ func (h *readHandle) Seek(offset int64, whence int) (int64, error) {
 
 func (h *readHandle) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	var release func()
 	if h.stream != nil {
 		err := h.stream.Close()
 		h.stream = nil
+		release = h.release
+		h.release = nil
+		h.mu.Unlock()
+		if release != nil {
+			release()
+		}
 		return err
 	}
+	h.mu.Unlock()
 	return nil
 }
 
@@ -113,7 +129,9 @@ func (h *readHandle) Write([]byte) (int, error)          { return 0, os.ErrPermi
 // Close, while Telegram needs the total length before the first byte goes out.
 // A pipe bridges the two: the drive's segmented upload runs on its own
 // goroutine, pulling from the pipe as fast as the client fills it, so a
-// multi-gigabyte PUT never lands on disk.
+// multi-gigabyte PUT never lands on disk. The drive acquires the global upload
+// task lease before it starts consuming the pipe, so queued WebDAV PUTs apply
+// backpressure to the client.
 //
 // When the client did declare a Content-Length, that length is used directly
 // and the split happens on exact boundaries. Without one there is no honest

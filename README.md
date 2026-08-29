@@ -42,7 +42,7 @@ docker compose up -d
 
 4. Open `http://localhost:8080` in your browser. Creating the administrator account is enough to enter the drive; Telegram login and channel selection can be completed later from **Settings**.
 
-To upload files already present on the VPS without sending them through your browser, set `TDRIVE_LOCAL_PATH` in `.env`, for example `TDRIVE_LOCAL_PATH=/srv/repository`. Compose mounts it read-only, and the WebUI upload dialog shows it below the browser upload option.
+To upload files already present on the VPS without sending them through your browser, Compose mounts the default host directory `./vps-files` read-only at `/vps`. After signing in as an administrator, open **Settings → Runtime** and set **VPS local upload directory** to `/vps`; the upload dialog will then show it. No `TDRIVE_LOCAL_DIR` environment variable is required. To use another host directory, set Compose's `TDRIVE_LOCAL_PATH`; the WebUI value remains the container-side path `/vps`.
 
 ### Docker
 
@@ -74,9 +74,10 @@ Visit `http://localhost:8080` after launch; a setup wizard will appear on first 
 | `TDRIVE_ADMIN_USER` | *(empty)* | Bootstrap admin username (first run only) |
 | `TDRIVE_ADMIN_PASSWORD` | *(empty)* | Bootstrap admin password (≥8 characters) |
 | `TDRIVE_LOCAL_PATH` | `./vps-files` | Host directory exposed as a read-only VPS upload source in Docker Compose |
-| `TDRIVE_LOCAL_DIR` | *(empty)* | Container-side local source directory; Compose sets this to `/vps` |
 | `TDRIVE_TG_UPLOAD_PART_SIZE` | `512KiB` | Initial Telegram upload part-size fallback before WebUI settings are saved |
 | `TDRIVE_TG_RATE_LIMIT` | `100ms` | Initial Telegram request-interval fallback before WebUI settings are saved |
+| `TDRIVE_UPLOAD_CONCURRENCY` | `2` | Initial whole-file upload task limit before WebUI settings are saved |
+| `TDRIVE_DOWNLOAD_CONCURRENCY` | `2` | Initial whole-file download task limit before WebUI settings are saved |
 
 After logging in as an administrator, configure the remaining runtime settings in **Settings**:
 
@@ -89,12 +90,15 @@ After logging in as an administrator, configure the remaining runtime settings i
 | Telegram connection pool | `8` | MTProto connection pool size |
 | Upload threads | `8` | Concurrent upload threads per segment |
 | Download concurrency | `6` | Concurrent download chunks |
+| Simultaneous upload tasks | `2` | Whole-file upload limit shared by WebUI, VPS, remote URL and WebDAV; excess tasks wait |
+| Simultaneous download tasks | `2` | Whole-file download limit shared by WebUI and WebDAV; excess tasks wait |
+| VPS local upload directory | *(empty)* | Readable directory inside the server/container; Docker Compose mounts it at `/vps` by default; empty disables it |
 | WebDAV | Enabled | Enable or disable the WebDAV mount |
 | Log level | `info` | Runtime log level |
 
 These settings are stored in the SQLite data directory and take effect without restarting the server. The Telegram connection is rebuilt automatically when its pool size or request interval changes.
 
-`TDRIVE_LOCAL_PATH` is the host-side Compose path. With `docker run`, add `-v /srv/repository:/vps:ro -e TDRIVE_LOCAL_DIR=/vps` manually.
+`TDRIVE_LOCAL_PATH` is the host-side Compose path. With `docker run`, add `-v /srv/repository:/vps:ro` manually, then set `/vps` in **Settings → Runtime**; no environment variable is required.
 
 ## WebDAV
 

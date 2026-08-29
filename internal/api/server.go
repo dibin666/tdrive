@@ -194,7 +194,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Telegram:     s.tg.Status(),
 		Version:      tgc.Version,
 		SegmentSize:  s.cfg.RuntimeSettings().SegmentSize,
-		LocalEnabled: s.cfg.Local.Root != "",
+		LocalEnabled: s.cfg.RuntimeSettings().LocalRoot != "",
 	}
 	if s.cfg.RuntimeSettings().WebDAVEnabled {
 		body.WebDAVPath = s.cfg.WebDAV.Prefix

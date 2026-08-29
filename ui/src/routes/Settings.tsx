@@ -41,7 +41,7 @@ interface TabItem {
 
 const TABS: TabItem[] = [
   { id: 'general', label: '常规设置', icon: SlidersHorizontal, desc: 'WebDAV 挂载与存储概览' },
-  { id: 'runtime', label: '运行参数', icon: SlidersHorizontal, desc: '分片、并发与日志设置', adminOnly: true },
+  { id: 'runtime', label: '运行参数', icon: SlidersHorizontal, desc: '本地目录、分片、并发与日志设置', adminOnly: true },
   { id: 'account', label: '账号与安全', icon: KeyRound, desc: '修改密码与用户管理' },
   { id: 'telegram', label: 'Telegram 存储', icon: Send, desc: 'Telegram 账户与存储频道', adminOnly: true },
   { id: 'index', label: '索引与维护', icon: Database, desc: '频道消息扫描与索引重建', adminOnly: true },
@@ -265,12 +265,15 @@ function PasswordSection() {
 
 function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> }) {
   const [settings, setSettings] = useState<RuntimeSettings | null>(null)
+  const [localRoot, setLocalRoot] = useState('')
   const [segmentMiB, setSegmentMiB] = useState('')
   const [uploadPartKiB, setUploadPartKiB] = useState('')
   const [rateLimitMs, setRateLimitMs] = useState('')
   const [poolSize, setPoolSize] = useState('')
   const [uploadThreads, setUploadThreads] = useState('')
   const [streamConcurrency, setStreamConcurrency] = useState('')
+  const [uploadConcurrency, setUploadConcurrency] = useState('')
+  const [downloadConcurrency, setDownloadConcurrency] = useState('')
   const [webdavEnabled, setWebdavEnabled] = useState(true)
   const [logLevel, setLogLevel] = useState('info')
   const [busy, setBusy] = useState(false)
@@ -281,12 +284,15 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
       .settings()
       .then((value) => {
         setSettings(value)
+        setLocalRoot(value.localRoot)
         setSegmentMiB(String(value.segmentSize / (1024 * 1024)))
         setUploadPartKiB(String(value.uploadPartSize / 1024))
         setRateLimitMs(String(value.rateLimitMs))
         setPoolSize(String(value.poolSize))
         setUploadThreads(String(value.uploadThreads))
         setStreamConcurrency(String(value.streamConcurrency))
+        setUploadConcurrency(String(value.uploadConcurrency))
+        setDownloadConcurrency(String(value.downloadConcurrency))
         setWebdavEnabled(value.webdavEnabled)
         setLogLevel(value.logLevel)
       })
@@ -300,8 +306,10 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
     const partKiB = Number(uploadPartKiB)
     const interval = Number(rateLimitMs)
     const pool = Number(poolSize)
-    const uploads = Number(uploadThreads)
+    const uploadWorkers = Number(uploadThreads)
     const streams = Number(streamConcurrency)
+    const uploadTasks = Number(uploadConcurrency)
+    const downloadTasks = Number(downloadConcurrency)
     if (!Number.isFinite(segment) || segment <= 0 || !Number.isInteger(segment * 2) || segment > 2000) {
       setError('分片大小应为 0.5 到 2000 MiB 之间、以 0.5 MiB 为步长')
       return
@@ -325,7 +333,7 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
       setError('Telegram 请求间隔必须是 1 到 60000 毫秒之间的整数')
       return
     }
-    if (![pool, uploads, streams].every((value) => Number.isInteger(value) && value >= 1)) {
+    if (![pool, uploadWorkers, streams, uploadTasks, downloadTasks].every((value) => Number.isInteger(value) && value >= 1)) {
       setError('并发参数必须是大于等于 1 的整数')
       return
     }
@@ -334,22 +342,28 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
     setError(null)
     try {
       const saved = await api.updateSettings({
+        localRoot: localRoot.trim(),
         segmentSize: Math.round(segment * 1024 * 1024),
         uploadPartSize: partBytes,
         rateLimitMs: interval,
         poolSize: pool,
-        uploadThreads: uploads,
+        uploadThreads: uploadWorkers,
         streamConcurrency: streams,
+        uploadConcurrency: uploadTasks,
+        downloadConcurrency: downloadTasks,
         webdavEnabled,
         logLevel,
       })
       setSettings(saved)
+      setLocalRoot(saved.localRoot)
       setSegmentMiB(String(saved.segmentSize / (1024 * 1024)))
       setUploadPartKiB(String(saved.uploadPartSize / 1024))
       setRateLimitMs(String(saved.rateLimitMs))
       setPoolSize(String(saved.poolSize))
       setUploadThreads(String(saved.uploadThreads))
       setStreamConcurrency(String(saved.streamConcurrency))
+      setUploadConcurrency(String(saved.uploadConcurrency))
+      setDownloadConcurrency(String(saved.downloadConcurrency))
       setWebdavEnabled(saved.webdavEnabled)
       setLogLevel(saved.logLevel)
       await onChanged()
@@ -367,12 +381,23 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
     <Section
       icon={<SlidersHorizontal size={16} />}
       title="运行参数"
-      description="调整存储分片、Telegram 上传参数、上传下载并发、WebDAV 和日志级别。修改会立即生效；分片大小只影响新上传的文件。"
+      description="调整 VPS 本地目录、存储分片、Telegram 上传参数、上传下载并发、WebDAV 和日志级别。修改会立即生效；分片大小只影响新上传的文件。"
     >
       {settings === null ? (
         error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : <Spinner />
       ) : (
         <div className="space-y-4">
+          <Field
+            label="VPS 本地上传目录"
+            hint="填写服务器（或容器）内可读取的目录；留空禁用。Docker 默认挂载路径为 /vps"
+          >
+            <Input
+              value={localRoot}
+              placeholder="/vps"
+              onChange={(e) => setLocalRoot(e.target.value)}
+              className="font-[family-name:var(--font-mono)] text-xs"
+            />
+          </Field>
           <Field
             label="存储分片大小（MiB）"
             hint={`范围 0.5–${segmentLimitMiB}，步长 0.5；已有文件不受影响`}
@@ -434,6 +459,26 @@ function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> 
                 step="1"
                 value={streamConcurrency}
                 onChange={(e) => setStreamConcurrency(e.target.value)}
+              />
+            </Field>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="同时上传任务数" hint="WebUI、VPS、远程下载和 WebDAV 共享；超出后等待">
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={uploadConcurrency}
+                onChange={(e) => setUploadConcurrency(e.target.value)}
+              />
+            </Field>
+            <Field label="同时下载任务数" hint="WebUI 预览、下载和 WebDAV 读取共享；超出后等待">
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={downloadConcurrency}
+                onChange={(e) => setDownloadConcurrency(e.target.value)}
               />
             </Field>
           </div>

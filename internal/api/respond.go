@@ -56,6 +56,8 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, drive.ErrLoop), errors.Is(err, drive.ErrIsDir), errors.Is(err, drive.ErrNotDir):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, drive.ErrUploadTaskClosed):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, auth.ErrBadCredentials):
 		writeError(w, http.StatusUnauthorized, err.Error())
 	case errors.Is(err, auth.ErrWeakPassword):

@@ -27,7 +27,8 @@ type LocalRequest struct {
 // so a pending job can be resumed after a process restart without exposing the
 // container's absolute path to the database or WebUI.
 func (s *Service) StartLocal(ctx context.Context, req LocalRequest) (database.UploadJob, error) {
-	source := localfs.New(s.cfg.Local.Root)
+	localRoot := s.cfg.RuntimeSettings().LocalRoot
+	source := localfs.New(localRoot)
 	entry, err := source.Stat(req.SourcePath)
 	if err != nil {
 		return database.UploadJob{}, err
@@ -58,15 +59,22 @@ func (s *Service) StartLocal(ctx context.Context, req LocalRequest) (database.Up
 		return database.UploadJob{}, err
 	}
 
-	go s.runLocal(context.WithoutCancel(ctx), job, entry.Path)
+	go s.runLocal(context.WithoutCancel(ctx), job, localRoot, entry.Path)
 	return job, nil
 }
 
 // runLocal reads the source sequentially, uploading the same segment
 // granularity used by server-side URL fetches. It deliberately reopens the
 // source in the goroutine so the HTTP request does not own a file descriptor.
-func (s *Service) runLocal(ctx context.Context, job database.UploadJob, sourcePath string) {
-	source := localfs.New(s.cfg.Local.Root)
+func (s *Service) runLocal(ctx context.Context, job database.UploadJob, localRoot, sourcePath string) {
+	release, err := s.acquireUploadTask(ctx)
+	if err != nil {
+		s.failLocal(ctx, job, err)
+		return
+	}
+	defer release()
+
+	source := localfs.New(localRoot)
 	fileHandle, info, err := source.Open(sourcePath)
 	if err != nil {
 		s.failLocal(ctx, job, err)

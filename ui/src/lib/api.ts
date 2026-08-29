@@ -84,12 +84,15 @@ export interface LocalListing {
 export interface RuntimeSettings {
   appId: number
   appHash: string
+  localRoot: string
   segmentSize: number
   poolSize: number
   uploadThreads: number
   uploadPartSize: number
   rateLimitMs: number
   streamConcurrency: number
+  uploadConcurrency: number
+  downloadConcurrency: number
   webdavEnabled: boolean
   logLevel: string
 }

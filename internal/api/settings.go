@@ -13,46 +13,56 @@ import (
 )
 
 // settingsBody is intentionally limited to values that are safe to change
-// while the server is running. Paths, the listen address and bootstrap account
-// stay deployment-only environment settings.
+// while the server is running. The local source path is the one exception to
+// the usual deployment-only path rule: an administrator can point it at an
+// already-mounted VPS directory without restarting the server.
 type settingsBody struct {
-	AppID             int    `json:"appId"`
-	AppHash           string `json:"appHash"`
-	SegmentSize       int64  `json:"segmentSize"`
-	PoolSize          int64  `json:"poolSize"`
-	UploadThreads     int    `json:"uploadThreads"`
-	UploadPartSize    int64  `json:"uploadPartSize"`
-	RateLimitMs       int64  `json:"rateLimitMs"`
-	StreamConcurrency int    `json:"streamConcurrency"`
-	WebDAVEnabled     bool   `json:"webdavEnabled"`
-	LogLevel          string `json:"logLevel"`
+	AppID               int    `json:"appId"`
+	AppHash             string `json:"appHash"`
+	LocalRoot           string `json:"localRoot"`
+	SegmentSize         int64  `json:"segmentSize"`
+	PoolSize            int64  `json:"poolSize"`
+	UploadThreads       int    `json:"uploadThreads"`
+	UploadPartSize      int64  `json:"uploadPartSize"`
+	RateLimitMs         int64  `json:"rateLimitMs"`
+	StreamConcurrency   int    `json:"streamConcurrency"`
+	UploadConcurrency   int    `json:"uploadConcurrency"`
+	DownloadConcurrency int    `json:"downloadConcurrency"`
+	WebDAVEnabled       bool   `json:"webdavEnabled"`
+	LogLevel            string `json:"logLevel"`
 }
 
 type settingsUpdateRequest struct {
-	AppID             *int    `json:"appId"`
-	AppHash           *string `json:"appHash"`
-	SegmentSize       *int64  `json:"segmentSize"`
-	PoolSize          *int64  `json:"poolSize"`
-	UploadThreads     *int    `json:"uploadThreads"`
-	UploadPartSize    *int64  `json:"uploadPartSize"`
-	RateLimitMs       *int64  `json:"rateLimitMs"`
-	StreamConcurrency *int    `json:"streamConcurrency"`
-	WebDAVEnabled     *bool   `json:"webdavEnabled"`
-	LogLevel          *string `json:"logLevel"`
+	AppID               *int    `json:"appId"`
+	AppHash             *string `json:"appHash"`
+	LocalRoot           *string `json:"localRoot"`
+	SegmentSize         *int64  `json:"segmentSize"`
+	PoolSize            *int64  `json:"poolSize"`
+	UploadThreads       *int    `json:"uploadThreads"`
+	UploadPartSize      *int64  `json:"uploadPartSize"`
+	RateLimitMs         *int64  `json:"rateLimitMs"`
+	StreamConcurrency   *int    `json:"streamConcurrency"`
+	UploadConcurrency   *int    `json:"uploadConcurrency"`
+	DownloadConcurrency *int    `json:"downloadConcurrency"`
+	WebDAVEnabled       *bool   `json:"webdavEnabled"`
+	LogLevel            *string `json:"logLevel"`
 }
 
 func toSettingsBody(s config.RuntimeSettings) settingsBody {
 	return settingsBody{
-		AppID:             s.AppID,
-		AppHash:           s.AppHash,
-		SegmentSize:       s.SegmentSize,
-		PoolSize:          s.PoolSize,
-		UploadThreads:     s.UploadThreads,
-		UploadPartSize:    s.UploadPartSize,
-		RateLimitMs:       s.RateLimit.Milliseconds(),
-		StreamConcurrency: s.StreamConcurrency,
-		WebDAVEnabled:     s.WebDAVEnabled,
-		LogLevel:          s.LogLevel,
+		AppID:               s.AppID,
+		AppHash:             s.AppHash,
+		LocalRoot:           s.LocalRoot,
+		SegmentSize:         s.SegmentSize,
+		PoolSize:            s.PoolSize,
+		UploadThreads:       s.UploadThreads,
+		UploadPartSize:      s.UploadPartSize,
+		RateLimitMs:         s.RateLimit.Milliseconds(),
+		StreamConcurrency:   s.StreamConcurrency,
+		UploadConcurrency:   s.UploadConcurrency,
+		DownloadConcurrency: s.DownloadConcurrency,
+		WebDAVEnabled:       s.WebDAVEnabled,
+		LogLevel:            s.LogLevel,
 	}
 }
 
@@ -79,6 +89,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.AppHash != nil {
 		next.AppHash = strings.TrimSpace(*req.AppHash)
 	}
+	if req.LocalRoot != nil {
+		localRoot, err := config.NormalizeLocalRoot(*req.LocalRoot)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		next.LocalRoot = localRoot
+	}
 	if req.SegmentSize != nil {
 		next.SegmentSize = *req.SegmentSize
 	}
@@ -100,6 +118,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.StreamConcurrency != nil {
 		next.StreamConcurrency = *req.StreamConcurrency
+	}
+	if req.UploadConcurrency != nil {
+		next.UploadConcurrency = *req.UploadConcurrency
+	}
+	if req.DownloadConcurrency != nil {
+		next.DownloadConcurrency = *req.DownloadConcurrency
 	}
 	if req.WebDAVEnabled != nil {
 		next.WebDAVEnabled = *req.WebDAVEnabled
@@ -124,16 +148,19 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	values := map[string]string{
-		config.SettingTGAppID:           strconv.Itoa(next.AppID),
-		config.SettingTGAppHash:         next.AppHash,
-		config.SettingSegmentSize:       strconv.FormatInt(next.SegmentSize, 10),
-		config.SettingTGPoolSize:        strconv.FormatInt(next.PoolSize, 10),
-		config.SettingUploadThreads:     strconv.Itoa(next.UploadThreads),
-		config.SettingTGUploadPartSize:  strconv.FormatInt(next.UploadPartSize, 10),
-		config.SettingTGRateLimit:       next.RateLimit.String(),
-		config.SettingStreamConcurrency: strconv.Itoa(next.StreamConcurrency),
-		config.SettingWebDAVEnabled:     strconv.FormatBool(next.WebDAVEnabled),
-		config.SettingLogLevel:          next.LogLevel,
+		config.SettingTGAppID:             strconv.Itoa(next.AppID),
+		config.SettingTGAppHash:           next.AppHash,
+		config.SettingLocalRoot:           next.LocalRoot,
+		config.SettingSegmentSize:         strconv.FormatInt(next.SegmentSize, 10),
+		config.SettingTGPoolSize:          strconv.FormatInt(next.PoolSize, 10),
+		config.SettingUploadThreads:       strconv.Itoa(next.UploadThreads),
+		config.SettingTGUploadPartSize:    strconv.FormatInt(next.UploadPartSize, 10),
+		config.SettingTGRateLimit:         next.RateLimit.String(),
+		config.SettingStreamConcurrency:   strconv.Itoa(next.StreamConcurrency),
+		config.SettingUploadConcurrency:   strconv.Itoa(next.UploadConcurrency),
+		config.SettingDownloadConcurrency: strconv.Itoa(next.DownloadConcurrency),
+		config.SettingWebDAVEnabled:       strconv.FormatBool(next.WebDAVEnabled),
+		config.SettingLogLevel:            next.LogLevel,
 	}
 	if err := s.db.SetSettings(r.Context(), values); err != nil {
 		s.fail(w, err, "save settings")
@@ -141,6 +168,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.cfg.SetRuntimeSettings(next)
+	s.drive.SetTransferConcurrency(next.UploadConcurrency, next.DownloadConcurrency)
 	if s.setLogLevel != nil && next.LogLevel != current.LogLevel {
 		if err := s.setLogLevel(next.LogLevel); err != nil {
 			s.fail(w, err, "apply log level")

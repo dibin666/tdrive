@@ -21,7 +21,7 @@ func (s *Server) handleLocalList(w http.ResponseWriter, r *http.Request) {
 		requestPath = drive.Root
 	}
 
-	entries, clean, err := localfs.New(s.cfg.Local.Root).List(requestPath)
+	entries, clean, err := localfs.New(s.cfg.RuntimeSettings().LocalRoot).List(requestPath)
 	if err != nil {
 		s.fail(w, err, "list local files")
 		return

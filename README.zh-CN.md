@@ -42,8 +42,10 @@ docker compose up -d
 
 4. 打开浏览器访问 `http://localhost:8080`，先创建管理员账号即可进入网盘；Telegram 登录和频道选择可以稍后在“设置”中完成。
 
-如需从 VPS 直接上传已有文件，把 `.env` 中的 `TDRIVE_LOCAL_PATH` 设置为宿主机目录，例如
-`TDRIVE_LOCAL_PATH=/srv/repository`。Compose 会以只读方式挂载它，点击 WebUI 的“上传”后，弹窗下方会显示该目录。
+如需从 VPS 直接上传已有文件，Compose 默认会把宿主机的 `./vps-files` 以只读方式挂载到容器的
+`/vps`。登录管理员账号后，打开 WebUI“设置 → 运行参数”，把“VPS 本地上传目录”设置为
+`/vps`，上传弹窗中就可以浏览该目录；不需要设置 `TDRIVE_LOCAL_DIR` 环境变量。若要换宿主机目录，
+只需设置 Compose 的 `TDRIVE_LOCAL_PATH`，WebUI 中仍填写容器内的 `/vps`。
 
 ### Docker
 
@@ -74,10 +76,11 @@ TDRIVE_DATA_DIR=./data ./tdrive
 | `TDRIVE_BASE_URL` | *（空）* | 外部可达地址（反向代理时设置） |
 | `TDRIVE_ADMIN_USER` | *（空）* | 初始管理员用户名（仅首次生效） |
 | `TDRIVE_ADMIN_PASSWORD` | *（空）* | 初始管理员密码（≥8 位） |
-| `TDRIVE_LOCAL_PATH` | `./vps-files` | Docker 宿主机上用于 VPS 文件上传的目录；以只读方式挂载 |
-| `TDRIVE_LOCAL_DIR` | *（空）* | 应用容器内对应的本地目录；Compose 默认使用 `/vps` |
+| `TDRIVE_LOCAL_PATH` | `./vps-files` | Docker Compose 宿主机上用于 VPS 文件上传的目录；以只读方式挂载 |
 | `TDRIVE_TG_UPLOAD_PART_SIZE` | `512KiB` | WebUI 首次配置前的 Telegram 上传分片默认值 |
 | `TDRIVE_TG_RATE_LIMIT` | `100ms` | WebUI 首次配置前的 Telegram 请求间隔默认值 |
+| `TDRIVE_UPLOAD_CONCURRENCY` | `2` | WebUI 首次配置前的同时上传任务数默认值 |
+| `TDRIVE_DOWNLOAD_CONCURRENCY` | `2` | WebUI 首次配置前的同时下载任务数默认值 |
 
 使用管理员账号登录后，其余运行参数可在 WebUI 的“设置”中配置：
 
@@ -90,13 +93,16 @@ TDRIVE_DATA_DIR=./data ./tdrive
 | Telegram 连接池 | `8` | MTProto 连接池大小 |
 | 上传线程 | `8` | 单分片内并发上传线程 |
 | 下载并发块数 | `6` | 并发下载块数 |
+| 同时上传任务数 | `2` | WebUI、VPS、远程下载和 WebDAV 共享的整文件上传上限；超出后等待 |
+| 同时下载任务数 | `2` | WebUI 和 WebDAV 共享的整文件下载上限；超出后等待 |
+| VPS 本地上传目录 | *（空）* | 服务器或容器内的可读目录；Docker Compose 默认挂载路径为 `/vps`，留空则禁用 |
 | WebDAV | 启用 | 启用或禁用 WebDAV 挂载 |
 | 日志级别 | `info` | 运行时日志级别 |
 
 这些设置会保存在 SQLite 数据目录中，并且无需重启服务即可生效。连接池大小或请求间隔变化时，Telegram 连接会自动重建。
 
 `TDRIVE_LOCAL_PATH` 是 Docker Compose 的宿主机路径，不是容器内路径。若使用 `docker run`，请手动添加
-`-v /srv/repository:/vps:ro -e TDRIVE_LOCAL_DIR=/vps`。
+`-v /srv/repository:/vps:ro`，然后在 WebUI“设置 → 运行参数”中填写 `/vps`；不需要设置环境变量。
 
 ## WebDAV
 

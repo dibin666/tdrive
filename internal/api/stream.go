@@ -75,24 +75,41 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	setDisposition(w, r, file.Name)
 
 	start, end, ok := parseRange(r.Header.Get("Range"), file.Size)
-	switch {
-	case !ok:
+	if !ok {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", file.Size))
 		writeError(w, http.StatusRequestedRangeNotSatisfiable, "the requested range is not satisfiable")
 		return
-	case start == 0 && end == file.Size-1:
+	}
+
+	full := file.Size == 0 || (start == 0 && end == file.Size-1)
+	if full {
 		w.Header().Set("Content-Length", strconv.FormatInt(file.Size, 10))
-	default:
+	} else {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, file.Size))
 		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
-		w.WriteHeader(http.StatusPartialContent)
 	}
 
 	if r.Method == http.MethodHead {
+		if !full {
+			w.WriteHeader(http.StatusPartialContent)
+		}
 		return
 	}
 	if file.Size == 0 {
 		return
+	}
+
+	// One raw response is one download task. The lease is held until the
+	// response copy ends, so a WebUI download, preview, or another client
+	// cannot bypass the configured whole-file limit.
+	release, err := s.drive.AcquireDownloadTask(r.Context())
+	if err != nil {
+		s.fail(w, err, "open file")
+		return
+	}
+	defer release()
+	if !full {
+		w.WriteHeader(http.StatusPartialContent)
 	}
 
 	reader, err := s.drive.OpenFile(r.Context(), file)

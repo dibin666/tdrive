@@ -10,24 +10,24 @@ services:
       # this volume is recoverable — the drive rebuilds from the channel — but
       # it means logging in to Telegram again.
       - tdrive-data:/data
-      # Read-only VPS source directory. Set TDRIVE_LOCAL_PATH in .env to the
-      # host directory whose files should be available in the upload dialog.
+      # Read-only VPS source directory. Set TDRIVE_LOCAL_PATH in .env only if
+      # the host directory is not the default ./vps-files. The application-side
+      # path is selected in WebUI Settings and defaults to /vps in this mount.
       - ${TDRIVE_LOCAL_PATH:-./vps-files}:/vps:ro
     environment:
       # Seeds the first administrator. Remove both once the account exists;
       # they are ignored after the first run.
       TDRIVE_ADMIN_USER: ${TDRIVE_ADMIN_USER:-admin}
       TDRIVE_ADMIN_PASSWORD: ${TDRIVE_ADMIN_PASSWORD:?set this in .env}
-      # This is the path inside the container; the host side is the volume
-      # above. Remove the volume and this variable to disable local uploads.
-      TDRIVE_LOCAL_DIR: /vps
       # Set this when behind a reverse proxy so session cookies are marked
       # Secure and the WebDAV address shown in settings is correct.
       TDRIVE_BASE_URL: ${TDRIVE_BASE_URL:-}
-      # Optional initial Telegram upload defaults; saved WebUI settings take
-      # precedence after the first change.
+      # Optional initial runtime defaults; saved WebUI settings take precedence
+      # after the first change.
       TDRIVE_TG_UPLOAD_PART_SIZE: ${TDRIVE_TG_UPLOAD_PART_SIZE:-512KiB}
       TDRIVE_TG_RATE_LIMIT: ${TDRIVE_TG_RATE_LIMIT:-100ms}
+      TDRIVE_UPLOAD_CONCURRENCY: ${TDRIVE_UPLOAD_CONCURRENCY:-2}
+      TDRIVE_DOWNLOAD_CONCURRENCY: ${TDRIVE_DOWNLOAD_CONCURRENCY:-2}
 
 volumes:
   tdrive-data:

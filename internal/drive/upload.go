@@ -286,12 +286,17 @@ func (s *Service) Complete(ctx context.Context, jobID string) (database.File, er
 	if err := s.db.SetJobStatus(ctx, jobID, database.JobComplete, ""); err != nil {
 		return database.File{}, err
 	}
+	// Only a successful completion closes a browser lease. A missing segment
+	// or a transient database error must leave the job retryable.
+	s.ReleaseUploadJob(jobID)
 	return s.db.FileByID(ctx, job.FileID)
 }
 
 // Abort tears down a failed or cancelled upload, removing whatever segments did
 // land so the channel is not left holding documents nothing points at.
 func (s *Service) Abort(ctx context.Context, jobID, reason string, status database.JobStatus) error {
+	defer s.ReleaseUploadJob(jobID)
+
 	job, err := s.db.JobByID(ctx, jobID)
 	if err != nil {
 		return err
@@ -316,6 +321,18 @@ func (s *Service) Abort(ctx context.Context, jobID, reason string, status databa
 // of order. Parallel segments are available to callers that can seek, which in
 // practice means the browser slicing a local file.
 func (s *Service) UploadStream(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
+	release, err := s.acquireUploadTask(ctx)
+	if err != nil {
+		return database.File{}, err
+	}
+	defer release()
+
+	return s.uploadStream(ctx, req, r, progress)
+}
+
+// uploadStream is the implementation shared by known-size and unsized
+// uploads. Callers must already hold the task slot before entering it.
+func (s *Service) uploadStream(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
 	job, file, err := s.Begin(ctx, req)
 	if err != nil {
 		return database.File{}, err
@@ -369,6 +386,12 @@ func (s *Service) UploadStream(ctx context.Context, req UploadRequest, r io.Read
 // cannot be told the size afterwards. Callers that do know the length should
 // use UploadStream and skip the disk entirely.
 func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
+	release, err := s.acquireUploadTask(ctx)
+	if err != nil {
+		return database.File{}, err
+	}
+	defer release()
+
 	if err := os.MkdirAll(s.cfg.Storage.SpoolDir, 0o750); err != nil {
 		return database.File{}, fmt.Errorf("create spool directory: %w", err)
 	}
@@ -393,7 +416,7 @@ func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Rea
 	}
 
 	req.Size = size
-	return s.UploadStream(ctx, req, spool, progress)
+	return s.uploadStream(ctx, req, spool, progress)
 }
 
 // PutSegmentsParallel uploads several independently-sourced segments at once.
@@ -405,6 +428,12 @@ func (s *Service) PutSegmentsParallel(
 	segments map[int]io.Reader,
 	progress Progress,
 ) error {
+	release, err := s.acquireUploadTask(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	file, err := s.db.FileByID(ctx, job.FileID)
 	if err != nil {
 		return err

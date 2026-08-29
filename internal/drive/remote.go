@@ -95,7 +95,7 @@ func (s *Service) ResumeRemotes(ctx context.Context) {
 			s.log.Info("resuming a local transfer",
 				zap.String("job", job.ID), zap.String("name", job.Name),
 				zap.Ints("segments", job.PendingSegments()))
-			go s.runLocal(context.WithoutCancel(ctx), job, job.SourceURL)
+			go s.runLocal(context.WithoutCancel(ctx), job, s.cfg.RuntimeSettings().LocalRoot, job.SourceURL)
 			continue
 		}
 		target, err := url.Parse(job.SourceURL)
@@ -117,6 +117,13 @@ func (s *Service) ResumeRemotes(ctx context.Context) {
 // same granularity the browser uploads at, which keeps one recovery story for
 // both paths.
 func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target *url.URL) {
+	release, err := s.acquireUploadTask(ctx)
+	if err != nil {
+		s.failRemote(ctx, job, err)
+		return
+	}
+	defer release()
+
 	if err := s.db.SetJobStatus(ctx, job.ID, database.JobRunning, ""); err != nil {
 		s.log.Warn("could not mark a transfer running", zap.String("job", job.ID), zap.Error(err))
 	}
