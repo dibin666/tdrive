@@ -1,0 +1,9 @@
+.git
+.github
+ui/node_modules
+ui/dist
+data
+*.db
+*.db-wal
+*.db-shm
+tdrive

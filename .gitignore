@@ -1,0 +1,7 @@
+/ui/dist/
+/ui/node_modules/
+/data/
+*.db
+*.db-wal
+*.db-shm
+/tdrive

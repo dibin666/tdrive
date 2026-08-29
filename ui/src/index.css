@@ -1,0 +1,318 @@
+@import 'tailwindcss';
+
+/* Claude's visual language, written down as tokens so the whole interface
+   stays coherent instead of drifting toward generic dashboard grey.
+
+   The character comes from three decisions: a warm bone paper rather than
+   white, a single clay accent used sparingly, and separation carried by
+   1px low-contrast rules instead of shadows and fills. */
+
+@theme {
+  /* Paper and ink. The light background is warm off-white; the dark one is a
+     warm near-black rather than a cool slate, so the accent stays at home in
+     both. */
+  --color-paper: #faf9f5;
+  --color-surface: #ffffff;
+  --color-surface-sunk: #f2f0e9;
+  --color-line: #e5e3dc;
+  --color-line-strong: #d5d2c7;
+  --color-ink: #1f1e1d;
+  --color-ink-muted: #6b6963;
+  --color-ink-faint: #97948b;
+
+  --color-paper-dark: #262624;
+  --color-surface-dark: #30302e;
+  --color-surface-sunk-dark: #212120;
+  --color-line-dark: #3d3d3a;
+  --color-line-strong-dark: #4d4d49;
+  --color-ink-dark: #f5f4ee;
+  --color-ink-muted-dark: #a3a096;
+  --color-ink-faint-dark: #7c7a72;
+
+  /* Clay: the one saturated colour in the interface. Everything that is not
+     an action stays neutral so that what is an action reads instantly. */
+  --color-clay: #d97757;
+  --color-clay-hover: #c56647;
+  --color-clay-soft: #f4e6df;
+  --color-clay-soft-dark: #3a2a24;
+
+  --color-danger: #b4462f;
+  --color-danger-soft: #f6e3de;
+  --color-danger-soft-dark: #3b241f;
+  --color-success: #4a7c59;
+  --color-warn: #a2762f;
+
+  --font-sans: 'Inter var', 'Inter', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-serif: 'Source Serif 4', 'Songti SC', Georgia, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-panel: 16px;
+
+  /* Motion is short and only ever touches opacity and transform, so it never
+     costs a layout pass. */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  :root {
+    --bg: var(--color-paper);
+    --surface: var(--color-surface);
+    --sunk: var(--color-surface-sunk);
+    --line: var(--color-line);
+    --line-strong: var(--color-line-strong);
+    --ink: var(--color-ink);
+    --muted: var(--color-ink-muted);
+    --faint: var(--color-ink-faint);
+    --clay-soft: var(--color-clay-soft);
+    --danger-soft: var(--color-danger-soft);
+  }
+
+  .dark {
+    --bg: var(--color-paper-dark);
+    --surface: var(--color-surface-dark);
+    --sunk: var(--color-surface-sunk-dark);
+    --line: var(--color-line-dark);
+    --line-strong: var(--color-line-strong-dark);
+    --ink: var(--color-ink-dark);
+    --muted: var(--color-ink-muted-dark);
+    --faint: var(--color-ink-faint-dark);
+    --clay-soft: var(--color-clay-soft-dark);
+    --danger-soft: var(--color-danger-soft-dark);
+  }
+
+  html,
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* Prevent the rubber-band scroll that makes a full-height app feel
+       broken on iOS. */
+    overscroll-behavior: none;
+  }
+
+  * {
+    border-color: var(--line);
+  }
+
+  /* A visible ring on keyboard focus only. Mouse users get nothing, keyboard
+     users get an unmissable clay ring. */
+  :focus-visible {
+    outline: 2px solid var(--color-clay);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--clay-soft);
+    color: var(--ink);
+  }
+
+  /* Scrollbars, restrained. The default on Windows is loud enough to break
+     the calm the rest of the palette is going for. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
+    background-clip: content-box;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .surface {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-card);
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-panel);
+  }
+
+  /* Buttons. The clay fill is reserved for the single primary action on a
+     screen; everything else is a quiet outline or a bare ghost. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: var(--radius-control);
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1;
+    padding: 0.5625rem 0.875rem;
+    transition:
+      background-color 160ms var(--ease-out-soft),
+      color 160ms var(--ease-out-soft),
+      border-color 160ms var(--ease-out-soft),
+      opacity 160ms var(--ease-out-soft);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--color-clay);
+    color: #fff;
+    border: 1px solid transparent;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--color-clay-hover);
+  }
+
+  .btn-outline {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--line-strong);
+  }
+  .btn-outline:hover:not(:disabled) {
+    background: var(--sunk);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid transparent;
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--sunk);
+    color: var(--ink);
+  }
+
+  .btn-danger {
+    background: transparent;
+    color: var(--color-danger);
+    border: 1px solid transparent;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--danger-soft);
+  }
+
+  .input {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-control);
+    padding: 0.5625rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--ink);
+    transition:
+      border-color 160ms var(--ease-out-soft),
+      box-shadow 160ms var(--ease-out-soft);
+  }
+  .input::placeholder {
+    color: var(--faint);
+  }
+  .input:focus {
+    outline: none;
+    border-color: var(--color-clay);
+    box-shadow: 0 0 0 3px var(--clay-soft);
+  }
+
+  .label {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--muted);
+    margin-bottom: 0.375rem;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-control);
+    transition: background-color 120ms var(--ease-out-soft);
+  }
+  .row:hover {
+    background: var(--sunk);
+  }
+  .row[data-selected='true'] {
+    background: var(--clay-soft);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    padding: 0.125rem 0.4375rem;
+    border-radius: 999px;
+    background: var(--sunk);
+    color: var(--muted);
+    border: 1px solid var(--line);
+  }
+
+  .display {
+    font-family: var(--font-serif);
+    font-weight: 400;
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer utilities {
+  .fade-in {
+    animation: fade-in 200ms var(--ease-out-soft) both;
+  }
+  .rise-in {
+    animation: rise-in 220ms var(--ease-out-soft) both;
+  }
+  .sheet-in {
+    animation: sheet-in 240ms var(--ease-out-soft) both;
+  }
+  /* Respect a device's safe area so the mobile bottom bar clears the home
+     indicator. */
+  .pb-safe {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+}

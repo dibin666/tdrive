@@ -1,0 +1,26 @@
+services:
+  tdrive:
+    image: ghcr.io/OWNER/tdrive:latest
+    container_name: tdrive
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # The SQLite index, the Telegram session and the upload spool. Losing
+      # this volume is recoverable — the drive rebuilds from the channel — but
+      # it means logging in to Telegram again.
+      - tdrive-data:/data
+    environment:
+      # Seeds the first administrator. Remove both once the account exists;
+      # they are ignored after the first run.
+      TDRIVE_ADMIN_USER: ${TDRIVE_ADMIN_USER:-admin}
+      TDRIVE_ADMIN_PASSWORD: ${TDRIVE_ADMIN_PASSWORD:?set this in .env}
+      # Optional: skip the credentials step of the setup wizard.
+      TDRIVE_TG_APP_ID: ${TDRIVE_TG_APP_ID:-}
+      TDRIVE_TG_APP_HASH: ${TDRIVE_TG_APP_HASH:-}
+      # Set this when behind a reverse proxy so session cookies are marked
+      # Secure and the WebDAV address shown in settings is correct.
+      TDRIVE_BASE_URL: ${TDRIVE_BASE_URL:-}
+
+volumes:
+  tdrive-data:
