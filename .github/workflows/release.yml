@@ -1,4 +1,4 @@
-name: publish
+name: release
 
 on:
   push:
@@ -7,14 +7,10 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 concurrency:
-  group: publish-main
+  group: release-main
   cancel-in-progress: false
-
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   version:
@@ -68,91 +64,48 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-  build-image:
-    name: Build ${{ matrix.arch }} image
+  dispatch-docker:
+    name: Start Docker image publish
     needs: version
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
+    permissions:
+      actions: write
 
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push architecture image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/${{ matrix.arch }}
-          push: true
-          tags: ${{ env.IMAGE }}:${{ needs.version.outputs.version }}-${{ matrix.arch }}
-          build-args: |
-            VERSION=${{ needs.version.outputs.version }}
-          cache-from: type=gha,scope=publish-docker-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=publish-docker-${{ matrix.arch }}
-
-  publish-image:
-    name: Publish Docker tags
-    needs: [version, build-image]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create multi-platform tags
+      - name: Dispatch Docker workflow
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          minor="${VERSION%.*}"
-          source="${IMAGE}:${VERSION}"
-
-          for tag in latest "$VERSION" "$minor"; do
-            docker buildx imagetools create \
-              --tag "${IMAGE}:${tag}" \
-              "$source-amd64" \
-              "$source-arm64"
-          done
-
-      - name: Verify Docker tags
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          minor="${VERSION%.*}"
-          for tag in latest "$VERSION" "$minor"; do
-            docker buildx imagetools inspect "${IMAGE}:${tag}"
-          done
+          gh workflow run docker.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            -f version="$VERSION" \
+            -f tag="$TAG" \
+            -f sha="$SHA"
 
   build-binary:
-    name: Build ${{ matrix.arch }} binary
+    name: Build ${{ matrix.goos }} ${{ matrix.goarch }} binary
     needs: version
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          - goos: linux
+            goarch: amd64
             asset: linux-amd64
-          - arch: arm64
+          - goos: linux
+            goarch: arm64
             asset: linux-arm64
+          - goos: windows
+            goarch: amd64
+            asset: windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            asset: windows-arm64.exe
 
     steps:
       - uses: actions/checkout@v7
@@ -180,13 +133,14 @@ jobs:
 
       - name: Build binary
         env:
-          GOARCH: ${{ matrix.arch }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ needs.version.outputs.version }}
           ASSET: ${{ matrix.asset }}
         run: |
           set -euo pipefail
           mkdir -p release
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
+          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
             go build -trimpath -ldflags="-s -w -X main.version=$VERSION" \
             -o "release/tdrive-$ASSET" ./cmd/tdrive
 
