@@ -59,6 +59,8 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		writeJSON(w, http.StatusPreconditionRequired, errorBody{
 			Error: err.Error(), Code: "telegram_unauthorized",
 		})
+	case errors.Is(err, tgc.ErrInvalidSession):
+		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		var pathErr *drive.PathError
 		if errors.As(err, &pathErr) {

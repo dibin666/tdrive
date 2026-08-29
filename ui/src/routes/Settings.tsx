@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import clsx from 'clsx'
 import {
   Copy,
   Database,
+  Download,
   HardDrive,
   KeyRound,
   LogOut,
@@ -10,10 +11,11 @@ import {
   Send,
   SlidersHorizontal,
   Trash2,
+  Upload,
   UserPlus,
   Users,
 } from 'lucide-react'
-import { api, type IndexStatus, type Stats, type User } from '../lib/api'
+import { api, type IndexStatus, type Stats, type TelegramAccountExport, type User } from '../lib/api'
 import { events } from '../lib/events'
 import { formatBytes } from '../lib/format'
 import { useApp } from '../app/context'
@@ -286,6 +288,8 @@ function TelegramSection({ onChanged }: { onChanged: () => Promise<void> }) {
         <LoginStep onDone={onChanged} />
       )}
 
+      <TelegramAccountMigration ready={tg.state === 'ready'} onChanged={onChanged} />
+
       <Modal
         open={showChannel}
         onClose={() => setShowChannel(false)}
@@ -301,6 +305,98 @@ function TelegramSection({ onChanged }: { onChanged: () => Promise<void> }) {
         />
       </Modal>
     </Section>
+  )
+}
+
+function TelegramAccountMigration({
+  ready,
+  onChanged,
+}: {
+  ready: boolean
+  onChanged: () => Promise<void>
+}) {
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+
+  const exportAccount = async () => {
+    setBusy(true)
+    try {
+      const account = await api.exportTelegramAccount()
+      const blob = new Blob([JSON.stringify(account, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'tdrive-telegram-account.json'
+      link.style.display = 'none'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 0)
+      toast('Telegram 账号已导出，请妥善保管文件', 'success')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const importAccount = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget
+    const file = input.files?.[0]
+    input.value = ''
+    if (!file) return
+    if (!confirm('导入会替换当前 Telegram 登录账号，确定继续吗？')) return
+
+    setBusy(true)
+    try {
+      const account = JSON.parse(await file.text()) as TelegramAccountExport
+      await api.importTelegramAccount(account)
+      await onChanged()
+      toast('Telegram 账号已导入', 'success')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-5 border-t border-[var(--line)] pt-4">
+      <div className="flex items-start gap-2.5">
+        <KeyRound size={15} className="mt-0.5 shrink-0 text-[var(--faint)]" />
+        <div className="min-w-0">
+          <h3 className="text-sm font-medium">账号迁移</h3>
+          <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
+            导出 Telegram 登录会话和 api_id、api_hash，换服务器时可直接导入，无需重新验证手机号。
+            文件包含登录凭据，请勿发送给他人。
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              icon={<Download size={14} />}
+              loading={busy}
+              disabled={!ready}
+              onClick={() => void exportAccount()}
+            >
+              导出账号
+            </Button>
+            <Button
+              icon={<Upload size={14} />}
+              loading={busy}
+              onClick={() => fileInput.current?.click()}
+            >
+              导入账号
+            </Button>
+            <input
+              ref={fileInput}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(event) => void importAccount(event)}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 

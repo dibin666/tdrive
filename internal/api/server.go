@@ -115,6 +115,8 @@ func (s *Server) Routes() http.Handler {
 				r.Post("/login/signin", s.handleSignIn)
 				r.Post("/login/password", s.handleSubmitPassword)
 				r.Post("/logout", s.handleTelegramLogout)
+				r.Get("/account/export", s.handleTelegramAccountExport)
+				r.Post("/account/import", s.handleTelegramAccountImport)
 				r.Get("/channels", s.handleListChannels)
 				r.Post("/channels", s.handleCreateChannel)
 				r.Post("/channels/select", s.handleSelectChannel)

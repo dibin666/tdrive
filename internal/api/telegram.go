@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/base64"
 	"net/http"
+	"strings"
 
 	"github.com/dibin/tdrive/internal/events"
 )
@@ -90,6 +92,74 @@ func (s *Server) handleSubmitPassword(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTelegramLogout(w http.ResponseWriter, r *http.Request) {
 	if err := s.tg.LogOut(r.Context()); err != nil {
 		s.fail(w, err, "telegram logout")
+		return
+	}
+	s.publishTelegram()
+	writeJSON(w, http.StatusOK, s.tg.Status())
+}
+
+const telegramAccountExportVersion = 1
+
+type telegramAccountExport struct {
+	Format  string `json:"format"`
+	Version int    `json:"version"`
+	AppID   int    `json:"appId"`
+	AppHash string `json:"appHash"`
+	Session string `json:"session"`
+}
+
+// handleTelegramAccountExport returns only the Telegram login session and the
+// app credentials needed to open it. WebUI users, channels and the local index
+// are intentionally not part of this portable account package.
+func (s *Server) handleTelegramAccountExport(w http.ResponseWriter, r *http.Request) {
+	appID, appHash, err := s.tg.Credentials(r.Context())
+	if err != nil {
+		s.fail(w, err, "export telegram account")
+		return
+	}
+	sessionData, err := s.tg.ExportSession(r.Context())
+	if err != nil {
+		s.fail(w, err, "export telegram account")
+		return
+	}
+
+	w.Header().Set("Content-Disposition", `attachment; filename="tdrive-telegram-account.json"`)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, telegramAccountExport{
+		Format:  "tdrive-telegram-account",
+		Version: telegramAccountExportVersion,
+		AppID:   appID,
+		AppHash: appHash,
+		Session: base64.StdEncoding.EncodeToString(sessionData),
+	})
+}
+
+// handleTelegramAccountImport accepts a package produced by the export
+// endpoint and reconnects the server with that Telegram account.
+func (s *Server) handleTelegramAccountImport(w http.ResponseWriter, r *http.Request) {
+	var req telegramAccountExport
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Format != "tdrive-telegram-account" || req.Version != telegramAccountExportVersion {
+		writeError(w, http.StatusBadRequest, "unsupported Telegram account file")
+		return
+	}
+	if req.AppID <= 0 {
+		writeError(w, http.StatusBadRequest, "Telegram app id must be positive")
+		return
+	}
+	if strings.TrimSpace(req.AppHash) == "" {
+		writeError(w, http.StatusBadRequest, "Telegram app hash is required")
+		return
+	}
+	sessionData, err := base64.StdEncoding.DecodeString(req.Session)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Telegram account session is not valid base64")
+		return
+	}
+	if err := s.tg.ImportSession(r.Context(), req.AppID, req.AppHash, sessionData); err != nil {
+		s.fail(w, err, "import telegram account")
 		return
 	}
 	s.publishTelegram()

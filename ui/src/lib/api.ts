@@ -49,6 +49,14 @@ export interface TelegramStatus {
   awaitingPassword: boolean
 }
 
+export interface TelegramAccountExport {
+  format: 'tdrive-telegram-account'
+  version: number
+  appId: number
+  appHash: string
+  session: string
+}
+
 export interface Status {
   needsSetup: boolean
   telegram: TelegramStatus
@@ -293,6 +301,9 @@ export const api = {
   submitTelegramPassword: (password: string) =>
     request<TelegramStatus>('/tg/login/password', { method: 'POST', body: json({ password }) }),
   telegramLogout: () => request<TelegramStatus>('/tg/logout', { method: 'POST' }),
+  exportTelegramAccount: () => request<TelegramAccountExport>('/tg/account/export'),
+  importTelegramAccount: (body: TelegramAccountExport) =>
+    request<TelegramStatus>('/tg/account/import', { method: 'POST', body: json(body) }),
 
   channels: () =>
     request<{ channels: ChannelOption[]; selected: number }>('/tg/channels'),
