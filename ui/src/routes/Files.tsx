@@ -48,6 +48,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
     () => (localStorage.getItem('tdrive.sortOrder') as SortOrder) || 'asc',
   )
   const [dragging, setDragging] = useState(false)
+  const dragCounterRef = useRef(0)
 
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [renaming, setRenaming] = useState<Entry | null>(null)
@@ -88,6 +89,50 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
       }
     })
   }, [path, load])
+
+  useEffect(() => {
+    dragCounterRef.current = 0
+    setDragging(false)
+  }, [path])
+
+  useEffect(() => {
+    const resetDrag = () => {
+      dragCounterRef.current = 0
+      setDragging(false)
+    }
+
+    const handleWindowDragLeave = (e: DragEvent) => {
+      if (
+        e.clientX <= 0 ||
+        e.clientY <= 0 ||
+        e.clientX >= window.innerWidth ||
+        e.clientY >= window.innerHeight ||
+        !e.relatedTarget
+      ) {
+        resetDrag()
+      }
+    }
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        resetDrag()
+      }
+    }
+
+    window.addEventListener('dragend', resetDrag)
+    window.addEventListener('drop', resetDrag)
+    window.addEventListener('dragleave', handleWindowDragLeave)
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('blur', resetDrag)
+
+    return () => {
+      window.removeEventListener('dragend', resetDrag)
+      window.removeEventListener('drop', resetDrag)
+      window.removeEventListener('dragleave', handleWindowDragLeave)
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('blur', resetDrag)
+    }
+  }, [])
 
   const setViewMode = (next: View) => {
     setView(next)
@@ -191,23 +236,56 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
     () => sortedEntries.filter((e) => selected.has(e.path)),
     [sortedEntries, selected],
   )
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (e.dataTransfer.types && !Array.from(e.dataTransfer.types).includes('Files')) {
+      return
+    }
+    dragCounterRef.current += 1
+    if (dragCounterRef.current === 1) {
+      setDragging(true)
+    }
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (e.dataTransfer.types && !Array.from(e.dataTransfer.types).includes('Files')) {
+      return
+    }
+    e.dataTransfer.dropEffect = 'copy'
+    if (!dragging) {
+      setDragging(true)
+    }
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounterRef.current -= 1
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0
+      setDragging(false)
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    dragCounterRef.current = 0
+    setDragging(false)
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      void startUpload(e.dataTransfer.files)
+    }
+  }
+
   return (
-    <div
-      className="flex h-full min-h-0"
-      onDragOver={(e) => {
-        e.preventDefault()
-        setDragging(true)
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragging(false)
-      }}
-      onDrop={(e) => {
-        e.preventDefault()
-        setDragging(false)
-        if (e.dataTransfer.files.length) void startUpload(e.dataTransfer.files)
-      }}
-    >
-      <div className="flex min-w-0 flex-1 flex-col">
+    <div className="flex h-full min-h-0">
+      <div
+        className="relative flex min-w-0 flex-1 flex-col"
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         <Toolbar
           breadcrumbs={listing?.breadcrumbs ?? []}
           onNavigate={onNavigate}
@@ -275,6 +353,18 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
             />
           )}
         </div>
+
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-[var(--bg)]/80 backdrop-blur-[2px] p-4 fade-in">
+            <div className="flex h-full w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[var(--color-clay)] bg-[var(--clay-soft)]/20 p-6 text-center">
+              <div className="panel px-6 py-5 text-center shadow-lg">
+                <Upload size={28} className="mx-auto mb-2 text-[var(--color-clay)]" />
+                <p className="display text-base font-medium">松手即可上传到 {path}</p>
+                <p className="mt-1 text-xs text-[var(--muted)]">支持多文件上传，超过 2 GB 将自动分卷</p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {detail && (
@@ -345,15 +435,6 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
           >
             <X size={15} />
           </IconButton>
-        </div>
-      )}
-
-      {dragging && (
-        <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-[var(--bg)]/70 backdrop-blur-sm fade-in">
-          <div className="panel px-6 py-5 text-center">
-            <Upload size={26} className="mx-auto mb-2 text-[var(--color-clay)]" />
-            <p className="display text-base">松手即可上传到 {path}</p>
-          </div>
         </div>
       )}
 

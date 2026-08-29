@@ -1,6 +1,6 @@
 services:
   tdrive:
-    image: ghcr.io/OWNER/tdrive:latest
+    image: ghcr.io/dibin666/tdrive:latest
     container_name: tdrive
     restart: unless-stopped
     ports:

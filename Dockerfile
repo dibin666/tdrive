@@ -31,7 +31,7 @@ COPY . .
 COPY --from=ui /ui/dist ./ui/dist
 
 ARG TARGETARCH
-ARG VERSION=dev
+ARG VERSION=0.1
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \

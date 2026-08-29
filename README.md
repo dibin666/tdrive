@@ -76,12 +76,15 @@ request, and the server pipes each request body straight into Telegram.
 
 ## Running it
 
+The initial application version is `0.1`. Release tags use the `v0.1.0`
+format; the Docker workflow also publishes the convenient `0.1` image tag.
+
 ```bash
 docker run -d --name tdrive -p 8080:8080 \
   -v tdrive-data:/data \
   -e TDRIVE_ADMIN_USER=admin \
   -e TDRIVE_ADMIN_PASSWORD='choose-something-long' \
-  ghcr.io/OWNER/tdrive:latest
+  ghcr.io/dibin666/tdrive:latest
 ```
 
 Or copy `.env.example` to `.env` and `docker compose up -d`.

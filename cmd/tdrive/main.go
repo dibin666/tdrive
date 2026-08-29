@@ -29,7 +29,7 @@ import (
 
 // version is set at build time with -ldflags "-X main.version=...". It is
 // reported to Telegram as the client app version and shown in the UI.
-var version = "dev"
+var version = "0.1"
 
 func main() {
 	if err := run(); err != nil {
