@@ -1,11 +1,11 @@
 name: docker
 
 # Images are published to GHCR so a deployment is `docker run
-# ghcr.io/<owner>/tdrive:latest` with nothing else to install.
+# ghcr.io/dibin666/tdrive:latest` with nothing else to install.
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 env:
@@ -36,6 +36,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Determine version and architecture tag
+        id: image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            tag="$IMAGE:$version-$ARCH"
+          else
+            version="0.1"
+            tag="$IMAGE:latest-$ARCH"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Build and push architecture image
         uses: docker/build-push-action@v7
         with:
@@ -44,9 +60,9 @@ jobs:
           # the compile stages on BUILDPLATFORM, so this does not need QEMU.
           platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}-${{ matrix.arch }}
+          tags: ${{ steps.image.outputs.tag }}
           build-args: |
-            VERSION=${{ github.ref_type == 'tag' && github.ref_name || '0.1' }}
+            VERSION=${{ steps.image.outputs.version }}
           # Keep the two architecture caches independent so parallel jobs do
           # not overwrite each other's layers.
           cache-from: type=gha,scope=release-docker-${{ matrix.arch }}
@@ -77,23 +93,25 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-,format=short
 
       - name: Create multi-platform manifests
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           SOURCE_TAGS: ${{ steps.meta.outputs.tags }}
-          SHA: ${{ github.sha }}
         run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            source="$IMAGE:${GITHUB_REF_NAME#v}"
+          else
+            source="$IMAGE:latest"
+          fi
           while IFS= read -r tag; do
             if [ -n "$tag" ]; then
               docker buildx imagetools create \
                 --tag "$tag" \
-                "$IMAGE:build-${SHA}-amd64" \
-                "$IMAGE:build-${SHA}-arm64"
+                "$source-amd64" \
+                "$source-arm64"
             fi
           done <<< "$SOURCE_TAGS"
 
