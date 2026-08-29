@@ -52,6 +52,10 @@ ENV TDRIVE_DATA_DIR=/data \
     TDRIVE_LISTEN=:8080
 
 EXPOSE 8080
-USER nonroot:nonroot
+
+# /data may be a host bind mount. Its ownership is controlled by the host and
+# cannot be fixed while building the image, so keep the process able to create
+# and update the SQLite database on a fresh deployment.
+USER root:root
 
 ENTRYPOINT ["/usr/local/bin/tdrive"]
