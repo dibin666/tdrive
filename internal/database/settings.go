@@ -14,13 +14,20 @@ const (
 	// sessions survive a restart without the operator having to pick a secret.
 	SettingJWTSecret = "auth.jwt_secret"
 	// SettingTGAppID and SettingTGAppHash hold my.telegram.org credentials
-	// entered through the wizard. Environment variables take precedence.
+	// entered through the wizard. A stored value takes precedence over the
+	// legacy environment fallback once it exists.
 	SettingTGAppID   = "telegram.app_id"
 	SettingTGAppHash = "telegram.app_hash"
-	// SettingSegmentSize records the split size a drive was created with.
-	// Existing files keep their own segment_size, so changing this only
-	// affects new uploads.
+	// SettingSegmentSize records the current default split size. Existing files
+	// keep their own segment_size, so changing this only affects new uploads.
 	SettingSegmentSize = "storage.segment_size"
+	// The remaining runtime settings are editable by an administrator in the
+	// WebUI and are applied without restarting the process.
+	SettingTGPoolSize        = "telegram.pool_size"
+	SettingUploadThreads     = "telegram.upload_threads"
+	SettingStreamConcurrency = "stream.concurrency"
+	SettingWebDAVEnabled     = "webdav.enabled"
+	SettingLogLevel          = "log.level"
 	// SettingSetupComplete flips once the wizard has run to completion.
 	SettingSetupComplete = "setup.complete"
 )
@@ -49,6 +56,21 @@ func (d *DB) SetSetting(ctx context.Context, key, value string) error {
 		return fmt.Errorf("set setting %q: %w", key, Translate(err))
 	}
 	return nil
+}
+
+// SetSettings writes a group of related values in one transaction so a failed
+// WebUI update cannot leave only half of the runtime configuration persisted.
+func (d *DB) SetSettings(ctx context.Context, settings map[string]string) error {
+	return d.Tx(ctx, func(tx txExec) error {
+		for key, value := range settings {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO settings (key, value) VALUES (?, ?)
+				 ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+				return fmt.Errorf("set setting %q: %w", key, Translate(err))
+			}
+		}
+		return nil
+	})
 }
 
 func (d *DB) DeleteSetting(ctx context.Context, key string) error {

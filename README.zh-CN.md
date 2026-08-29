@@ -10,6 +10,7 @@
 - **WebDAV** — 作为网络硬盘挂载，兼容 rclone、macOS Finder、Windows Explorer 等客户端
 - **大文件分片** — 自动将文件按 ~1.9 GB 分片存储到 Telegram，突破单文件 2 GB 上限；跨分片的 HTTP Range 请求对客户端完全透明
 - **浏览器分片上传** — 前端按服务器的分片边界切割文件并逐片上传，断点只丢一个分片而非整个文件，支持并发和续传
+- **VPS 本地上传** — Docker 可只读挂载 VPS 目录，WebUI 上传弹窗中直接选择服务器上的文件，无需先下载到浏览器
 - **离线下载** — 提交一个 URL，服务器端直接拉取并存入 Telegram，大文件无需经过浏览器
 - **并行下载** — 多连接并发预取 1 MiB 块，替代单连接顺序读取，下载速度显著提升
 - **索引重建** — 数据库只是缓存；丢失或损坏后可从 Telegram 频道完整重建目录树和文件元数据
@@ -39,7 +40,10 @@ TDRIVE_ADMIN_PASSWORD=your-secure-password
 docker compose up -d
 ```
 
-4. 打开浏览器访问 `http://localhost:8080`，按向导完成 Telegram 登录和频道选择。
+4. 打开浏览器访问 `http://localhost:8080`，先创建管理员账号即可进入网盘；Telegram 登录和频道选择可以稍后在“设置”中完成。
+
+如需从 VPS 直接上传已有文件，把 `.env` 中的 `TDRIVE_LOCAL_PATH` 设置为宿主机目录，例如
+`TDRIVE_LOCAL_PATH=/srv/repository`。Compose 会以只读方式挂载它，点击 WebUI 的“上传”后，弹窗下方会显示该目录。
 
 ### Docker
 
@@ -70,14 +74,25 @@ TDRIVE_DATA_DIR=./data ./tdrive
 | `TDRIVE_BASE_URL` | *（空）* | 外部可达地址（反向代理时设置） |
 | `TDRIVE_ADMIN_USER` | *（空）* | 初始管理员用户名（仅首次生效） |
 | `TDRIVE_ADMIN_PASSWORD` | *（空）* | 初始管理员密码（≥8 位） |
-| `TDRIVE_TG_APP_ID` | *（空）* | Telegram API ID，来自 [my.telegram.org](https://my.telegram.org/apps)，也可在向导中填写 |
-| `TDRIVE_TG_APP_HASH` | *（空）* | Telegram API Hash |
-| `TDRIVE_SEGMENT_SIZE` | `1900MiB` | 分片大小（上限 2000MiB） |
-| `TDRIVE_TG_POOL_SIZE` | `8` | MTProto 连接池大小 |
-| `TDRIVE_UPLOAD_THREADS` | `8` | 单分片内并发上传线程 |
-| `TDRIVE_STREAM_CONCURRENCY` | `6` | 并发下载块数 |
-| `TDRIVE_WEBDAV_ENABLED` | `true` | 启用 WebDAV |
-| `TDRIVE_LOG_LEVEL` | `info` | 日志级别 |
+| `TDRIVE_LOCAL_PATH` | `./vps-files` | Docker 宿主机上用于 VPS 文件上传的目录；以只读方式挂载 |
+| `TDRIVE_LOCAL_DIR` | *（空）* | 应用容器内对应的本地目录；Compose 默认使用 `/vps` |
+
+使用管理员账号登录后，其余运行参数可在 WebUI 的“设置”中配置：
+
+| WebUI 设置 | 默认值 | 说明 |
+|---|---|---|
+| Telegram `api_id` / `api_hash` | *（空）* | 来自 [my.telegram.org](https://my.telegram.org/apps) 的凭据 |
+| 分片大小 | `1900 MiB` | 每个 Telegram 对象的大小（上限 `2000 MiB`）；修改后只影响新上传文件 |
+| Telegram 连接池 | `8` | MTProto 连接池大小 |
+| 上传线程 | `8` | 单分片内并发上传线程 |
+| 下载并发块数 | `6` | 并发下载块数 |
+| WebDAV | 启用 | 启用或禁用 WebDAV 挂载 |
+| 日志级别 | `info` | 运行时日志级别 |
+
+这些设置会保存在 SQLite 数据目录中，并且无需重启服务即可生效。连接池大小变化时，Telegram 连接池会自动重建。
+
+`TDRIVE_LOCAL_PATH` 是 Docker Compose 的宿主机路径，不是容器内路径。若使用 `docker run`，请手动添加
+`-v /srv/repository:/vps:ro -e TDRIVE_LOCAL_DIR=/vps`。
 
 ## WebDAV
 

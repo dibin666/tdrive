@@ -11,6 +11,7 @@ import (
 	"github.com/dibin/tdrive/internal/auth"
 	"github.com/dibin/tdrive/internal/database"
 	"github.com/dibin/tdrive/internal/drive"
+	"github.com/dibin/tdrive/internal/localfs"
 	"github.com/dibin/tdrive/internal/tgc"
 )
 
@@ -37,6 +38,18 @@ func writeError(w http.ResponseWriter, status int, message string) {
 // errors without each one restating the mapping.
 func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 	switch {
+	case errors.Is(err, localfs.ErrDisabled):
+		writeJSON(w, http.StatusPreconditionRequired, errorBody{
+			Error: err.Error(), Code: "local_unconfigured",
+		})
+	case errors.Is(err, localfs.ErrInvalidPath):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, localfs.ErrNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, localfs.ErrNotFile), errors.Is(err, localfs.ErrNotDir):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, localfs.ErrUnavailable):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, drive.ErrNotFound), errors.Is(err, database.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, drive.ErrExists), errors.Is(err, database.ErrConflict):

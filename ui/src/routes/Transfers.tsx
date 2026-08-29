@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { AlertTriangle, Ban, Check, CloudDownload, Inbox, Layers } from 'lucide-react'
+import { AlertTriangle, Ban, Check, CloudDownload, HardDrive, Inbox, Layers } from 'lucide-react'
 import { api, type UploadJob } from '../lib/api'
 import { events } from '../lib/events'
 import { formatBytes, formatDate } from '../lib/format'
@@ -226,6 +226,7 @@ function RemoteRow({ job, speed }: { job: UploadJob; speed: number }) {
   const active = job.status === 'running' || job.status === 'pending'
 
   const isWebdav = job.source === 'webdav'
+  const isLocal = job.source === 'local'
   const isRemote = job.source === 'remote' || Boolean(job.sourceUrl?.startsWith('http://') || job.sourceUrl?.startsWith('https://'))
 
   return (
@@ -235,7 +236,8 @@ function RemoteRow({ job, speed }: { job: UploadJob; speed: number }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-3">
             <span className="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium">
-              {job.sourceUrl && <CloudDownload size={13} className="shrink-0 text-[var(--faint)]" />}
+              {isRemote && <CloudDownload size={13} className="shrink-0 text-[var(--faint)]" />}
+              {isLocal && <HardDrive size={13} className="shrink-0 text-[var(--faint)]" />}
               {job.name}
             </span>
             <div className="flex shrink-0 items-center gap-2">
@@ -256,6 +258,10 @@ function RemoteRow({ job, speed }: { job: UploadJob; speed: number }) {
             {isWebdav ? (
               <span className="chip shrink-0 !bg-blue-500/12 !text-blue-600 dark:!text-blue-400 !border-transparent">
                 WebDAV
+              </span>
+            ) : isLocal ? (
+              <span className="chip shrink-0 !bg-green-500/12 !text-green-700 dark:!text-green-400 !border-transparent">
+                VPS 本地
               </span>
             ) : isRemote ? (
               <span className="chip shrink-0 !bg-purple-500/12 !text-purple-600 dark:!text-purple-400 !border-transparent">

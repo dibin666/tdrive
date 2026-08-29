@@ -10,6 +10,7 @@ Turn your Telegram account into a network drive with unlimited storage.
 - **WebDAV** — mount as a network drive; compatible with rclone, macOS Finder, Windows Explorer, and other clients
 - **Segmented storage** — files are automatically split into ~1.9 GB segments to overcome Telegram's 2 GB per-object limit; cross-segment HTTP Range requests are fully transparent to clients
 - **Browser segmented upload** — the frontend slices files on the server's segment boundaries and uploads each slice; a dropped connection costs one segment instead of everything, with concurrency and resume support
+- **VPS local upload** — Docker can mount a VPS directory read-only, letting the WebUI upload dialog choose server-side files without sending them through the browser first
 - **Remote URL fetch** — submit a URL and the server downloads it directly into Telegram; large files never travel through the browser
 - **Parallel download** — multiple concurrent 1 MiB chunk prefetches replace single-connection sequential reads, significantly improving download speed
 - **Index rebuild** — the database is just a cache; the full directory tree and file metadata can be reconstructed from the Telegram channel
@@ -39,7 +40,9 @@ TDRIVE_ADMIN_PASSWORD=your-secure-password
 docker compose up -d
 ```
 
-4. Open `http://localhost:8080` in your browser and follow the wizard to log in to Telegram and select a storage channel.
+4. Open `http://localhost:8080` in your browser. Creating the administrator account is enough to enter the drive; Telegram login and channel selection can be completed later from **Settings**.
+
+To upload files already present on the VPS without sending them through your browser, set `TDRIVE_LOCAL_PATH` in `.env`, for example `TDRIVE_LOCAL_PATH=/srv/repository`. Compose mounts it read-only, and the WebUI upload dialog shows it below the browser upload option.
 
 ### Docker
 
@@ -70,14 +73,24 @@ Visit `http://localhost:8080` after launch; a setup wizard will appear on first 
 | `TDRIVE_BASE_URL` | *(empty)* | Externally reachable origin (set when behind a reverse proxy) |
 | `TDRIVE_ADMIN_USER` | *(empty)* | Bootstrap admin username (first run only) |
 | `TDRIVE_ADMIN_PASSWORD` | *(empty)* | Bootstrap admin password (≥8 characters) |
-| `TDRIVE_TG_APP_ID` | *(empty)* | Telegram API ID from [my.telegram.org](https://my.telegram.org/apps); can also be entered in the wizard |
-| `TDRIVE_TG_APP_HASH` | *(empty)* | Telegram API Hash |
-| `TDRIVE_SEGMENT_SIZE` | `1900MiB` | Segment size (ceiling 2000MiB) |
-| `TDRIVE_TG_POOL_SIZE` | `8` | MTProto connection pool size |
-| `TDRIVE_UPLOAD_THREADS` | `8` | Concurrent upload threads per segment |
-| `TDRIVE_STREAM_CONCURRENCY` | `6` | Concurrent download chunks |
-| `TDRIVE_WEBDAV_ENABLED` | `true` | Enable WebDAV |
-| `TDRIVE_LOG_LEVEL` | `info` | Log level |
+| `TDRIVE_LOCAL_PATH` | `./vps-files` | Host directory exposed as a read-only VPS upload source in Docker Compose |
+| `TDRIVE_LOCAL_DIR` | *(empty)* | Container-side local source directory; Compose sets this to `/vps` |
+
+After logging in as an administrator, configure the remaining runtime settings in **Settings**:
+
+| WebUI setting | Default | Description |
+|---|---|---|
+| Telegram `api_id` / `api_hash` | *(empty)* | Credentials from [my.telegram.org](https://my.telegram.org/apps) |
+| Segment size | `1900 MiB` | Size of each Telegram object (maximum `2000 MiB`); only new uploads use a changed value |
+| Telegram connection pool | `8` | MTProto connection pool size |
+| Upload threads | `8` | Concurrent upload threads per segment |
+| Download concurrency | `6` | Concurrent download chunks |
+| WebDAV | Enabled | Enable or disable the WebDAV mount |
+| Log level | `info` | Runtime log level |
+
+These settings are stored in the SQLite data directory and take effect without restarting the server. The Telegram connection pool is rebuilt automatically when its size changes.
+
+`TDRIVE_LOCAL_PATH` is the host-side Compose path. With `docker run`, add `-v /srv/repository:/vps:ro -e TDRIVE_LOCAL_DIR=/vps` manually.
 
 ## WebDAV
 

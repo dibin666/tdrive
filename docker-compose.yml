@@ -10,14 +10,17 @@ services:
       # this volume is recoverable — the drive rebuilds from the channel — but
       # it means logging in to Telegram again.
       - tdrive-data:/data
+      # Read-only VPS source directory. Set TDRIVE_LOCAL_PATH in .env to the
+      # host directory whose files should be available in the upload dialog.
+      - ${TDRIVE_LOCAL_PATH:-./vps-files}:/vps:ro
     environment:
       # Seeds the first administrator. Remove both once the account exists;
       # they are ignored after the first run.
       TDRIVE_ADMIN_USER: ${TDRIVE_ADMIN_USER:-admin}
       TDRIVE_ADMIN_PASSWORD: ${TDRIVE_ADMIN_PASSWORD:?set this in .env}
-      # Optional: skip the credentials step of the setup wizard.
-      TDRIVE_TG_APP_ID: ${TDRIVE_TG_APP_ID:-}
-      TDRIVE_TG_APP_HASH: ${TDRIVE_TG_APP_HASH:-}
+      # This is the path inside the container; the host side is the volume
+      # above. Remove the volume and this variable to disable local uploads.
+      TDRIVE_LOCAL_DIR: /vps
       # Set this when behind a reverse proxy so session cookies are marked
       # Secure and the WebDAV address shown in settings is correct.
       TDRIVE_BASE_URL: ${TDRIVE_BASE_URL:-}

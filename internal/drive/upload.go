@@ -77,6 +77,7 @@ func (s *Service) Begin(ctx context.Context, req UploadRequest) (database.Upload
 	if mimeType == "" {
 		mimeType = GuessMIME(req.Name)
 	}
+	settings := s.cfg.RuntimeSettings()
 	segCount := s.cfg.SegmentCount(req.Size)
 
 	file := database.File{
@@ -85,7 +86,7 @@ func (s *Service) Begin(ctx context.Context, req UploadRequest) (database.Upload
 		Name:         req.Name,
 		Size:         req.Size,
 		MIME:         mimeType,
-		SegmentSize:  s.cfg.Storage.SegmentSize,
+		SegmentSize:  settings.SegmentSize,
 		SegmentCount: segCount,
 		Status:       database.StatusPending,
 		ChannelID:    channel.ID,
@@ -353,7 +354,9 @@ func (s *Service) UploadStream(ctx context.Context, req UploadRequest, r io.Read
 
 	result, err := s.Complete(ctx, job.ID)
 	if err == nil && s.OnRemoteProgress != nil {
-		s.OnRemoteProgress(job, file.Size, file.Size, nil)
+		completed := job
+		completed.Status = database.JobComplete
+		s.OnRemoteProgress(completed, file.Size, file.Size, nil)
 	}
 	return result, err
 }

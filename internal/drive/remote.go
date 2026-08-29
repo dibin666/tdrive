@@ -87,6 +87,17 @@ func (s *Service) ResumeRemotes(ctx context.Context) {
 		return
 	}
 	for _, job := range jobs {
+		if job.Source == "local" {
+			if job.SourceURL == "" {
+				_ = s.db.SetJobStatus(ctx, job.ID, database.JobFailed, "local source path is missing")
+				continue
+			}
+			s.log.Info("resuming a local transfer",
+				zap.String("job", job.ID), zap.String("name", job.Name),
+				zap.Ints("segments", job.PendingSegments()))
+			go s.runLocal(context.WithoutCancel(ctx), job, job.SourceURL)
+			continue
+		}
 		target, err := url.Parse(job.SourceURL)
 		if err != nil {
 			_ = s.db.SetJobStatus(ctx, job.ID, database.JobFailed, "stored source URL is invalid")
@@ -140,7 +151,9 @@ func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target 
 		s.failRemote(ctx, job, err)
 		return
 	}
-	s.notifyRemote(job, file, file.SegmentCount, file.Size, file.Size, nil)
+	completed := job
+	completed.Status = database.JobComplete
+	s.notifyRemote(completed, file, file.SegmentCount, file.Size, file.Size, nil)
 }
 
 func (s *Service) failRemote(ctx context.Context, job database.UploadJob, err error) {

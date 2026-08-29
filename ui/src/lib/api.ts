@@ -63,7 +63,33 @@ export interface Status {
   hasChannel: boolean
   version: string
   segmentSize: number
+  localEnabled: boolean
   webdavPath?: string
+}
+
+export interface LocalEntry {
+  name: string
+  path: string
+  isDir: boolean
+  size: number
+  modifiedAt: number
+}
+
+export interface LocalListing {
+  path: string
+  entries: LocalEntry[]
+  breadcrumbs: Crumb[]
+}
+
+export interface RuntimeSettings {
+  appId: number
+  appHash: string
+  segmentSize: number
+  poolSize: number
+  uploadThreads: number
+  streamConcurrency: number
+  webdavEnabled: boolean
+  logLevel: string
 }
 
 export interface UploadJob {
@@ -233,6 +259,9 @@ const json = (body: unknown) => JSON.stringify(body)
 
 export const api = {
   status: () => request<Status>('/status'),
+  settings: () => request<RuntimeSettings>('/settings'),
+  updateSettings: (body: Partial<RuntimeSettings>) =>
+    request<RuntimeSettings>('/settings', { method: 'PUT', body: json(body) }),
   stats: () => request<Stats>('/stats'),
   me: () => request<User>('/me'),
 
@@ -255,6 +284,7 @@ export const api = {
     request<void>('/me/password', { method: 'POST', body: json({ current, new: next }) }),
 
   list: (path: string) => request<Listing>(`/fs/list?path=${encodeURIComponent(path)}`),
+  localList: (path: string) => request<LocalListing>(`/local/list?path=${encodeURIComponent(path)}`),
   stat: (path: string) => request<Entry>(`/fs/stat?path=${encodeURIComponent(path)}`),
   mkdir: (path: string) => request<Entry>('/fs/mkdir', { method: 'POST', body: json({ path }) }),
   rename: (path: string, name: string) =>
@@ -284,6 +314,9 @@ export const api = {
 
   remoteUpload: (body: { url: string; path: string; name?: string; overwrite?: boolean }) =>
     request<UploadJob>('/uploads/remote', { method: 'POST', body: json(body) }),
+
+  localUpload: (body: { sourcePath: string; path: string; name?: string; overwrite?: boolean }) =>
+    request<UploadJob>('/uploads/local', { method: 'POST', body: json(body) }),
 
   telegramStatus: () => request<TelegramStatus>('/tg/status'),
   configureTelegram: (appId: number, appHash: string) =>

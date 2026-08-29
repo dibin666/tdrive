@@ -6,9 +6,9 @@ import { useApp } from '../app/context'
 import { Button, Field, Input, Spinner, toast } from '../components/primitives'
 
 /**
- * The first-run wizard. Four steps, in the order the dependencies actually
- * run: an account to log in with, Telegram API credentials, a Telegram login,
- * and finally the channel that will hold the files.
+ * The first-run wizard. The account is the only mandatory first-run step;
+ * Telegram API credentials, login and the storage channel remain available in
+ * Settings when an operator wants to finish them later.
  *
  * Which step to show is derived from server state rather than tracked
  * locally, so a reload mid-way lands back exactly where it left off.
@@ -32,7 +32,7 @@ export function Setup() {
         <Logo />
         <h1 className="display mt-5 text-2xl">把 Telegram 变成一块硬盘</h1>
         <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
-          四步就能用。超过 2 GB 的文件会自动分卷存储，在网盘和 WebDAV 里仍然是一个文件。
+          先创建管理员账号即可进入网盘。Telegram 存储可以稍后在设置中完成，超过 2 GB 的文件会自动分卷。
         </p>
       </header>
 
@@ -115,7 +115,7 @@ function AccountStep({
     <div className="space-y-4">
       <StepHeader
         title="创建管理员账号"
-        description="这个账号用来登录网盘，也是 WebDAV 的用户名密码。它和 Telegram 账号无关。"
+        description="这个账号用来登录网盘，也是 WebDAV 的用户名密码。创建后可以先进入网盘，Telegram 账号和频道稍后再配置。"
       />
       <Field label="用户名">
         <Input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" />
@@ -138,13 +138,13 @@ function AccountStep({
         />
       </Field>
       <Button variant="primary" className="w-full" loading={busy} onClick={() => void submit()}>
-        创建并继续
+        创建账号并进入网盘
       </Button>
     </div>
   )
 }
 
-function CredentialsStep({ onDone }: { onDone: () => Promise<void> }) {
+export function CredentialsStep({ onDone }: { onDone: () => Promise<void> }) {
   const [appId, setAppId] = useState('')
   const [appHash, setAppHash] = useState('')
   const [busy, setBusy] = useState(false)

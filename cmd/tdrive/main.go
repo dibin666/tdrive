@@ -44,12 +44,6 @@ func run() error {
 		return err
 	}
 
-	log, err := newLogger(cfg.LogLevel)
-	if err != nil {
-		return err
-	}
-	defer log.Sync()
-
 	// Signals are handled at the top so an in-flight upload gets a chance to
 	// finish its current segment rather than being killed mid-part.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -64,6 +58,17 @@ func run() error {
 		return err
 	}
 	defer db.Close()
+	// Values saved through the WebUI override legacy environment fallbacks.
+	if err := cfg.ApplyStoredRuntimeSettings(ctx, db); err != nil {
+		return fmt.Errorf("load runtime settings: %w", err)
+	}
+
+	log, logLevel, err := newLogger(cfg.RuntimeSettings().LogLevel)
+	if err != nil {
+		return err
+	}
+	defer log.Sync()
+
 	// Telegram is told the app version, and the UI displays it.
 	tgc.Version = version
 	log.Info("tdrive starting", zap.String("version", version))
@@ -95,15 +100,23 @@ func run() error {
 		driveSvc.ResumeRemotes(ctx)
 	}
 
-	apiServer := api.New(cfg, db, authSvc, driveSvc, tgm, idx, broker, log.Named("api"))
+	apiServer := api.New(cfg, db, authSvc, driveSvc, tgm, idx, broker, log.Named("api"), func(level string) error {
+		parsed, err := zapcore.ParseLevel(level)
+		if err != nil {
+			return fmt.Errorf("invalid log level %q", level)
+		}
+		logLevel.SetLevel(parsed)
+		return nil
+	})
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", apiServer.Routes()))
-	if cfg.WebDAV.Enabled {
-		davHandler := dav.Handler(cfg, db, driveSvc, authSvc, log.Named("webdav"))
-		mux.Handle(cfg.WebDAV.Prefix+"/", davHandler)
-		// Clients probe the bare mount point before walking into it.
-		mux.Handle(cfg.WebDAV.Prefix, davHandler)
+	davHandler := dav.Handler(cfg, db, driveSvc, authSvc, log.Named("webdav"))
+	davHandler = enabledHandler(cfg, davHandler)
+	mux.Handle(cfg.WebDAV.Prefix+"/", davHandler)
+	// Clients probe the bare mount point before walking into it.
+	mux.Handle(cfg.WebDAV.Prefix, davHandler)
+	if cfg.RuntimeSettings().WebDAVEnabled {
 		log.Info("webdav mounted", zap.String("prefix", cfg.WebDAV.Prefix))
 	}
 	mux.Handle("/", ui.Handler())
@@ -126,7 +139,7 @@ func run() error {
 	go func() {
 		log.Info("tdrive listening",
 			zap.String("addr", cfg.Server.Listen),
-			zap.String("segment_size", humanBytes(cfg.Storage.SegmentSize)))
+			zap.String("segment_size", humanBytes(cfg.RuntimeSettings().SegmentSize)))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -174,19 +187,33 @@ func startMaintenance(ctx context.Context, db *database.DB, log *zap.Logger) {
 	}
 }
 
-func newLogger(level string) (*zap.Logger, error) {
+func newLogger(level string) (*zap.Logger, *zap.AtomicLevel, error) {
 	lvl, err := zapcore.ParseLevel(level)
 	if err != nil {
 		lvl = zapcore.InfoLevel
 	}
 	cfg := zap.NewProductionConfig()
-	cfg.Level = zap.NewAtomicLevelAt(lvl)
+	atomicLevel := zap.NewAtomicLevelAt(lvl)
+	cfg.Level = atomicLevel
 	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	// Container logs are read by humans far more often than by a log
 	// aggregator, so plain console output beats JSON here.
 	cfg.Encoding = "console"
 	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	return cfg.Build()
+	log, err := cfg.Build()
+	return log, &atomicLevel, err
+}
+
+// enabledHandler keeps the WebDAV mount registered while allowing the admin
+// to toggle it from the WebUI without rebuilding the HTTP server.
+func enabledHandler(cfg *config.Config, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !cfg.RuntimeSettings().WebDAVEnabled {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func humanBytes(n int64) string {

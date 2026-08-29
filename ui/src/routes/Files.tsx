@@ -5,9 +5,12 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  Check,
+  ChevronLeft,
   ChevronRight,
   CloudDownload,
   Download,
+  FolderOpen,
   FolderPlus,
   Grid2x2,
   Home,
@@ -20,7 +23,8 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import { api, request, type Entry, type Listing } from '../lib/api'
+import { api, request, type Entry, type Listing, type LocalEntry, type LocalListing } from '../lib/api'
+import { useApp } from '../app/context'
 import { events } from '../lib/events'
 import { formatBytes, formatDate } from '../lib/format'
 import { uploads } from '../lib/uploads'
@@ -33,6 +37,7 @@ type View = 'list' | 'grid'
 type SortField = 'name' | 'size' | 'time'
 type SortOrder = 'asc' | 'desc'
 export function Files({ path, onNavigate }: { path: string; onNavigate: (to: string) => void }) {
+  const { status } = useApp()
   const [listing, setListing] = useState<Listing | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -53,9 +58,8 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [renaming, setRenaming] = useState<Entry | null>(null)
   const [remoteOpen, setRemoteOpen] = useState(false)
+  const [uploadOpen, setUploadOpen] = useState(false)
   const [moving, setMoving] = useState<string[] | null>(null)
-
-  const fileInput = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -294,20 +298,9 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
           sortField={sortField}
           sortOrder={sortOrder}
           onSort={handleSort}
-          onUpload={() => fileInput.current?.click()}
+          onUpload={() => setUploadOpen(true)}
           onNewFolder={() => setNewFolderOpen(true)}
           onRemote={() => setRemoteOpen(true)}
-        />
-
-        <input
-          ref={fileInput}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files?.length) void startUpload(e.target.files)
-            e.target.value = ''
-          }}
         />
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-24 sm:px-5 sm:pb-6">
@@ -328,7 +321,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
               title="这里还什么都没有"
               description="把文件拖到这里，或者用上传按钮。超过 2 GB 的文件会自动分卷，在这里仍然显示为一个文件。"
               action={
-                <Button variant="primary" icon={<Upload size={15} />} onClick={() => fileInput.current?.click()}>
+                <Button variant="primary" icon={<Upload size={15} />} onClick={() => setUploadOpen(true)}>
                   上传文件
                 </Button>
               }
@@ -453,6 +446,16 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
         open={remoteOpen}
         path={path}
         onClose={() => setRemoteOpen(false)}
+      />
+      <UploadModal
+        open={uploadOpen}
+        destinationPath={path}
+        localEnabled={status?.localEnabled ?? false}
+        onClose={() => setUploadOpen(false)}
+        onBrowserFiles={(files) => {
+          void startUpload(files)
+        }}
+        onLocalStarted={() => void load()}
       />
       <MovePicker
         open={moving !== null}
@@ -988,6 +991,243 @@ function RenameModal({
           autoFocus
         />
       </Field>
+    </Modal>
+  )
+}
+
+function UploadModal({
+  open,
+  destinationPath,
+  localEnabled,
+  onClose,
+  onBrowserFiles,
+  onLocalStarted,
+}: {
+  open: boolean
+  destinationPath: string
+  localEnabled: boolean
+  onClose: () => void
+  onBrowserFiles: (files: FileList) => void
+  onLocalStarted: () => void
+}) {
+  const browserInput = useRef<HTMLInputElement>(null)
+  const [listing, setListing] = useState<LocalListing | null>(null)
+  const [localPath, setLocalPath] = useState('/')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [localLoading, setLocalLoading] = useState(false)
+  const [localBusy, setLocalBusy] = useState(false)
+  const [localError, setLocalError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    setListing(null)
+    setLocalPath('/')
+    setSelected(new Set())
+    setLocalError(null)
+    if (!localEnabled) return
+
+    let cancelled = false
+    setLocalLoading(true)
+    void api
+      .localList('/')
+      .then((next) => {
+        if (!cancelled) setListing(next)
+      })
+      .catch((err) => {
+        if (!cancelled) setLocalError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (!cancelled) setLocalLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, localEnabled])
+
+  const browse = async (nextPath: string) => {
+    setLocalLoading(true)
+    setLocalError(null)
+    try {
+      const next = await api.localList(nextPath)
+      setListing(next)
+      setLocalPath(next.path)
+      setSelected(new Set())
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLocalLoading(false)
+    }
+  }
+
+  const toggle = (entry: LocalEntry) => {
+    if (entry.isDir) {
+      void browse(entry.path)
+      return
+    }
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(entry.path)) next.delete(entry.path)
+      else next.add(entry.path)
+      return next
+    })
+  }
+
+  const startLocalUploads = async () => {
+    const entries = listing?.entries.filter((entry) => selected.has(entry.path) && !entry.isDir) ?? []
+    if (entries.length === 0) return
+
+    setLocalBusy(true)
+    setLocalError(null)
+    let started = 0
+    let failed = 0
+    let firstError = ''
+    try {
+      for (const entry of entries) {
+        try {
+          await api.localUpload({ sourcePath: entry.path, path: destinationPath })
+          started += 1
+        } catch (err) {
+          failed += 1
+          if (!firstError) firstError = err instanceof Error ? err.message : String(err)
+        }
+      }
+      if (started > 0) {
+        onLocalStarted()
+        toast(`已添加 ${started} 个 VPS 文件到上传队列`, 'success')
+      }
+      if (failed > 0) {
+        setLocalError(`${failed} 个文件添加失败${firstError ? `：${firstError}` : ''}`)
+      } else {
+        onClose()
+      }
+    } finally {
+      setLocalBusy(false)
+    }
+  }
+
+  const parentPath = localPath === '/' ? '/' : localPath.slice(0, localPath.lastIndexOf('/')) || '/'
+  const selectedCount = selected.size
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="上传文件"
+      description={`上传到 ${destinationPath}`}
+      width="max-w-2xl"
+      footer={
+        <>
+          <Button onClick={onClose}>取消</Button>
+          <Button
+            variant="primary"
+            loading={localBusy}
+            disabled={!localEnabled || selectedCount === 0}
+            onClick={() => void startLocalUploads()}
+          >
+            上传已选 {selectedCount} 个 VPS 文件
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-5">
+        <section>
+          <div className="mb-2 flex items-center gap-2">
+            <Upload size={15} className="text-[var(--color-clay)]" />
+            <h3 className="text-sm font-medium">浏览器文件</h3>
+          </div>
+          <div className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-dashed border-[var(--line-strong)] bg-[var(--sunk)]/45 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs leading-relaxed text-[var(--muted)]">
+              选择当前设备上的文件，文件会从浏览器分片上传到 TDrive。
+            </p>
+            <Button variant="outline" onClick={() => browserInput.current?.click()}>
+              选择文件
+            </Button>
+            <input
+              ref={browserInput}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                if (event.target.files?.length) {
+                  onBrowserFiles(event.target.files)
+                  onClose()
+                }
+                event.target.value = ''
+              }}
+            />
+          </div>
+        </section>
+
+        <section className="border-t border-[var(--line)] pt-5">
+          <div className="mb-2 flex items-center gap-2">
+            <FolderOpen size={15} className="text-[var(--color-clay)]" />
+            <div>
+              <h3 className="text-sm font-medium">VPS 本地文件</h3>
+              <p className="text-xs text-[var(--muted)]">服务器从挂载目录直接读取，不经过浏览器。</p>
+            </div>
+          </div>
+
+          {!localEnabled ? (
+            <p className="rounded-[var(--radius-card)] bg-[var(--sunk)] p-4 text-xs leading-relaxed text-[var(--muted)]">
+              尚未配置 VPS 文件目录。请在 Docker Compose 中把宿主机目录挂载到容器，并设置
+              <span className="mx-1 font-[family-name:var(--font-mono)]">TDRIVE_LOCAL_DIR</span>。
+            </p>
+          ) : (
+            <div className="rounded-[var(--radius-card)] border border-[var(--line)]">
+              <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--line)] px-2 py-1.5">
+                <IconButton label="返回上一级" disabled={localPath === '/'} onClick={() => void browse(parentPath)}>
+                  <ChevronLeft size={15} />
+                </IconButton>
+                {listing?.breadcrumbs.map((crumb, index) => (
+                  <span key={crumb.path} className="flex shrink-0 items-center gap-0.5">
+                    {index > 0 && <ChevronRight size={12} className="text-[var(--faint)]" />}
+                    <button
+                      className={clsx(
+                        'rounded px-1.5 py-1 text-xs transition-colors hover:bg-[var(--sunk)]',
+                        index === listing.breadcrumbs.length - 1
+                          ? 'font-medium text-[var(--ink)]'
+                          : 'text-[var(--muted)]',
+                      )}
+                      onClick={() => void browse(crumb.path)}
+                    >
+                      {index === 0 ? 'VPS' : crumb.name}
+                    </button>
+                  </span>
+                ))}
+              </div>
+
+              {localError && <p className="px-3 pt-3 text-xs text-[var(--color-danger)]">{localError}</p>}
+              {localLoading ? (
+                <div className="flex justify-center py-10">
+                  <Spinner />
+                </div>
+              ) : listing && listing.entries.length > 0 ? (
+                <div className="max-h-64 overflow-y-auto p-1.5">
+                  {listing.entries.map((entry) => (
+                    <button
+                      key={entry.path}
+                      className="row w-full !justify-between text-left data-[selected=true]:bg-[var(--clay-soft)]"
+                      data-selected={selected.has(entry.path)}
+                      onClick={() => toggle(entry)}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <EntryIcon name={entry.name} isDir={entry.isDir} size={16} />
+                        <span className="truncate text-sm">{entry.name}</span>
+                      </span>
+                      <span className="shrink-0 text-xs tabular-nums text-[var(--muted)]">
+                        {entry.isDir ? '文件夹' : formatBytes(entry.size)}
+                      </span>
+                      {selected.has(entry.path) && <Check size={14} className="shrink-0 text-[var(--color-clay)]" />}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="py-10 text-center text-xs text-[var(--muted)]">这个目录为空</p>
+              )}
+            </div>
+          )}
+        </section>
+      </div>
     </Modal>
   )
 }

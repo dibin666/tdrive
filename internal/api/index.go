@@ -62,7 +62,7 @@ func WireRemoteProgress(svc *drive.Service, broker *events.Broker) {
 		switch {
 		case err != nil:
 			status, message = database.JobFailed, err.Error()
-		case total > 0 && uploaded >= total:
+		case job.Status == database.JobComplete || total > 0 && uploaded >= total:
 			status = database.JobComplete
 		}
 		// Terminal events always go out; intermediate ones are rate limited per job.
@@ -91,5 +91,12 @@ func WireRemoteProgress(svc *drive.Service, broker *events.Broker) {
 				SourceURL:    job.SourceURL,
 			},
 		})
+		if status == database.JobComplete {
+			// The destination path is not part of an upload progress event,
+			// and resolving it here would add a database read to every final
+			// callback. A root refresh is cheap and covers every server-side
+			// source, including VPS-local uploads.
+			broker.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: drive.Root}})
+		}
 	}
 }

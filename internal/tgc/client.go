@@ -99,11 +99,12 @@ func New(cfg *config.Config, db *database.DB, log *zap.Logger) *Manager {
 	return &Manager{cfg: cfg, db: db, log: log, state: StateUnconfigured}
 }
 
-// Credentials resolves the api_id/api_hash pair, preferring the environment so
-// that a container can be configured without touching the database, and
-// falling back to whatever the setup wizard stored.
+// Credentials resolves the api_id/api_hash pair from the current runtime
+// snapshot. The snapshot starts with legacy environment values and is then
+// overlaid with values saved by the setup wizard or WebUI.
 func (m *Manager) Credentials(ctx context.Context) (int, string, error) {
-	appID, appHash := m.cfg.Telegram.AppID, m.cfg.Telegram.AppHash
+	settings := m.cfg.RuntimeSettings()
+	appID, appHash := settings.AppID, settings.AppHash
 	if appID == 0 {
 		if v := m.db.SettingOr(ctx, database.SettingTGAppID, ""); v != "" {
 			n, err := strconv.Atoi(v)
@@ -140,6 +141,7 @@ func (m *Manager) Start(ctx context.Context) error {
 
 func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	m.Stop()
+	settings := m.cfg.RuntimeSettings()
 
 	if err := os.MkdirAll(filepath.Dir(m.cfg.Telegram.SessionFile), 0o750); err != nil {
 		return fmt.Errorf("create session directory: %w", err)
@@ -178,7 +180,7 @@ func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	m.done = done
 	m.state = StateConnecting
 	m.runErr = nil
-	m.pool = NewPool(client, m.cfg.Telegram.PoolSize, middlewares...)
+	m.pool = NewPool(client, settings.PoolSize, middlewares...)
 	m.mu.Unlock()
 
 	go func() {
@@ -260,6 +262,22 @@ func (m *Manager) Configure(ctx context.Context, appID int, appHash string) erro
 		return err
 	}
 	if err := m.db.SetSetting(ctx, database.SettingTGAppHash, appHash); err != nil {
+		return err
+	}
+	settings := m.cfg.RuntimeSettings()
+	settings.AppID, settings.AppHash = appID, appHash
+	m.cfg.SetRuntimeSettings(settings)
+	return m.start(ctx, appID, appHash)
+}
+
+// Reload rebuilds the Telegram connection pool with the current runtime
+// settings while keeping the existing session and account login.
+func (m *Manager) Reload(ctx context.Context) error {
+	if !m.Ready() {
+		return nil
+	}
+	appID, appHash, err := m.Credentials(ctx)
+	if err != nil {
 		return err
 	}
 	return m.start(ctx, appID, appHash)

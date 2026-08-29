@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -20,14 +21,16 @@ import (
 
 // Server wires the HTTP surface together.
 type Server struct {
-	cfg    *config.Config
-	db     *database.DB
-	auth   *auth.Service
-	drive  *drive.Service
-	tg     *tgc.Manager
-	index  *indexer.Indexer
-	events *events.Broker
-	log    *zap.Logger
+	cfg         *config.Config
+	db          *database.DB
+	auth        *auth.Service
+	drive       *drive.Service
+	tg          *tgc.Manager
+	index       *indexer.Indexer
+	events      *events.Broker
+	log         *zap.Logger
+	setLogLevel func(string) error
+	settingsMu  sync.Mutex
 }
 
 func New(
@@ -39,10 +42,15 @@ func New(
 	idx *indexer.Indexer,
 	broker *events.Broker,
 	log *zap.Logger,
+	setLogLevel ...func(string) error,
 ) *Server {
+	var applyLogLevel func(string) error
+	if len(setLogLevel) > 0 {
+		applyLogLevel = setLogLevel[0]
+	}
 	return &Server{
 		cfg: cfg, db: db, auth: authSvc, drive: driveSvc,
-		tg: tgm, index: idx, events: broker, log: log,
+		tg: tgm, index: idx, events: broker, log: log, setLogLevel: applyLogLevel,
 	}
 }
 
@@ -81,6 +89,7 @@ func (s *Server) Routes() http.Handler {
 		r.Post("/me/password", s.handleChangeOwnPassword)
 		r.Get("/events", s.handleEvents)
 		r.Get("/stats", s.handleStats)
+		r.Get("/local/list", s.handleLocalList)
 
 		r.Route("/fs", func(r chi.Router) {
 			r.Get("/list", s.handleList)
@@ -99,6 +108,7 @@ func (s *Server) Routes() http.Handler {
 		r.Route("/uploads", func(r chi.Router) {
 			r.Get("/", s.handleListJobs)
 			r.Post("/", s.handleBeginUpload)
+			r.Post("/local", s.handleLocalUpload)
 			r.Post("/remote", s.handleRemoteUpload)
 			r.Get("/{id}", s.handleJob)
 			r.Put("/{id}/segments/{index}", s.handlePutSegment)
@@ -125,6 +135,8 @@ func (s *Server) Routes() http.Handler {
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.auth.RequireAdmin)
+			r.Get("/settings", s.handleSettings)
+			r.Put("/settings", s.handleUpdateSettings)
 			r.Get("/users", s.handleListUsers)
 			r.Post("/users", s.handleCreateUser)
 			r.Delete("/users/{id}", s.handleDeleteUser)
@@ -161,8 +173,9 @@ type statusBody struct {
 	Version    string `json:"version"`
 	// SegmentSize lets the browser slice a file on exactly the boundaries
 	// the server will store it on.
-	SegmentSize int64  `json:"segmentSize"`
-	WebDAVPath  string `json:"webdavPath,omitempty"`
+	SegmentSize  int64  `json:"segmentSize"`
+	LocalEnabled bool   `json:"localEnabled"`
+	WebDAVPath   string `json:"webdavPath,omitempty"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -173,12 +186,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body := statusBody{
-		NeedsSetup:  needsSetup,
-		Telegram:    s.tg.Status(),
-		Version:     tgc.Version,
-		SegmentSize: s.cfg.Storage.SegmentSize,
+		NeedsSetup:   needsSetup,
+		Telegram:     s.tg.Status(),
+		Version:      tgc.Version,
+		SegmentSize:  s.cfg.RuntimeSettings().SegmentSize,
+		LocalEnabled: s.cfg.Local.Root != "",
 	}
-	if s.cfg.WebDAV.Enabled {
+	if s.cfg.RuntimeSettings().WebDAVEnabled {
 		body.WebDAVPath = s.cfg.WebDAV.Prefix
 	}
 	if _, err := s.db.DefaultChannel(r.Context()); err == nil {

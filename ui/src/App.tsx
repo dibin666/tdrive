@@ -21,10 +21,11 @@ function Router() {
   const { ready, status, user } = useApp()
   const { path, navigate } = useRoute()
 
-  // The drive is unusable until Telegram is connected and a channel is
-  // chosen, so an incomplete install is routed to the wizard rather than to a
-  // file list that could only ever be empty.
-  const needsWizard = status?.needsSetup || status?.telegram.state !== 'ready' || !status?.hasChannel
+  // Creating the first WebUI account is the only mandatory first-run step.
+  // Telegram credentials, login and the storage channel can be configured from
+  // Settings later, so a fresh deployment is usable even before Telegram is
+  // connected.
+  const needsWizard = status?.needsSetup
 
   useEffect(() => {
     if (!ready) return

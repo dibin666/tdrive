@@ -75,6 +75,9 @@ func (m *Manager) ImportSession(ctx context.Context, appID int, appHash string, 
 		m.setState(StateError, err)
 		return err
 	}
+	settings := m.cfg.RuntimeSettings()
+	settings.AppID, settings.AppHash = appID, appHash
+	m.cfg.SetRuntimeSettings(settings)
 	return m.start(ctx, appID, appHash)
 }
 

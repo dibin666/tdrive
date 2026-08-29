@@ -15,14 +15,21 @@ import {
   UserPlus,
   Users,
 } from 'lucide-react'
-import { api, type IndexStatus, type Stats, type TelegramAccountExport, type User } from '../lib/api'
+import {
+  api,
+  type IndexStatus,
+  type RuntimeSettings,
+  type Stats,
+  type TelegramAccountExport,
+  type User,
+} from '../lib/api'
 import { events } from '../lib/events'
 import { formatBytes } from '../lib/format'
 import { useApp } from '../app/context'
 import { Button, Field, Input, Modal, Progress, Spinner, toast } from '../components/primitives'
-import { ChannelStep, LoginStep } from './Setup'
+import { ChannelStep, CredentialsStep, LoginStep } from './Setup'
 
-type SettingsTab = 'general' | 'account' | 'telegram' | 'index'
+type SettingsTab = 'general' | 'runtime' | 'account' | 'telegram' | 'index'
 
 interface TabItem {
   id: SettingsTab
@@ -34,6 +41,7 @@ interface TabItem {
 
 const TABS: TabItem[] = [
   { id: 'general', label: '常规设置', icon: SlidersHorizontal, desc: 'WebDAV 挂载与存储概览' },
+  { id: 'runtime', label: '运行参数', icon: SlidersHorizontal, desc: '分片、并发与日志设置', adminOnly: true },
   { id: 'account', label: '账号与安全', icon: KeyRound, desc: '修改密码与用户管理' },
   { id: 'telegram', label: 'Telegram 存储', icon: Send, desc: 'Telegram 账户与存储频道', adminOnly: true },
   { id: 'index', label: '索引与维护', icon: Database, desc: '频道消息扫描与索引重建', adminOnly: true },
@@ -123,6 +131,8 @@ export function Settings() {
                 {isAdmin && <UsersSection currentUserId={user?.id ?? ''} />}
               </>
             )}
+
+            {activeTab === 'runtime' && isAdmin && <RuntimeSettingsSection onChanged={refreshStatus} />}
 
             {activeTab === 'telegram' && isAdmin && (
               <TelegramSection onChanged={refreshStatus} />
@@ -253,6 +263,151 @@ function PasswordSection() {
   )
 }
 
+function RuntimeSettingsSection({ onChanged }: { onChanged: () => Promise<void> }) {
+  const [settings, setSettings] = useState<RuntimeSettings | null>(null)
+  const [segmentMiB, setSegmentMiB] = useState('')
+  const [poolSize, setPoolSize] = useState('')
+  const [uploadThreads, setUploadThreads] = useState('')
+  const [streamConcurrency, setStreamConcurrency] = useState('')
+  const [webdavEnabled, setWebdavEnabled] = useState(true)
+  const [logLevel, setLogLevel] = useState('info')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void api
+      .settings()
+      .then((value) => {
+        setSettings(value)
+        setSegmentMiB(String(value.segmentSize / (1024 * 1024)))
+        setPoolSize(String(value.poolSize))
+        setUploadThreads(String(value.uploadThreads))
+        setStreamConcurrency(String(value.streamConcurrency))
+        setWebdavEnabled(value.webdavEnabled)
+        setLogLevel(value.logLevel)
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+  }, [])
+
+  const save = async () => {
+    if (!settings) return
+
+    const segment = Number(segmentMiB)
+    const pool = Number(poolSize)
+    const uploads = Number(uploadThreads)
+    const streams = Number(streamConcurrency)
+    if (!Number.isFinite(segment) || segment <= 0 || !Number.isInteger(segment * 2) || segment > 2000) {
+      setError('分片大小应为 0.5 到 2000 MiB 之间、以 0.5 MiB 为步长')
+      return
+    }
+    if (![pool, uploads, streams].every((value) => Number.isInteger(value) && value >= 1)) {
+      setError('并发参数必须是大于等于 1 的整数')
+      return
+    }
+
+    setBusy(true)
+    setError(null)
+    try {
+      const saved = await api.updateSettings({
+        segmentSize: Math.round(segment * 1024 * 1024),
+        poolSize: pool,
+        uploadThreads: uploads,
+        streamConcurrency: streams,
+        webdavEnabled,
+        logLevel,
+      })
+      setSettings(saved)
+      setSegmentMiB(String(saved.segmentSize / (1024 * 1024)))
+      setPoolSize(String(saved.poolSize))
+      setUploadThreads(String(saved.uploadThreads))
+      setStreamConcurrency(String(saved.streamConcurrency))
+      setWebdavEnabled(saved.webdavEnabled)
+      setLogLevel(saved.logLevel)
+      await onChanged()
+      toast('运行设置已保存并立即生效', 'success')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Section
+      icon={<SlidersHorizontal size={16} />}
+      title="运行参数"
+      description="调整存储分片、上传下载并发、WebDAV 和日志级别。修改会立即生效；分片大小只影响新上传的文件。"
+    >
+      {settings === null ? (
+        error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : <Spinner />
+      ) : (
+        <div className="space-y-4">
+          <Field label="分片大小（MiB）" hint="范围 0.5–2000，步长 0.5；已有文件不受影响">
+            <Input
+              type="number"
+              min="0.5"
+              max="2000"
+              step="0.5"
+              value={segmentMiB}
+              onChange={(e) => setSegmentMiB(e.target.value)}
+            />
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="Telegram 连接池">
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={poolSize}
+                onChange={(e) => setPoolSize(e.target.value)}
+              />
+            </Field>
+            <Field label="上传线程">
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={uploadThreads}
+                onChange={(e) => setUploadThreads(e.target.value)}
+              />
+            </Field>
+            <Field label="下载并发块数">
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={streamConcurrency}
+                onChange={(e) => setStreamConcurrency(e.target.value)}
+              />
+            </Field>
+          </div>
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={webdavEnabled}
+              onChange={(e) => setWebdavEnabled(e.target.checked)}
+              className="size-4 accent-[var(--color-clay)]"
+            />
+            启用 WebDAV
+          </label>
+          <Field label="日志级别">
+            <select className="input" value={logLevel} onChange={(e) => setLogLevel(e.target.value)}>
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+            </select>
+          </Field>
+          {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
+          <Button variant="primary" loading={busy} onClick={() => void save()}>
+            保存设置
+          </Button>
+        </div>
+      )}
+    </Section>
+  )
+}
+
 function TelegramSection({ onChanged }: { onChanged: () => Promise<void> }) {
   const { status } = useApp()
   const tg = status?.telegram
@@ -262,7 +417,10 @@ function TelegramSection({ onChanged }: { onChanged: () => Promise<void> }) {
 
   return (
     <Section icon={<Send size={16} />} title="Telegram">
-      {tg.state === 'ready' ? (
+      <TelegramCredentialsSection onChanged={onChanged} />
+      {tg.state === 'unconfigured' ? (
+        <CredentialsStep onDone={onChanged} />
+      ) : tg.state === 'ready' ? (
         <>
           <div className="space-y-2 text-sm">
             <Line label="账号" value={tg.firstName || tg.username || String(tg.userId)} />
@@ -305,6 +463,75 @@ function TelegramSection({ onChanged }: { onChanged: () => Promise<void> }) {
         />
       </Modal>
     </Section>
+  )
+}
+
+function TelegramCredentialsSection({ onChanged }: { onChanged: () => Promise<void> }) {
+  const [settings, setSettings] = useState<RuntimeSettings | null>(null)
+  const [appId, setAppId] = useState('')
+  const [appHash, setAppHash] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void api
+      .settings()
+      .then((value) => {
+        setSettings(value)
+        setAppId(value.appId ? String(value.appId) : '')
+        setAppHash(value.appHash)
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+  }, [])
+
+  const save = async () => {
+    const id = Number(appId.trim())
+    if (!Number.isInteger(id) || id <= 0 || !appHash.trim()) {
+      setError('api_id 和 api_hash 都不能为空')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const saved = await api.updateSettings({ appId: id, appHash: appHash.trim() })
+      setSettings(saved)
+      setAppId(String(saved.appId))
+      setAppHash(saved.appHash)
+      await onChanged()
+      toast('Telegram API 凭据已保存', 'success')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mb-5 border-b border-[var(--line)] pb-5">
+      <h3 className="text-sm font-medium">API 凭据</h3>
+      <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
+        来自 my.telegram.org 的 api_id 和 api_hash。修改后会重新连接 Telegram；凭据只保存在本服务器。
+      </p>
+      {settings === null ? (
+        error ? <p className="mt-3 text-xs text-[var(--color-danger)]">{error}</p> : <div className="mt-3"><Spinner /></div>
+      ) : (
+        <div className="mt-3 space-y-3">
+          <Field label="api_id">
+            <Input value={appId} onChange={(e) => setAppId(e.target.value)} inputMode="numeric" />
+          </Field>
+          <Field label="api_hash" error={error ?? undefined}>
+            <Input
+              value={appHash}
+              onChange={(e) => setAppHash(e.target.value)}
+              className="font-[family-name:var(--font-mono)] text-xs"
+            />
+          </Field>
+          <Button variant="primary" loading={busy} onClick={() => void save()}>
+            保存并连接
+          </Button>
+        </div>
+      )}
+    </div>
   )
 }
 

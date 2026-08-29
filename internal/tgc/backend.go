@@ -26,9 +26,10 @@ func (m *Manager) Upload(ctx context.Context, ch drive.ChannelRef, spec drive.Up
 		return drive.StoredDoc{}, err
 	}
 
+	settings := m.cfg.RuntimeSettings()
 	up := uploader.NewUploader(api).
 		WithPartSize(config.UploadPartSize).
-		WithThreads(m.cfg.Telegram.UploadThreads)
+		WithThreads(settings.UploadThreads)
 	if spec.Progress != nil {
 		up = up.WithProgress(progressAdapter(spec.Progress))
 	}

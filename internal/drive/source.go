@@ -239,8 +239,9 @@ func (s *Service) OpenFile(ctx context.Context, f database.File) (*reader.File, 
 		}, nil
 	}
 
+	settings := s.cfg.RuntimeSettings()
 	return reader.Open(ctx, sourceFor, f.Size, f.SegmentSize, reader.Options{
-		Concurrency:  s.cfg.Stream.Concurrency,
+		Concurrency:  settings.StreamConcurrency,
 		Buffers:      s.cfg.Stream.Buffers,
 		ChunkTimeout: s.cfg.Stream.ChunkTimeout,
 	})

@@ -1,5 +1,5 @@
-// Package config loads tdrive's runtime configuration from environment
-// variables, which is what a container deployment can actually set.
+// Package config loads tdrive's deployment configuration from environment
+// variables and holds the runtime settings that the WebUI can change.
 //
 // Every knob has a default that works, so a first run only needs a data
 // directory. The tuning defaults here are the ones the performance targets were
@@ -51,7 +51,9 @@ type Config struct {
 	Storage  Storage
 	Stream   Stream
 	WebDAV   WebDAV
+	Local    Local
 	LogLevel string
+	Runtime  *RuntimeConfig
 }
 
 type Server struct {
@@ -144,6 +146,14 @@ type WebDAV struct {
 	Prefix  string
 }
 
+// Local describes the optional read-only directory exposed as a source for
+// server-side uploads. In Docker this is normally a bind mount such as
+// /vps-files; it is deliberately separate from DataDir so an accidental path
+// change cannot expose the application's database and session files.
+type Local struct {
+	Root string
+}
+
 // Load reads the environment and returns a validated configuration.
 func Load() (*Config, error) {
 	dataDir := envStr("TDRIVE_DATA_DIR", "")
@@ -155,6 +165,14 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("resolve data dir %q: %w", dataDir, err)
 	}
 	dataDir = abs
+
+	localRoot := strings.TrimSpace(os.Getenv("TDRIVE_LOCAL_DIR"))
+	if localRoot != "" {
+		localRoot, err = filepath.Abs(localRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve local directory %q: %w", localRoot, err)
+		}
+	}
 
 	cfg := &Config{
 		Server: Server{
@@ -194,6 +212,9 @@ func Load() (*Config, error) {
 			Enabled: envBool("TDRIVE_WEBDAV_ENABLED", true),
 			Prefix:  "/dav",
 		},
+		Local: Local{
+			Root: localRoot,
+		},
 		LogLevel: envStr("TDRIVE_LOG_LEVEL", "info"),
 	}
 
@@ -204,6 +225,7 @@ func Load() (*Config, error) {
 		}
 		cfg.Telegram.AppID = id
 	}
+	cfg.Runtime = NewRuntimeConfig(cfg.RuntimeSettings())
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -214,24 +236,12 @@ func Load() (*Config, error) {
 // Validate rejects settings that would fail later in a confusing place, such as
 // a segment size Telegram will refuse halfway through a multi-gigabyte upload.
 func (c *Config) Validate() error {
+	if err := c.RuntimeSettings().Validate(); err != nil {
+		return err
+	}
 	switch {
-	case c.Storage.SegmentSize <= 0:
-		return fmt.Errorf("segment size must be positive, got %d", c.Storage.SegmentSize)
-	case c.Storage.SegmentSize > TelegramFileLimit:
-		return fmt.Errorf(
-			"segment size %d exceeds the %d byte ceiling of one Telegram object (%d parts of %d bytes)",
-			c.Storage.SegmentSize, TelegramFileLimit, MaxUploadParts, UploadPartSize)
-	case c.Storage.SegmentSize%UploadPartSize != 0:
-		// A segment that is a whole number of upload parts keeps the last
-		// part full, which avoids an undersized final part on every segment.
-		return fmt.Errorf("segment size %d must be a multiple of the %d byte upload part size",
-			c.Storage.SegmentSize, UploadPartSize)
 	case c.Storage.SegmentConcurrency < 1:
 		return fmt.Errorf("segment concurrency must be at least 1, got %d", c.Storage.SegmentConcurrency)
-	case c.Telegram.PoolSize < 1:
-		return fmt.Errorf("telegram pool size must be at least 1, got %d", c.Telegram.PoolSize)
-	case c.Telegram.UploadThreads < 1:
-		return fmt.Errorf("upload threads must be at least 1, got %d", c.Telegram.UploadThreads)
 	case c.Stream.Concurrency < 1:
 		return fmt.Errorf("stream concurrency must be at least 1, got %d", c.Stream.Concurrency)
 	case c.Stream.Buffers < 1:
@@ -250,8 +260,9 @@ func (c *Config) SegmentCount(size int64) int {
 	if size <= 0 {
 		return 1
 	}
-	n := size / c.Storage.SegmentSize
-	if size%c.Storage.SegmentSize != 0 {
+	segmentSize := c.RuntimeSettings().SegmentSize
+	n := size / segmentSize
+	if size%segmentSize != 0 {
 		n++
 	}
 	return int(n)
