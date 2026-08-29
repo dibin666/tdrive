@@ -29,6 +29,7 @@ function Router() {
   useEffect(() => {
     if (!ready) return
     if (path === '/') navigate(user ? '/files' : '/login', true)
+    else if (user && path === '/login') navigate('/files', true)
   }, [ready, path, user, navigate])
 
   if (!ready) {
@@ -41,6 +42,16 @@ function Router() {
 
   if (!user && !status?.needsSetup) {
     return <Login />
+  }
+  // A successful login updates the session but the login form does not own
+  // the route. Keep the stale URL from being interpreted as a drive path
+  // while the redirect effect above replaces it with the files route.
+  if (user && path === '/login') {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Spinner className="size-6" />
+      </div>
+    )
   }
   if (needsWizard) {
     return <Setup />
