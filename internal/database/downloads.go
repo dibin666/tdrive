@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 const downloadCols = `id, user_id, file_id, name, total_size, downloaded_bytes, mode, status,
@@ -84,6 +85,47 @@ func (d *DB) SetDownloadProgress(ctx context.Context, id string, downloaded int6
 // SetDownloadStatus moves a job's lifecycle forward, maintaining the timing
 // brackets on the way through so that nothing else has to remember to.
 func (d *DB) SetDownloadStatus(ctx context.Context, id string, status DownloadStatus, errMsg string) error {
+	ok, err := d.setDownloadStatus(ctx, id, status, errMsg, "", nil)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetDownloadStatusIf changes a status only while the row is in one of the
+// supplied states. Background staged workers use this conditional transition
+// so a cancellation that wins a race cannot be overwritten by a late "ready".
+func (d *DB) SetDownloadStatusIf(
+	ctx context.Context,
+	id string,
+	status DownloadStatus,
+	errMsg string,
+	expected ...DownloadStatus,
+) (bool, error) {
+	if len(expected) == 0 {
+		return false, nil
+	}
+	placeholders := make([]string, len(expected))
+	args := make([]any, len(expected))
+	for i, state := range expected {
+		placeholders[i] = "?"
+		args[i] = string(state)
+	}
+	return d.setDownloadStatus(ctx, id, status, errMsg,
+		"status IN ("+strings.Join(placeholders, ", ")+")", args)
+}
+
+func (d *DB) setDownloadStatus(
+	ctx context.Context,
+	id string,
+	status DownloadStatus,
+	errMsg string,
+	condition string,
+	conditionArgs []any,
+) (bool, error) {
 	now := nowMS()
 	sets := []string{"status = ?", "error = ?", "updated_at = ?"}
 	args := []any{string(status), errMsg, now}
@@ -99,10 +141,22 @@ func (d *DB) SetDownloadStatus(ctx context.Context, id string, status DownloadSt
 		args = append(args, now)
 	}
 
+	args = append(args, conditionArgs...)
 	args = append(args, id)
+	where := "id = ?"
+	if condition != "" {
+		where = condition + " AND " + where
+	}
 	res, err := d.write.ExecContext(ctx,
-		`UPDATE download_jobs SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
-	return affectedOne(res, err, "set download status")
+		`UPDATE download_jobs SET `+strings.Join(sets, ", ")+` WHERE `+where, args...)
+	if err != nil {
+		return false, fmt.Errorf("set download status: %w", Translate(err))
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("set download status: %w", err)
+	}
+	return n > 0, nil
 }
 
 // SetDownloadCache records where a staged copy landed and when it may be
@@ -148,16 +202,49 @@ func (d *DB) ActiveStagedFor(ctx context.Context, fileID string) (DownloadJob, e
 		 ORDER BY created_at DESC LIMIT 1`, fileID))
 }
 
-// CacheUsage totals the disk held by staged downloads.
+// CacheUsage totals staged bytes and reservations. Pending and running jobs
+// reserve their complete target size even before cache_path is populated;
+// terminal rows with a path are included until their bytes are cleaned up.
 func (d *DB) CacheUsage(ctx context.Context) (bytes int64, count int64, err error) {
 	var sum sql.NullInt64
 	err = d.read.QueryRowContext(ctx,
 		`SELECT sum(total_size), count(*) FROM download_jobs
-		 WHERE cache_path <> '' AND status IN ('ready', 'complete')`).Scan(&sum, &count)
+		 WHERE mode = 'staged' AND
+		       (status IN ('pending', 'running') OR
+		        (cache_path <> '' AND status IN ('ready', 'complete', 'expired', 'failed', 'cancelled')))`).Scan(&sum, &count)
 	if err != nil {
 		return 0, 0, Translate(err)
 	}
 	return sum.Int64, count, nil
+}
+
+// FinishedDownloadsBefore returns terminal download rows old enough to be
+// removed from transfer history. The caller unlinks staged files before
+// deleting these rows because the database is not allowed to become the only
+// place that knows where bytes live.
+func (d *DB) FinishedDownloadsBefore(ctx context.Context, olderThanMS int64) ([]DownloadJob, error) {
+	now := time.Now().UnixMilli()
+	rows, err := d.read.QueryContext(ctx,
+		`SELECT `+downloadCols+` FROM download_jobs
+		 WHERE status IN ('complete', 'failed', 'cancelled', 'expired', 'ready')
+		   AND updated_at < ?
+		   AND NOT (mode = 'staged' AND status IN ('ready', 'complete')
+		            AND cache_path <> '' AND (expires_at = 0 OR expires_at > ?))
+		 ORDER BY updated_at`, olderThanMS, now)
+	if err != nil {
+		return nil, Translate(err)
+	}
+	defer rows.Close()
+
+	var out []DownloadJob
+	for rows.Next() {
+		job, err := scanDownload(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, Translate(rows.Err())
 }
 
 // EvictableDownloads lists staged copies in least-recently-used order, which
@@ -165,7 +252,7 @@ func (d *DB) CacheUsage(ctx context.Context) (bytes int64, count int64, err erro
 func (d *DB) EvictableDownloads(ctx context.Context) ([]DownloadJob, error) {
 	rows, err := d.read.QueryContext(ctx,
 		`SELECT `+downloadCols+` FROM download_jobs
-		 WHERE cache_path <> '' AND status IN ('ready', 'complete', 'expired', 'failed', 'cancelled')
+		 WHERE mode = 'staged' AND cache_path <> '' AND status IN ('ready', 'complete', 'expired', 'failed', 'cancelled')
 		 ORDER BY last_used_at ASC`)
 	if err != nil {
 		return nil, Translate(err)

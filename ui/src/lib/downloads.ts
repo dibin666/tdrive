@@ -19,7 +19,7 @@
 // straight to the downloads folder instead, and a many-segment file is offered
 // as separate parts plus a join script.
 
-import { api, currentToken, type DownloadMode, type SegmentBound } from './api'
+import { api, currentToken, segmentRawUrl, type DownloadMode, type SegmentBound } from './api'
 
 export type DownloadState =
   | 'queued'
@@ -175,7 +175,14 @@ class DownloadManager {
     if (current && current.state !== 'complete') {
       this.update(id, { state: 'cancelled', speed: 0 })
       if (current.jobId) {
-        void api.reportDownload(current.jobId, { status: 'cancelled' }).catch(() => {})
+        if (current.mode === 'staged') {
+          // Reporting a client-side status is not enough for a detached
+          // staged worker: the server must cancel its context and remove the
+          // partial cache file as well.
+          void api.cancelDownload(current.jobId).catch(() => {})
+        } else {
+          void api.reportDownload(current.jobId, { status: 'cancelled' }).catch(() => {})
+        }
       }
     }
   }
@@ -228,6 +235,17 @@ class DownloadManager {
       // average-speed reporting.
       const job = await api.startDownload(options.fileId, options.mode)
       this.update(id, { jobId: job.id })
+      if (controller.signal.aborted) {
+        // Cancellation can happen while the start request is in flight, before
+        // the job id was available to cancel(). Do not leave a staged worker
+        // running after that race.
+        if (options.mode === 'staged') {
+          await api.cancelDownload(job.id).catch(() => {})
+        } else {
+          await api.reportDownload(job.id, { status: 'cancelled' }).catch(() => {})
+        }
+        throw new DOMException('aborted', 'AbortError')
+      }
 
       let sourceUrl = `/api/files/${options.fileId}/raw?download=1`
       let sourceSize = options.size
@@ -239,6 +257,29 @@ class DownloadManager {
       }
 
       this.update(id, { state: 'downloading' })
+
+      if (!options.saveHandle && options.connections <= 1 &&
+        (options.mode === 'direct' || options.mode === 'staged')) {
+        // A native browser download streams to the downloads folder without
+        // buffering the file in JavaScript. The media token also works with the
+        // raw endpoint's staged-copy preference, so staged mode still uses the
+        // assembled file when it is ready.
+        const link = await api.mediaLink(options.fileId)
+        if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError')
+        simpleDownload(link.download, options.name)
+        this.update(id, {
+          state: 'complete',
+          received: options.size,
+          speed: 0,
+          finishedAt: Date.now(),
+          connections: 0,
+        })
+        void api
+          .reportDownload(job.id, { downloaded: options.size, status: 'complete' })
+          .catch(() => {})
+        options.onDone?.()
+        return
+      }
 
       if (options.mode === 'segments' && options.segmentBounds?.length) {
         await this.runSegments(id, options, controller.signal)
@@ -340,7 +381,7 @@ class DownloadManager {
     // Without disk access there is nowhere to join the parts, so each one is
     // handed to the browser separately and the user joins them afterwards.
     if (!options.saveHandle) {
-      await this.downloadSeparateParts(id, options, bounds)
+      await this.downloadSeparateParts(id, options, bounds, signal)
       return
     }
 
@@ -370,15 +411,20 @@ class DownloadManager {
     id: string,
     options: StartOptions,
     bounds: SegmentBound[],
+    signal: AbortSignal,
   ) {
     this.update(id, {
       note: '浏览器不支持直接写入磁盘，已改为逐卷下载并附带合并脚本',
       connections: 1,
     })
+    const media = await api.mediaLink(options.fileId)
+    const token = new URL(media.download, window.location.origin).searchParams.get('t')
+    if (!token) throw new Error('无法生成分卷下载凭证')
 
     for (const bound of bounds) {
+      if (signal.aborted) throw new DOMException('aborted', 'AbortError')
       const link = document.createElement('a')
-      link.href = `/api/files/${options.fileId}/segments/${bound.index}/raw?download=1`
+      link.href = segmentRawUrl(options.fileId, bound.index, token)
       link.download = `${options.name}.part${String(bound.index).padStart(3, '0')}`
       link.style.display = 'none'
       document.body.appendChild(link)
@@ -388,9 +434,10 @@ class DownloadManager {
       this.update(id, { received: bound.start + bound.size })
       // Browsers throttle or drop a burst of programmatic downloads, so they
       // are spaced out rather than fired all at once.
-      await new Promise((resolve) => setTimeout(resolve, 400))
+      await delay(400)
     }
 
+    if (signal.aborted) throw new DOMException('aborted', 'AbortError')
     downloadMergeScript(options.name, bounds.length)
   }
 
@@ -528,15 +575,41 @@ export function downloadMergeScript(name: string, parts: number) {
   const sh = [
     '#!/bin/sh',
     '# macOS / Linux：把这个文件和所有分卷放在同一个目录，然后执行 sh merge.sh',
-    `cat ${partNames.map((p) => `"${p}"`).join(' ')} > "${name}"`,
-    `echo "已合并为 ${name}"`,
+    `cat ${partNames.map(shellQuote).join(' ')} > ${shellQuote(name)}`,
+    `printf '%s\\n' ${shellQuote(`已合并为 ${name}`)}`,
+    '',
+  ].join('\n')
+
+  // cmd.exe's quoting rules are not a portable variant of POSIX quoting:
+  // &, %, !, ^ and embedded quotes all have their own expansion rules. Keep
+  // the .bat command itself limited to a base64 alphabet and let PowerShell
+  // open each path with LiteralPath semantics, using a streaming copy so
+  // untrusted filenames can never become commands.
+  const powershell = [
+    '$ErrorActionPreference = "Stop"',
+    `$output = ${powerShellQuote(name)}`,
+    `$count = ${Math.max(0, Math.floor(parts))}`,
+    '$parts = if ($count -gt 0) { 1..$count | ForEach-Object { \'{0}.part{1:D3}\' -f $output, $_ } } else { @() }',
+    '$buffer = New-Object byte[] 1048576',
+    '$destination = [IO.File]::Open($output, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)',
+    'try {',
+    '  foreach ($part in $parts) {',
+    '    $source = [IO.File]::OpenRead($part)',
+    '    try {',
+    '      while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {',
+    '        $destination.Write($buffer, 0, $read)',
+    '      }',
+    '    } finally { $source.Dispose() }',
+    '  }',
+    '} finally { $destination.Dispose() }',
+    `Write-Host ('已合并为 ' + $output)`,
     '',
   ].join('\n')
 
   const bat = [
     '@echo off',
     'REM Windows：把这个文件和所有分卷放在同一个目录，然后双击运行',
-    `copy /b ${partNames.map((p) => `"${p}"`).join('+')} "${name}"`,
+    `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodeUtf16Base64(powershell)}`,
     'pause',
     '',
   ].join('\r\n')
@@ -545,6 +618,30 @@ export function downloadMergeScript(name: string, parts: number) {
   // A short gap so the browser treats these as two downloads rather than
   // suppressing the second one.
   setTimeout(() => saveText(`merge-${name}.bat`, bat), 300)
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+function powerShellQuote(value: string) {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function encodeUtf16Base64(value: string) {
+  const bytes = new Uint8Array(value.length * 2)
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+    bytes[i * 2] = code & 0xff
+    bytes[i * 2 + 1] = code >>> 8
+  }
+
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
+  }
+  return btoa(binary)
 }
 
 function saveText(filename: string, content: string) {

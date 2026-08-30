@@ -43,6 +43,32 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestCacheUsageIncludesActiveStagedReservations(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+
+	jobs := []DownloadJob{
+		{ID: NewID(), Mode: DownloadStaged, Status: DownloadPending, TotalSize: 10},
+		{ID: NewID(), Mode: DownloadStaged, Status: DownloadRunning, TotalSize: 20},
+		{ID: NewID(), Mode: DownloadStaged, Status: DownloadReady, TotalSize: 30, CachePath: "/cache/ready"},
+		{ID: NewID(), Mode: DownloadStaged, Status: DownloadFailed, TotalSize: 5, CachePath: "/cache/failed"},
+		{ID: NewID(), Mode: DownloadDirect, Status: DownloadRunning, TotalSize: 40},
+	}
+	for _, job := range jobs {
+		if err := db.InsertDownload(ctx, job); err != nil {
+			t.Fatalf("InsertDownload: %v", err)
+		}
+	}
+
+	used, count, err := db.CacheUsage(ctx)
+	if err != nil {
+		t.Fatalf("CacheUsage: %v", err)
+	}
+	if used != 65 || count != 4 {
+		t.Fatalf("CacheUsage = (%d, %d), want (65, 4)", used, count)
+	}
+}
+
 func TestUserUniquenessIsCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

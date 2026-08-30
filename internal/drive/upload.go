@@ -61,16 +61,34 @@ func (s *Service) Begin(ctx context.Context, req UploadRequest) (database.Upload
 		return database.UploadJob{}, database.File{}, errors.New("upload size must be known before starting")
 	}
 
-	// The quota is checked before anything is created, so a rejected upload
-	// leaves no pending file row and no Telegram message behind.
-	if err := s.CheckQuota(ctx, req.UserID, req.Size); err != nil {
-		return database.UploadJob{}, database.File{}, err
-	}
-
 	channel, err := s.storageChannel(ctx)
 	if err != nil {
 		return database.UploadJob{}, database.File{}, err
 	}
+
+	// If an overwrite replaces a file owned by this account, only the size
+	// delta consumes quota. Inspect an already-existing directory without
+	// creating it first, so a quota rejection still has no filesystem or
+	// Telegram side effects.
+	quotaBytes := req.Size
+	if req.Overwrite {
+		if existingDir, dirErr := s.ResolveDir(ctx, req.DirPath); dirErr == nil {
+			if existing, fileErr := s.db.FileInDir(ctx, existingDir.ID, req.Name); fileErr == nil &&
+				existing.OwnerID == req.UserID {
+				quotaBytes -= existing.Size
+			}
+		} else if !errors.Is(dirErr, ErrNotFound) {
+			return database.UploadJob{}, database.File{}, dirErr
+		}
+	}
+
+	// The quota is checked before anything is created, so a rejected upload
+	// leaves no pending file row and no Telegram message behind. Replacing an
+	// owned file uses the net size change calculated above.
+	if err := s.CheckQuota(ctx, req.UserID, quotaBytes); err != nil {
+		return database.UploadJob{}, database.File{}, err
+	}
+
 	dir, err := s.Mkdir(ctx, req.DirPath)
 	if err != nil {
 		return database.UploadJob{}, database.File{}, err

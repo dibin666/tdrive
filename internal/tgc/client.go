@@ -86,6 +86,11 @@ type Manager struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
+	// OnReady is invoked once when a connection becomes authorized. It lets
+	// server-side work that was waiting for Telegram (such as staged
+	// downloads) resume after a late setup or reconnect.
+	OnReady func()
+
 	// Login flow state. Telegram hands back a phone_code_hash with the sent
 	// code and expects it echoed on sign-in, so it has to survive between two
 	// unrelated HTTP requests.
@@ -239,8 +244,10 @@ func (m *Manager) refreshAuth(ctx context.Context) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	becameReady := false
+	var onReady func()
 	if status.Authorized {
+		becameReady = m.state != StateReady
 		m.self = status.User
 		m.state = StateReady
 		m.loginPhone, m.loginCodeHash, m.awaitingPass = "", "", false
@@ -250,6 +257,12 @@ func (m *Manager) refreshAuth(ctx context.Context) {
 	} else {
 		m.self = nil
 		m.state = StateUnauthorized
+	}
+	onReady = m.OnReady
+	m.mu.Unlock()
+
+	if becameReady && onReady != nil {
+		go onReady()
 	}
 }
 

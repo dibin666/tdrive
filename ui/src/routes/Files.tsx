@@ -40,7 +40,7 @@ import { useApp } from '../app/context'
 import { events } from '../lib/events'
 import { formatBytes, formatDate, isPreviewable, kindOf, naturalCompare } from '../lib/format'
 import { uploads } from '../lib/uploads'
-import { simpleDownload } from '../lib/downloads'
+import { downloads } from '../lib/downloads'
 import { useSelection, useMarquee } from '../lib/selection'
 import { useEdgeSwipe, useLongPress, usePullToRefresh } from '../lib/gestures'
 import {
@@ -244,8 +244,16 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
       // own downloader is already the right answer.
       if ((entry.segmentCount ?? 1) <= 1 && entry.size < 512 * 1024 * 1024) {
         try {
-          const link = await api.share(entry.id, {})
-          simpleDownload(link.file.url, entry.name)
+          // Use the same tracked native-download path as the dialog. It gets
+          // a short-lived media token, records history, and never requires the
+          // share permission just to download a file.
+          await downloads.start({
+            fileId: entry.id,
+            name: entry.name,
+            size: entry.size,
+            mode: 'direct',
+            connections: 1,
+          })
           return
         } catch {
           /* fall through to the dialog, which can explain what went wrong */

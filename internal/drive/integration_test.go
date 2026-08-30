@@ -558,6 +558,33 @@ func TestOverwriteReplacesTheOldFile(t *testing.T) {
 	}
 }
 
+func TestOverwriteQuotaCountsNetSize(t *testing.T) {
+	h := newHarness(t, 4096)
+	ctx := context.Background()
+	user, err := h.db.CreateUser(ctx, "quota-user", "hash", database.RoleUser)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	quota := int64(10)
+	if err := h.db.UpdateUserProfile(ctx, user.ID, database.UserProfile{QuotaBytes: &quota}); err != nil {
+		t.Fatalf("UpdateUserProfile: %v", err)
+	}
+
+	old := bytes.Repeat([]byte("o"), 8)
+	if _, err := h.svc.UploadStream(ctx, UploadRequest{
+		DirPath: "/", Name: "quota.bin", Size: int64(len(old)), UserID: user.ID,
+	}, bytes.NewReader(old), nil); err != nil {
+		t.Fatalf("initial upload: %v", err)
+	}
+
+	newData := bytes.Repeat([]byte("n"), 8)
+	if _, err := h.svc.UploadStream(ctx, UploadRequest{
+		DirPath: "/", Name: "quota.bin", Size: int64(len(newData)), UserID: user.ID, Overwrite: true,
+	}, bytes.NewReader(newData), nil); err != nil {
+		t.Fatalf("same-sized overwrite should fit quota: %v", err)
+	}
+}
+
 // Listings must present one entry per logical file, whatever its segment count.
 func TestListingHidesSegmentation(t *testing.T) {
 	h := newHarness(t, 4096)

@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
 	"github.com/dibin/tdrive/internal/database"
 	"github.com/dibin/tdrive/internal/drive"
@@ -199,6 +202,7 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 		parent   string
 		oldName  string
 		newName  string
+		target   string
 	}
 
 	// Phase one: validate everything before touching anything. A batch that is
@@ -228,6 +232,20 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seen[real] = true
+		exists, err := s.pathExists(r.Context(), real)
+		if err != nil {
+			// Resolve every source before the first temporary rename. This is
+			// what keeps a stale later item from leaving earlier items parked.
+			s.fail(w, err, "batch rename")
+			return
+		}
+		if !exists {
+			// pathExists also sees pending files, while drive.Stat hides them
+			// from ordinary reads. Rename validation should resolve the actual
+			// source entry rather than applying read visibility rules.
+			s.fail(w, fmt.Errorf("%w: %s", drive.ErrNotFound, real), "batch rename")
+			return
+		}
 
 		parent, oldName := drive.Parent(real)
 		target := drive.Join(parent, name)
@@ -238,38 +256,82 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 		}
 		targets[target] = true
 
-		plans = append(plans, plan{realPath: real, parent: parent, oldName: oldName, newName: name})
+		plans = append(plans, plan{
+			realPath: real, parent: parent, oldName: oldName, newName: name, target: target,
+		})
 	}
 
-	// Phase two: break cycles. Any target name that is currently occupied by
-	// another item in this batch is renamed to a temporary name first, so the
-	// real rename never meets a name that is about to be vacated.
+	// Finish checking the target side before touching anything. A target that is
+	// not one of the sources must be free now; otherwise a later rename would
+	// fail after earlier items had already changed the tree.
+	sourceIndex := make(map[string]int, len(plans))
+	for i, p := range plans {
+		sourceIndex[p.realPath] = i
+	}
+	for _, p := range plans {
+		if _, moving := sourceIndex[p.target]; moving {
+			continue
+		}
+		taken, err := s.pathExists(r.Context(), p.target)
+		if err != nil {
+			s.fail(w, err, "batch rename")
+			return
+		}
+		if taken {
+			writeError(w, http.StatusConflict, fmt.Sprintf("目标名称 %q 已存在", p.newName))
+			return
+		}
+	}
+
+	// Phase two: break cycles. If a source is the current target of another
+	// item, that source is parked first. Parking the occupied destination (not
+	// the item whose target points at it) also handles chains such as A→B,
+	// B→C; leaving B in place would make A→B collide.
 	//
 	// A swap of A and B is the smallest case, but a rotation of any length
 	// behaves the same way, and detecting the cycle shape precisely buys
 	// nothing over parking every conflicting entry.
-	sources := make(map[string]bool, len(plans))
-	for _, p := range plans {
-		sources[p.realPath] = true
-	}
-
-	parked := make(map[int]string)
+	parkNames := make(map[int]string)
 	for i, p := range plans {
-		target := drive.Join(p.parent, p.newName)
-		if target == p.realPath || !sources[target] {
+		j, moving := sourceIndex[p.target]
+		if !moving || j == i {
 			continue
 		}
-		temp := fmt.Sprintf(".tdrive-rename-%s", database.NewID())
-		if _, err := s.drive.Rename(r.Context(), p.realPath, temp); err != nil {
+		if _, already := parkNames[j]; already {
+			continue
+		}
+		for {
+			temp := fmt.Sprintf(".tdrive-rename-%s", database.NewID())
+			taken, err := s.pathExists(r.Context(), drive.Join(plans[j].parent, temp))
+			if err != nil {
+				s.fail(w, err, "batch rename")
+				return
+			}
+			if !taken {
+				parkNames[j] = temp
+				break
+			}
+		}
+	}
+
+	parked := make(map[int]string, len(parkNames))
+	for i, temp := range parkNames {
+		if _, err := s.drive.Rename(r.Context(), plans[i].realPath, temp); err != nil {
+			for parkedIndex, parkedPath := range parked {
+				if _, restoreErr := s.drive.Rename(r.Context(), parkedPath, plans[parkedIndex].oldName); restoreErr != nil {
+					s.log.Warn("could not roll back a temporary batch rename",
+						zap.String("path", parkedPath), zap.Error(restoreErr))
+				}
+			}
 			s.fail(w, err, "batch rename")
 			return
 		}
-		parked[i] = drive.Join(p.parent, temp)
+		parked[i] = drive.Join(plans[i].parent, temp)
 	}
 
 	results := make([]batchRenameResult, 0, len(plans))
 	touched := map[string]bool{}
-	var failed int
+	applied := make([]int, 0, len(plans))
 
 	for i, p := range plans {
 		from := p.realPath
@@ -280,12 +342,33 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 
 		entry, err := s.drive.Rename(r.Context(), from, p.newName)
 		if err != nil {
-			failed++
-			results = append(results, batchRenameResult{
-				Path: visibleOld, Name: p.newName, Error: err.Error(),
-			})
-			continue
+			// The preflight should make this exceptional, but a concurrent
+			// mutation or an external backend failure can still happen. Undo
+			// completed moves and unpark the rest before reporting an error.
+			appliedSet := make(map[int]bool, len(applied))
+			for _, appliedIndex := range applied {
+				appliedSet[appliedIndex] = true
+			}
+			for n := len(applied) - 1; n >= 0; n-- {
+				appliedIndex := applied[n]
+				if _, restoreErr := s.drive.Rename(r.Context(), plans[appliedIndex].target, plans[appliedIndex].oldName); restoreErr != nil {
+					s.log.Warn("could not roll back a batch rename",
+						zap.String("path", plans[appliedIndex].target), zap.Error(restoreErr))
+				}
+			}
+			for parkedIndex, parkedPath := range parked {
+				if appliedSet[parkedIndex] {
+					continue
+				}
+				if _, restoreErr := s.drive.Rename(r.Context(), parkedPath, plans[parkedIndex].oldName); restoreErr != nil {
+					s.log.Warn("could not roll back a parked batch rename",
+						zap.String("path", parkedPath), zap.Error(restoreErr))
+				}
+			}
+			s.fail(w, err, "batch rename")
+			return
 		}
+		applied = append(applied, i)
 		touched[p.parent] = true
 		visibleNew, _ := s.scopeOf(r).ToVisible(entry.Path)
 		results = append(results, batchRenameResult{
@@ -299,13 +382,36 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 		s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: p}})
 	}
 	s.audit(r, database.AuditFileBatchRename, "",
-		fmt.Sprintf("items=%d failed=%d", len(plans), failed))
+		fmt.Sprintf("items=%d failed=0", len(plans)))
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"results": results,
-		"renamed": len(plans) - failed,
-		"failed":  failed,
+		"renamed": len(plans),
+		"failed":  0,
 	})
+}
+
+// pathExists checks both directories and files, including pending files that
+// drive.Stat intentionally hides from normal reads. Batch rename must account
+// for every occupied destination before it starts mutating the tree.
+func (s *Server) pathExists(ctx context.Context, real string) (bool, error) {
+	if _, err := s.db.DirByPath(ctx, real); err == nil {
+		return true, nil
+	} else if !errors.Is(err, database.ErrNotFound) {
+		return false, err
+	}
+
+	parentPath, name := drive.Parent(real)
+	parent, err := s.drive.ResolveDir(ctx, parentPath)
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.db.FileInDir(ctx, parent.ID, name); err == nil {
+		return true, nil
+	} else if !errors.Is(err, database.ErrNotFound) {
+		return false, err
+	}
+	return false, nil
 }
 
 type moveRequest struct {

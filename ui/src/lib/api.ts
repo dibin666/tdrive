@@ -267,6 +267,11 @@ export interface DownloadOptions {
   cache: CacheStatus
 }
 
+export interface MediaLink {
+  url: string
+  download: string
+}
+
 export interface ShareLinkBody {
   id: string
   url: string
@@ -502,6 +507,7 @@ export const api = {
     ),
 
   downloadOptions: (id: string) => request<DownloadOptions>(`/files/${id}/download-options`),
+  mediaLink: (id: string) => request<MediaLink>(`/files/${id}/link`),
   share: (id: string, body: { ttlSeconds?: number; segments?: boolean; label?: string } = {}) =>
     request<ShareResponse>(`/files/${id}/share`, { method: 'POST', body: json(body) }),
   shares: (all = false) => request<ShareRecord[]>(`/shares${query({ all })}`),

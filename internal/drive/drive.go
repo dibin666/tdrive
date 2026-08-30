@@ -66,6 +66,8 @@ type Service struct {
 	// stageMu serialises the decide-then-insert of a staged download, so two
 	// requests for the same file cannot both conclude they are the first one.
 	stageMu       sync.Mutex
+	stageRunMu    sync.Mutex
+	stageRuns     map[string]struct{}
 	stageCancelMu sync.Mutex
 	stageCancels  map[string]context.CancelFunc
 }
@@ -82,6 +84,7 @@ func New(cfg *config.Config, db *database.DB, backend Backend, log *zap.Logger) 
 		downloadLimiter:  newTaskLimiter(settings.DownloadConcurrency),
 		uploadJobs:       make(map[string]*uploadJobLease),
 		downloadSessions: make(map[string]*downloadSession),
+		stageRuns:        make(map[string]struct{}),
 		stageCancels:     make(map[string]context.CancelFunc),
 	}
 }

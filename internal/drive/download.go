@@ -42,6 +42,16 @@ var ErrStagingDisabled = errors.New("drive: staged downloads are disabled becaus
 // evicting everything eligible.
 var ErrCacheFull = errors.New("drive: the download cache does not have room for this file")
 
+const (
+	// CacheDir is an operator-selected location and may be shared with other
+	// applications. Keep every directory that tdrive owns below a dedicated
+	// child, so a sweep can never mistake somebody else's directory for an
+	// orphaned download.
+	stagedCacheNamespace  = ".tdrive-download-cache"
+	stagedCacheMarker     = ".tdrive-owned"
+	stagedCacheMarkerText = "tdrive download cache v1\n"
+)
+
 // DownloadProgress is notified as a staged download advances, so the browser
 // can watch it the same way it watches an upload.
 type DownloadProgress func(job database.DownloadJob, downloaded, total int64, err error)
@@ -74,6 +84,9 @@ func (s *Service) StartStaged(ctx context.Context, req StageRequest) (database.D
 		return database.DownloadJob{}, fmt.Errorf(
 			"%w: %q is %d bytes and the cache limit is %d",
 			ErrCacheFull, file.Name, file.Size, settings.CacheLimit)
+	}
+	if _, err := ensureStagedCacheRoot(s.cfg.CacheRoot()); err != nil {
+		return database.DownloadJob{}, err
 	}
 
 	// An existing ready copy is the whole point of a cache.
@@ -115,7 +128,7 @@ func (s *Service) StartStaged(ctx context.Context, req StageRequest) (database.D
 		return database.DownloadJob{}, err
 	}
 
-	go s.runStaged(context.WithoutCancel(ctx), job, file)
+	s.scheduleStagedWorker(context.WithoutCancel(ctx), job, file)
 	return job, nil
 }
 
@@ -137,8 +150,31 @@ func (s *Service) ResumeStaged(ctx context.Context) {
 		}
 		s.log.Info("resuming a staged download",
 			zap.String("job", job.ID), zap.String("name", job.Name))
-		go s.runStaged(context.WithoutCancel(ctx), job, file)
+		s.scheduleStagedWorker(context.WithoutCancel(ctx), job, file)
 	}
+}
+
+// scheduleStagedWorker makes ResumeStaged safe to call more than once while a
+// connection is becoming ready. The database row remains pending until the
+// goroutine gets a task slot, so a database-only check cannot prevent duplicate
+// workers during that window.
+func (s *Service) scheduleStagedWorker(ctx context.Context, job database.DownloadJob, file database.File) {
+	s.stageRunMu.Lock()
+	if _, exists := s.stageRuns[job.ID]; exists {
+		s.stageRunMu.Unlock()
+		return
+	}
+	s.stageRuns[job.ID] = struct{}{}
+	s.stageRunMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.stageRunMu.Lock()
+			delete(s.stageRuns, job.ID)
+			s.stageRunMu.Unlock()
+		}()
+		s.runStaged(ctx, job, file)
+	}()
 }
 
 // StagedFile returns the on-disk path of a ready staged copy, refreshing its
@@ -152,7 +188,18 @@ func (s *Service) StagedFile(ctx context.Context, jobID string) (database.Downlo
 	if job.CachePath == "" || (job.Status != database.DownloadReady && job.Status != database.DownloadComplete) {
 		return database.DownloadJob{}, fmt.Errorf("%w: staged copy is not ready", database.ErrNotFound)
 	}
+	if !job.ExpiresAt.IsZero() && !time.Now().Before(job.ExpiresAt) {
+		// Do this synchronously on the read path as well as in the hourly
+		// sweep. A client must not keep a staged capability alive merely by
+		// polling or downloading it before maintenance gets a turn.
+		s.removeStagedFile(job)
+		_ = s.db.SetDownloadCache(ctx, job.ID, "", 0)
+		_ = s.db.SetDownloadStatus(ctx, job.ID, database.DownloadExpired, "the staged copy expired")
+		return database.DownloadJob{}, fmt.Errorf("%w: staged copy expired", database.ErrNotFound)
+	}
 	if _, err := os.Stat(job.CachePath); err != nil {
+		s.removeStagedFile(job)
+		_ = s.db.SetDownloadCache(ctx, job.ID, "", 0)
 		_ = s.db.SetDownloadStatus(ctx, job.ID, database.DownloadExpired, "the staged copy is no longer on disk")
 		return database.DownloadJob{}, fmt.Errorf("%w: staged copy is gone", database.ErrNotFound)
 	}
@@ -166,6 +213,9 @@ func (s *Service) CancelStaged(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
+	if job.Mode != database.DownloadStaged {
+		return fmt.Errorf("%w: only staged downloads can be cancelled here", database.ErrNotFound)
+	}
 	s.stageCancelMu.Lock()
 	if cancel, ok := s.stageCancels[jobID]; ok {
 		cancel()
@@ -173,9 +223,11 @@ func (s *Service) CancelStaged(ctx context.Context, jobID string) error {
 	s.stageCancelMu.Unlock()
 
 	s.removeStagedFile(job)
-	if job.Status == database.DownloadPending || job.Status == database.DownloadRunning {
-		return s.db.SetDownloadStatus(ctx, jobID, database.DownloadCancelled, "cancelled")
+	if _, err := s.db.SetDownloadStatusIf(ctx, jobID, database.DownloadCancelled, "cancelled",
+		database.DownloadPending, database.DownloadRunning, database.DownloadReady); err != nil {
+		return err
 	}
+	_ = s.db.SetDownloadCache(ctx, jobID, "", 0)
 	return nil
 }
 
@@ -206,10 +258,20 @@ func (s *Service) runStaged(ctx context.Context, job database.DownloadJob, file 
 	fail := func(err error) {
 		s.log.Warn("a staged download failed",
 			zap.String("job", job.ID), zap.String("name", job.Name), zap.Error(err))
-		if setErr := s.db.SetDownloadStatus(ctx, job.ID, database.DownloadFailed, err.Error()); setErr != nil {
-			s.log.Warn("could not record a failed staged download", zap.Error(setErr))
+		if ctx.Err() != nil {
+			return
 		}
-		s.notifyDownload(job, 0, file.Size, err)
+		cleanupCtx := context.WithoutCancel(ctx)
+		// A failed worker has already removed its bytes. Clear the persisted
+		// path too, otherwise conservative cache accounting would reserve the
+		// failed file until the next maintenance sweep.
+		_ = s.db.SetDownloadCache(cleanupCtx, job.ID, "", 0)
+		if _, setErr := s.db.SetDownloadStatusIf(cleanupCtx, job.ID, database.DownloadFailed, err.Error(),
+			database.DownloadPending, database.DownloadRunning); setErr != nil {
+			s.log.Warn("could not record a failed staged download", zap.Error(setErr))
+		} else {
+			s.notifyDownload(job, 0, file.Size, err)
+		}
 	}
 
 	// A staged download is one whole-file transfer, so it takes a task slot
@@ -217,40 +279,78 @@ func (s *Service) runStaged(ctx context.Context, job database.DownloadJob, file 
 	// running in the background exempts it from the configured limit.
 	release, err := s.AcquireDownloadTask(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		fail(err)
 		return
 	}
 	defer release()
 
-	if err := s.db.SetDownloadStatus(ctx, job.ID, database.DownloadRunning, ""); err != nil {
+	ok, err := s.db.SetDownloadStatusIf(ctx, job.ID, database.DownloadRunning, "",
+		database.DownloadPending, database.DownloadRunning)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		fail(err)
+		return
+	}
+	if !ok {
+		// The job was cancelled or deleted while it waited for a download
+		// slot. Do not turn that terminal state back into running.
 		return
 	}
 	s.notifyDownload(job, 0, file.Size, nil)
 
-	dir := filepath.Join(s.cfg.CacheRoot(), job.ID)
+	target, dir, persisted := persistedStagedTarget(job)
+	if !persisted {
+		cacheRoot, err := ensureStagedCacheRoot(s.cfg.CacheRoot())
+		if err != nil {
+			fail(err)
+			return
+		}
+		dir = filepath.Join(cacheRoot, job.ID)
+		target = filepath.Join(dir, safeCacheName(file.Name))
+	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		fail(fmt.Errorf("create cache directory: %w", err))
 		return
 	}
-	target := filepath.Join(dir, safeCacheName(file.Name))
+	job.CachePath = target
+	// Persist the destination before bytes start moving. Apart from making a
+	// restart able to find a partial copy, this lets cancellation and eviction
+	// remove the correct old-root file if CacheDir changes while the job runs.
+	if err := s.db.SetDownloadCache(ctx, job.ID, target, 0); err != nil {
+		s.removeStagedFile(job)
+		if ctx.Err() != nil {
+			return
+		}
+		fail(err)
+		return
+	}
 
 	// The copy goes to a temporary name and is renamed on success, so a
 	// half-written file can never be mistaken for a complete one by a request
 	// that arrives mid-transfer.
+	// A crash can leave the final name published before the status update; a
+	// resumed worker owns this job, so discard that stale candidate first.
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		s.removeStagedFile(job)
+		fail(fmt.Errorf("replace stale cache file: %w", err))
+		return
+	}
 	partial := target + ".part"
 	out, err := os.Create(partial)
 	if err != nil {
+		s.removeStagedFile(job)
 		fail(fmt.Errorf("create cache file: %w", err))
 		return
 	}
 
 	cleanupPartial := func() {
 		out.Close()
-		if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
-			s.log.Warn("could not clean up a failed staged download",
-				zap.String("path", dir), zap.Error(err))
-		}
+		s.removeStagedFile(job)
 	}
 
 	reader, err := s.OpenFile(ctx, file)
@@ -288,15 +388,39 @@ func (s *Service) runStaged(ctx context.Context, job database.DownloadJob, file 
 	}
 
 	expires := time.Now().Add(s.cfg.RuntimeSettings().CacheTTL).UnixMilli()
+	if ctx.Err() != nil {
+		cleanupPartial()
+		return
+	}
 	if err := s.db.SetDownloadCache(ctx, job.ID, target, expires); err != nil {
+		cleanupPartial()
+		if ctx.Err() != nil {
+			return
+		}
 		fail(err)
 		return
 	}
-	if err := s.db.SetDownloadStatus(ctx, job.ID, database.DownloadReady, ""); err != nil {
+	ok, err = s.db.SetDownloadStatusIf(ctx, job.ID, database.DownloadReady, "", database.DownloadRunning)
+	if err != nil {
+		cleanupPartial()
+		if ctx.Err() != nil {
+			return
+		}
 		fail(err)
 		return
 	}
-
+	if !ok {
+		// Cancellation or history deletion won the race after the copy was
+		// published. Leave no bytes behind and do not resurrect the job.
+		cleanupPartial()
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		// A cancellation immediately after the conditional status update is
+		// still safe: CancelStaged removes the published path and marks the
+		// row cancelled.
+		return
+	}
 	ready := job
 	ready.Status = database.DownloadReady
 	ready.CachePath = target
@@ -406,6 +530,9 @@ func (s *Service) makeRoomFor(ctx context.Context, size int64) error {
 // SweepCache drops expired staged copies and brings the cache back under its
 // limit. It runs on the maintenance ticker alongside the other sweeps.
 func (s *Service) SweepCache(ctx context.Context) {
+	s.stageMu.Lock()
+	defer s.stageMu.Unlock()
+
 	settings := s.cfg.RuntimeSettings()
 	now := time.Now().UnixMilli()
 
@@ -415,14 +542,26 @@ func (s *Service) SweepCache(ctx context.Context) {
 		return
 	}
 
-	var used int64
+	// CacheUsage includes pending and running jobs as reservations. The
+	// evictable query below intentionally cannot return those jobs, but their
+	// space still has to be present when deciding whether ready copies push the
+	// cache over a newly lowered limit.
+	used, _, err := s.db.CacheUsage(ctx)
+	if err != nil {
+		s.log.Warn("could not total the download cache", zap.Error(err))
+		return
+	}
 	var live []database.DownloadJob
 	for _, job := range candidates {
-		expired := !job.ExpiresAt.IsZero() && job.ExpiresAt.UnixMilli() < now
+		expired := !job.ExpiresAt.IsZero() && job.ExpiresAt.UnixMilli() <= now
 		terminal := job.Status == database.DownloadFailed ||
 			job.Status == database.DownloadCancelled ||
 			job.Status == database.DownloadExpired
 		if expired || terminal {
+			used -= job.TotalSize
+			if used < 0 {
+				used = 0
+			}
 			s.removeStagedFile(job)
 			if job.CachePath != "" {
 				if err := s.db.SetDownloadCache(ctx, job.ID, "", 0); err != nil {
@@ -434,7 +573,6 @@ func (s *Service) SweepCache(ctx context.Context) {
 			}
 			continue
 		}
-		used += job.TotalSize
 		live = append(live, job)
 	}
 
@@ -459,7 +597,13 @@ func (s *Service) SweepCache(ctx context.Context) {
 // is what a crash between creating a directory and committing its job leaves
 // behind.
 func (s *Service) removeOrphanCacheDirs(ctx context.Context) {
-	root := s.cfg.CacheRoot()
+	root, ok := existingStagedCacheRoot(s.cfg.CacheRoot())
+	if !ok {
+		// A configured CacheDir may be shared with unrelated applications. Do
+		// not create or sweep anything unless the tdrive-owned namespace and
+		// its marker are present.
+		return
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -469,7 +613,7 @@ func (s *Service) removeOrphanCacheDirs(ctx context.Context) {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || entry.Name() == stagedCacheMarker {
 			continue
 		}
 		if _, err := s.db.DownloadByID(ctx, entry.Name()); err == nil {
@@ -486,16 +630,133 @@ func (s *Service) removeOrphanCacheDirs(ctx context.Context) {
 }
 
 func (s *Service) removeStagedFile(job database.DownloadJob) {
-	if job.ID == "" {
+	if job.ID == "" || job.Mode != database.DownloadStaged {
 		return
 	}
-	// The whole per-job directory goes, not just the file, so a leftover
-	// .part from an interrupted run cannot survive its own job.
-	dir := filepath.Join(s.cfg.CacheRoot(), job.ID)
+	// Ready jobs persist the exact path they used. That matters after an
+	// administrator moves CacheDir: deriving the directory from the current
+	// setting would leave the old copy behind. Remove only the known target and
+	// its .part sibling, then remove the now-empty job directory; never recurse
+	// through an arbitrary persisted path.
+	if target, dir, ok := persistedStagedTarget(job); ok {
+		for _, path := range []string{target, target + ".part"} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				s.log.Warn("could not remove a staged download",
+					zap.String("path", path), zap.Error(err))
+			}
+		}
+		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+			// An unexpected file is left in the per-job directory rather
+			// than recursively deleting it. The next sweep can inspect it.
+			if entries, readErr := os.ReadDir(dir); readErr != nil || len(entries) == 0 {
+				s.log.Warn("could not remove a staged download directory",
+					zap.String("path", dir), zap.Error(err))
+			}
+		}
+		return
+	}
+
+	// Older in-flight rows may not have a persisted path yet. The fallback is
+	// safe because it is confined to the marker-guarded namespace and a single
+	// job id below it.
+	root, ok := existingStagedCacheRoot(s.cfg.CacheRoot())
+	if !ok || filepath.Base(job.ID) != job.ID || job.ID == "." || job.ID == ".." {
+		return
+	}
+	dir := filepath.Join(root, job.ID)
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 		s.log.Warn("could not remove a staged download",
 			zap.String("path", dir), zap.Error(err))
 	}
+}
+
+// persistedStagedTarget accepts only the path shape tdrive writes: a file
+// directly below a directory named after the job. Keeping this check small
+// lets resumed jobs continue in an old CacheDir without trusting an arbitrary
+// database string as a directory to remove recursively.
+func persistedStagedTarget(job database.DownloadJob) (target, dir string, ok bool) {
+	if job.CachePath == "" || filepath.Base(job.ID) != job.ID || job.ID == "." || job.ID == ".." {
+		return "", "", false
+	}
+	target = filepath.Clean(job.CachePath)
+	dir = filepath.Dir(target)
+	if filepath.Base(dir) != job.ID || filepath.Base(target) == "." || filepath.Base(target) == string(filepath.Separator) {
+		return "", "", false
+	}
+	return target, dir, true
+}
+
+// ensureStagedCacheRoot creates and verifies the namespace tdrive owns below
+// the operator-selected cache directory. The marker makes a maintenance pass
+// fail closed if an existing directory with the same name was not created by
+// this application.
+func ensureStagedCacheRoot(parent string) (string, error) {
+	if parent == "" {
+		return "", errors.New("download cache directory is empty")
+	}
+	root := filepath.Join(parent, stagedCacheNamespace)
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		return "", fmt.Errorf("create download cache namespace: %w", err)
+	}
+	marker := filepath.Join(root, stagedCacheMarker)
+	info, err := os.Lstat(marker)
+	if errors.Is(err, os.ErrNotExist) {
+		entries, readErr := os.ReadDir(root)
+		if readErr != nil {
+			return "", fmt.Errorf("inspect unclaimed download cache namespace: %w", readErr)
+		}
+		if len(entries) != 0 {
+			return "", errors.New("download cache namespace is not owned by tdrive")
+		}
+		file, createErr := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if createErr == nil {
+			_, writeErr := io.WriteString(file, stagedCacheMarkerText)
+			closeErr := file.Close()
+			if writeErr != nil || closeErr != nil {
+				_ = os.Remove(marker)
+				if writeErr != nil {
+					return "", fmt.Errorf("write download cache marker: %w", writeErr)
+				}
+				return "", fmt.Errorf("close download cache marker: %w", closeErr)
+			}
+			return root, nil
+		}
+		if !errors.Is(createErr, os.ErrExist) {
+			return "", fmt.Errorf("create download cache marker: %w", createErr)
+		}
+		info, err = os.Lstat(marker)
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect download cache marker: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("download cache marker is not a regular file")
+	}
+	contents, err := os.ReadFile(marker)
+	if err != nil {
+		return "", fmt.Errorf("read download cache marker: %w", err)
+	}
+	if string(contents) != stagedCacheMarkerText {
+		return "", errors.New("download cache namespace is not owned by tdrive")
+	}
+	return root, nil
+}
+
+func existingStagedCacheRoot(parent string) (string, bool) {
+	if parent == "" {
+		return "", false
+	}
+	root := filepath.Join(parent, stagedCacheNamespace)
+	marker := filepath.Join(root, stagedCacheMarker)
+	info, err := os.Lstat(marker)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	contents, err := os.ReadFile(marker)
+	if err != nil || string(contents) != stagedCacheMarkerText {
+		return "", false
+	}
+	return root, true
 }
 
 // CacheStatus describes the download cache for the settings page.
@@ -521,11 +782,31 @@ func (s *Service) CacheStatus(ctx context.Context) (CacheStatus, error) {
 
 // PurgeCache removes every staged copy, which is the "clear the cache" button.
 func (s *Service) PurgeCache(ctx context.Context) (int64, error) {
-	jobs, err := s.db.EvictableDownloads(ctx)
+	s.stageMu.Lock()
+	defer s.stageMu.Unlock()
+
+	// Active jobs have no evictable row yet, but their workers still own a
+	// partial file and a cache reservation. Cancel them before clearing the
+	// completed rows so a purge cannot be undone by a worker finishing later.
+	active, err := s.db.ResumableDownloads(ctx)
 	if err != nil {
 		return 0, err
 	}
 	var freed int64
+	for _, job := range active {
+		if err := s.CancelStaged(ctx, job.ID); err != nil {
+			return freed, err
+		}
+		if err := s.db.DeleteDownload(ctx, job.ID); err != nil && !errors.Is(err, database.ErrNotFound) {
+			return freed, err
+		}
+		freed += job.TotalSize
+	}
+
+	jobs, err := s.db.EvictableDownloads(ctx)
+	if err != nil {
+		return freed, err
+	}
 	for _, job := range jobs {
 		s.removeStagedFile(job)
 		if err := s.db.DeleteDownload(ctx, job.ID); err != nil {
@@ -536,6 +817,26 @@ func (s *Service) PurgeCache(ctx context.Context) (int64, error) {
 	}
 	s.removeOrphanCacheDirs(ctx)
 	return freed, nil
+}
+
+// PurgeDownloadHistory removes old terminal download records and any staged
+// bytes they still reference. Direct and segmented downloads have no files to
+// unlink, while ready staged rows must be cleaned using their persisted paths.
+func (s *Service) PurgeDownloadHistory(ctx context.Context, olderThanMS int64) (int64, error) {
+	jobs, err := s.db.FinishedDownloadsBefore(ctx, olderThanMS)
+	if err != nil {
+		return 0, err
+	}
+	if len(jobs) == 0 {
+		return 0, nil
+	}
+
+	ids := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		s.removeStagedFile(job)
+		ids = append(ids, job.ID)
+	}
+	return s.db.DeleteDownloads(ctx, ids)
 }
 
 // safeCacheName keeps a stored name from escaping its cache directory or

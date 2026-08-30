@@ -417,8 +417,8 @@ func (s *Server) handlePurgeCache(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int64{"freed": freed})
 }
 
-// downloadForUser loads a download and refuses to expose another account's
-// transfer, matching how jobForUser guards uploads.
+// downloadForUser loads a download. Direct and segmented jobs remain private;
+// staged jobs are shared by file after the caller's normal file-access check.
 func (s *Server) downloadForUser(r *http.Request, id string) (database.DownloadJob, error) {
 	job, err := s.db.DownloadByID(r.Context(), id)
 	if err != nil {
@@ -426,7 +426,16 @@ func (s *Server) downloadForUser(r *http.Request, id string) (database.DownloadJ
 	}
 	user := currentUser(r)
 	if job.UserID != "" && job.UserID != user.ID && user.Role != database.RoleAdmin {
-		return database.DownloadJob{}, fmt.Errorf("%w: download", database.ErrNotFound)
+		// Staged jobs are deliberately shared by file, so another authorized
+		// user may receive the owner's job id when joining an in-flight or
+		// cached copy. Re-check the file access rather than exposing arbitrary
+		// direct-download history or another user's transfer metadata.
+		if job.Mode != database.DownloadStaged || job.FileID == "" {
+			return database.DownloadJob{}, fmt.Errorf("%w: download", database.ErrNotFound)
+		}
+		if _, fileErr := s.fileForUser(r, job.FileID); fileErr != nil {
+			return database.DownloadJob{}, fmt.Errorf("%w: download", database.ErrNotFound)
+		}
 	}
 	return job, nil
 }

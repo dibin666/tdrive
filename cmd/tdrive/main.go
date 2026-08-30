@@ -85,6 +85,13 @@ func run() error {
 	broker := events.NewBroker()
 	tgm := tgc.New(cfg, db, log.Named("telegram"))
 	driveSvc := drive.New(cfg, db, tgm, log.Named("drive"))
+	// Resume both kinds of detached work whenever Telegram becomes ready,
+	// including a setup or login completed after the HTTP server has started.
+	tgm.OnReady = func() {
+		resumeCtx := context.WithoutCancel(ctx)
+		driveSvc.ResumeRemotes(resumeCtx)
+		driveSvc.ResumeStaged(resumeCtx)
+	}
 	idx := indexer.New(db, tgm, log.Named("indexer"))
 	api.WireIndexProgress(idx, broker)
 	apiServer := api.New(cfg, db, authSvc, driveSvc, tgm, idx, broker, log.Named("api"), func(level string) error {
@@ -102,13 +109,6 @@ func run() error {
 		log.Error("could not connect to telegram at startup", zap.Error(err))
 	}
 	defer tgm.Stop()
-
-	if tgm.Ready() {
-		driveSvc.ResumeRemotes(ctx)
-		// Staged downloads interrupted by a restart can be finished without a
-		// client reconnecting: the server has everything it needs.
-		driveSvc.ResumeStaged(ctx)
-	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", apiServer.Routes()))
@@ -179,6 +179,11 @@ func startMaintenance(ctx context.Context, db *database.DB, driveSvc *drive.Serv
 		cutoff := time.Now().Add(-7 * 24 * time.Hour).UnixMilli()
 		if _, err := db.PurgeFinishedJobs(ctx, cutoff); err != nil {
 			log.Warn("could not purge old transfers", zap.Error(err))
+		}
+		if n, err := driveSvc.PurgeDownloadHistory(ctx, cutoff); err != nil {
+			log.Warn("could not purge old download history", zap.Error(err))
+		} else if n > 0 {
+			log.Debug("purged old download history", zap.Int64("count", n))
 		}
 		if _, err := db.PurgeShares(ctx, cutoff); err != nil {
 			log.Warn("could not purge expired share links", zap.Error(err))

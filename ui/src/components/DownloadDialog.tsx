@@ -18,7 +18,7 @@ import {
   type Entry,
   type ShareResponse,
 } from '../lib/api'
-import { downloads, simpleDownload, supportsDiskWrites } from '../lib/downloads'
+import { downloads, supportsDiskWrites } from '../lib/downloads'
 import { formatBytes } from '../lib/format'
 import { Button, Modal, Slider, Spinner, toast } from './primitives'
 
@@ -103,15 +103,6 @@ export function DownloadDialog({
       const parallel = connections > 1
       const wantsDisk = parallel || mode === 'segments'
       const handle = wantsDisk ? await downloads.openSaveTarget(entry.name) : null
-
-      if (!handle && !supportsDiskWrites() && mode !== 'segments' && !parallel) {
-        // Single connection with no disk access: the browser's own downloader
-        // is strictly better than anything this app can do.
-        const link = await api.share(entry.id, {})
-        simpleDownload(link.file.url, entry.name)
-        onClose()
-        return
-      }
 
       await downloads.start({
         fileId: entry.id,
