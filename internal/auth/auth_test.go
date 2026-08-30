@@ -83,7 +83,7 @@ func TestLoginAndRefreshRotation(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	tokens, user, err := svc.Login(ctx, "alice", "hunter2hunter2")
+	tokens, user, err := svc.Login(ctx, "alice", "hunter2hunter2", ClientInfo{})
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -101,17 +101,17 @@ func TestLoginAndRefreshRotation(t *testing.T) {
 
 	// Refreshing must rotate: the old refresh token has to stop working, so a
 	// stolen one is usable at most once.
-	next, _, err := svc.Refresh(ctx, tokens.Refresh)
+	next, _, err := svc.Refresh(ctx, tokens.Refresh, ClientInfo{})
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if next.Refresh == tokens.Refresh {
 		t.Error("the refresh token was not rotated")
 	}
-	if _, _, err := svc.Refresh(ctx, tokens.Refresh); err == nil {
+	if _, _, err := svc.Refresh(ctx, tokens.Refresh, ClientInfo{}); err == nil {
 		t.Error("the old refresh token still works after rotation")
 	}
-	if _, _, err := svc.Refresh(ctx, next.Refresh); err != nil {
+	if _, _, err := svc.Refresh(ctx, next.Refresh, ClientInfo{}); err != nil {
 		t.Errorf("the rotated token does not work: %v", err)
 	}
 }
@@ -128,7 +128,7 @@ func TestLoginFailsClosed(t *testing.T) {
 		{"nobody", "hunter2hunter2"},
 		{"", ""},
 	} {
-		if _, _, err := svc.Login(ctx, tc.user, tc.pass); err == nil {
+		if _, _, err := svc.Login(ctx, tc.user, tc.pass, ClientInfo{}); err == nil {
 			t.Errorf("login as %q/%q succeeded", tc.user, tc.pass)
 		}
 	}
@@ -142,7 +142,7 @@ func TestChangePasswordEndsSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	tokens, _, err := svc.Login(ctx, "carol", "hunter2hunter2")
+	tokens, _, err := svc.Login(ctx, "carol", "hunter2hunter2", ClientInfo{})
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -150,13 +150,13 @@ func TestChangePasswordEndsSessions(t *testing.T) {
 	if err := svc.ChangePassword(ctx, user.ID, "newpassword123"); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
-	if _, _, err := svc.Refresh(ctx, tokens.Refresh); err == nil {
+	if _, _, err := svc.Refresh(ctx, tokens.Refresh, ClientInfo{}); err == nil {
 		t.Error("an existing session survived a password change")
 	}
-	if _, _, err := svc.Login(ctx, "carol", "hunter2hunter2"); err == nil {
+	if _, _, err := svc.Login(ctx, "carol", "hunter2hunter2", ClientInfo{}); err == nil {
 		t.Error("the old password still works")
 	}
-	if _, _, err := svc.Login(ctx, "carol", "newpassword123"); err != nil {
+	if _, _, err := svc.Login(ctx, "carol", "newpassword123", ClientInfo{}); err != nil {
 		t.Errorf("the new password does not work: %v", err)
 	}
 }
@@ -264,7 +264,7 @@ func TestMiddlewareGuardsRoutes(t *testing.T) {
 	}
 
 	// Bearer token.
-	tokens, _, err := svc.Login(ctx, "erin", "hunter2hunter2")
+	tokens, _, err := svc.Login(ctx, "erin", "hunter2hunter2", ClientInfo{})
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestMiddlewareGuardsRoutes(t *testing.T) {
 		t.Errorf("non-admin on an admin route got %d, want 403", rec.Code)
 	}
 
-	adminTokens, _, err := svc.Login(ctx, "root", "hunter2hunter2")
+	adminTokens, _, err := svc.Login(ctx, "root", "hunter2hunter2", ClientInfo{})
 	if err != nil {
 		t.Fatalf("admin login: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestDeletedUserLosesAccessImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	tokens, _, err := svc.Login(ctx, "frank", "hunter2hunter2")
+	tokens, _, err := svc.Login(ctx, "frank", "hunter2hunter2", ClientInfo{})
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestBootstrapSeedsOnlyOnce(t *testing.T) {
 	if err := svc.Bootstrap(ctx); err != nil {
 		t.Fatalf("second bootstrap: %v", err)
 	}
-	if _, _, err := svc.Login(ctx, "admin", "somethingelse"); err != nil {
+	if _, _, err := svc.Login(ctx, "admin", "somethingelse", ClientInfo{}); err != nil {
 		t.Errorf("bootstrap reset a password that had been changed: %v", err)
 	}
 }

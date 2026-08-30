@@ -8,41 +8,70 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  ClipboardCopy,
   CloudDownload,
   Download,
+  Eye,
+  FolderInput,
   FolderOpen,
   FolderPlus,
   Grid2x2,
   Home,
   Info,
-  FolderInput,
   Layers,
+  Link2,
   List,
   Pencil,
+  RefreshCw,
+  Rows3,
   Trash2,
   Upload,
   X,
 } from 'lucide-react'
-import { api, request, type Entry, type Listing, type LocalEntry, type LocalListing } from '../lib/api'
+import {
+  api,
+  can,
+  type Entry,
+  type Listing,
+  type LocalEntry,
+  type LocalListing,
+} from '../lib/api'
 import { useApp } from '../app/context'
 import { events } from '../lib/events'
-import { formatBytes, formatDate } from '../lib/format'
+import { formatBytes, formatDate, isPreviewable, kindOf, naturalCompare } from '../lib/format'
 import { uploads } from '../lib/uploads'
-import { Button, EmptyState, Field, IconButton, Input, Modal, Spinner, toast } from '../components/primitives'
+import { simpleDownload } from '../lib/downloads'
+import { useSelection, useMarquee } from '../lib/selection'
+import { useEdgeSwipe, useLongPress, usePullToRefresh } from '../lib/gestures'
+import {
+  Button,
+  EmptyState,
+  Field,
+  IconButton,
+  Input,
+  Modal,
+  Spinner,
+  toast,
+} from '../components/primitives'
 import { EntryIcon } from '../components/icons'
-import { Preview } from '../components/Preview'
 import { MovePicker } from '../components/MovePicker'
+import { BatchRename } from '../components/BatchRename'
+import { DownloadDialog } from '../components/DownloadDialog'
+import { PreviewModal } from '../components/preview/PreviewModal'
+import { ContextMenu, useContextMenu, type MenuItem } from '../components/ContextMenu'
 
 type View = 'list' | 'grid'
 type SortField = 'name' | 'size' | 'time'
 type SortOrder = 'asc' | 'desc'
+
 export function Files({ path, onNavigate }: { path: string; onNavigate: (to: string) => void }) {
-  const { status } = useApp()
+  const { status, user } = useApp()
   const [listing, setListing] = useState<Listing | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
   const [detail, setDetail] = useState<Entry | null>(null)
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null)
+
   const [view, setView] = useState<View>(
     () => (localStorage.getItem('tdrive.view') as View) || 'list',
   )
@@ -54,19 +83,23 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
   )
   const [dragging, setDragging] = useState(false)
   const dragCounterRef = useRef(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [renaming, setRenaming] = useState<Entry | null>(null)
+  const [batchRenaming, setBatchRenaming] = useState<Entry[] | null>(null)
+  const [downloadTarget, setDownloadTarget] = useState<Entry | null>(null)
   const [remoteOpen, setRemoteOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [moving, setMoving] = useState<string[] | null>(null)
+
+  const { menu, openMenu, closeMenu } = useContextMenu()
 
   const load = useCallback(async () => {
     setError(null)
     try {
       const data = await api.list(path)
       setListing(data)
-      setSelected(new Set())
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setListing(null)
@@ -78,6 +111,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
   useEffect(() => {
     setLoading(true)
     setDetail(null)
+    setPreviewIndex(null)
     void load()
   }, [load])
 
@@ -94,6 +128,340 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
     })
   }, [path, load])
 
+  const sortedEntries = useMemo(() => {
+    if (!listing?.entries) return []
+    return [...listing.entries].sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+      let cmp = 0
+      if (sortField === 'name') cmp = naturalCompare(a.name, b.name)
+      else if (sortField === 'size') cmp = a.size - b.size
+      else if (sortField === 'time') cmp = a.modifiedAt - b.modifiedAt
+      return sortOrder === 'asc' ? cmp : -cmp
+    })
+  }, [listing?.entries, sortField, sortOrder])
+
+  const keyOf = useCallback((entry: Entry) => entry.path, [])
+  const selection = useSelection(sortedEntries, keyOf)
+  const { selected, selectedItems } = selection
+
+  // Only files can be previewed, and the arrow keys inside the previewer walk
+  // this list rather than the raw listing.
+  const previewable = useMemo(
+    () => sortedEntries.filter((e) => !e.isDir && isPreviewable(kindOf(e.name, e.mime))),
+    [sortedEntries],
+  )
+
+  const canRead = can(user, 'read')
+  const canWrite = can(user, 'upload')
+  const canDelete = can(user, 'delete')
+  const canRename = can(user, 'rename')
+  const canMove = can(user, 'move')
+  const canMkdir = can(user, 'mkdir')
+  const canDownload = can(user, 'download')
+  const canShare = can(user, 'share')
+  const canRemote = can(user, 'remoteFetch')
+
+  const openEntry = useCallback(
+    (entry: Entry) => {
+      if (entry.isDir) {
+        onNavigate(`/files${entry.path}`)
+        return
+      }
+      const index = previewable.findIndex((e) => e.path === entry.path)
+      if (index >= 0) setPreviewIndex(index)
+      else setDetail(entry)
+    },
+    [onNavigate, previewable],
+  )
+
+  const startUpload = useCallback(
+    async (files: FileList | File[]) => {
+      const list = Array.from(files)
+      if (list.length === 0) return
+
+      toast(
+        list.length === 1
+          ? `已添加 "${list[0].name}" 到上传队列`
+          : `已添加 ${list.length} 个文件到上传队列`,
+        'info',
+      )
+
+      await Promise.all(
+        list.map(async (file) => {
+          try {
+            await uploads.upload(file, path, () => {
+              toast(`"${file.name}" 上传完成`, 'success')
+              void load()
+            })
+          } catch (err) {
+            toast(
+              `${file.name} 上传失败：${err instanceof Error ? err.message : String(err)}`,
+              'error',
+            )
+          }
+        }),
+      )
+    },
+    [path, load],
+  )
+
+  const remove = useCallback(
+    async (targets: Entry[]) => {
+      if (targets.length === 0) return
+      const names = targets.length === 1 ? `"${targets[0].name}"` : `这 ${targets.length} 项`
+      if (!confirm(`确定删除${names}？Telegram 上的对应消息也会一并删除，无法撤销。`)) return
+      try {
+        await api.remove(targets.map((t) => t.path))
+        toast(`已删除 ${targets.length} 项`, 'success')
+        if (detail && targets.some((t) => t.path === detail.path)) setDetail(null)
+        selection.clear()
+        await load()
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), 'error')
+      }
+    },
+    [detail, load, selection],
+  )
+
+  const copyPaths = useCallback((targets: Entry[]) => {
+    void navigator.clipboard.writeText(targets.map((t) => t.path).join('\n'))
+    toast(targets.length === 1 ? '路径已复制' : `已复制 ${targets.length} 条路径`, 'success')
+  }, [])
+
+  const copyLink = useCallback(async (entry: Entry) => {
+    try {
+      const link = await api.share(entry.id, {})
+      await navigator.clipboard.writeText(link.file.url)
+      toast('下载直链已复制，可直接粘贴到下载工具', 'success')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error')
+    }
+  }, [])
+
+  const quickDownload = useCallback(
+    async (entry: Entry) => {
+      // One small single-segment file does not need the dialog: the browser's
+      // own downloader is already the right answer.
+      if ((entry.segmentCount ?? 1) <= 1 && entry.size < 512 * 1024 * 1024) {
+        try {
+          const link = await api.share(entry.id, {})
+          simpleDownload(link.file.url, entry.name)
+          return
+        } catch {
+          /* fall through to the dialog, which can explain what went wrong */
+        }
+      }
+      setDownloadTarget(entry)
+    },
+    [],
+  )
+
+  /** Menu contents depend on what is under the cursor and what the account is
+   *  allowed to do. Actions it cannot perform are omitted rather than greyed
+   *  out — a permanently disabled item is just noise. */
+  const buildMenu = useCallback(
+    (targets: Entry[]): MenuItem[] => {
+      if (targets.length === 0) {
+        return [
+          {
+            id: 'upload',
+            label: '上传文件',
+            icon: <Upload size={14} />,
+            onSelect: () => setUploadOpen(true),
+            hidden: !canWrite,
+          },
+          {
+            id: 'new-folder',
+            label: '新建文件夹',
+            icon: <FolderPlus size={14} />,
+            onSelect: () => setNewFolderOpen(true),
+            hidden: !canMkdir,
+          },
+          {
+            id: 'remote',
+            label: '从链接下载',
+            icon: <CloudDownload size={14} />,
+            onSelect: () => setRemoteOpen(true),
+            hidden: !canRemote,
+          },
+          {
+            id: 'refresh',
+            label: '刷新',
+            icon: <RefreshCw size={14} />,
+            hint: 'F5',
+            separated: true,
+            onSelect: () => void load(),
+          },
+          {
+            id: 'select-all',
+            label: '全选',
+            icon: <Check size={14} />,
+            hint: 'Ctrl+A',
+            onSelect: selection.selectAll,
+          },
+        ]
+      }
+
+      const single = targets.length === 1 ? targets[0] : null
+      const files = targets.filter((t) => !t.isDir)
+
+      return [
+        {
+          id: 'open',
+          label: single?.isDir ? '打开' : '预览',
+          icon: single?.isDir ? <FolderOpen size={14} /> : <Eye size={14} />,
+          hint: 'Enter',
+          onSelect: () => single && openEntry(single),
+          hidden: !single || !canRead,
+        },
+        {
+          id: 'download',
+          label: files.length > 1 ? `下载 ${files.length} 个文件` : '下载…',
+          icon: <Download size={14} />,
+          onSelect: () => {
+            if (files.length === 1) void quickDownload(files[0])
+            else files.forEach((file) => void quickDownload(file))
+          },
+          hidden: files.length === 0 || !canDownload,
+        },
+        {
+          id: 'copy-link',
+          label: '复制下载直链',
+          icon: <Link2 size={14} />,
+          onSelect: () => single && void copyLink(single),
+          hidden: !single || single.isDir || !canShare,
+        },
+        {
+          id: 'rename',
+          label: '重命名',
+          icon: <Pencil size={14} />,
+          hint: 'F2',
+          separated: true,
+          onSelect: () => single && setRenaming(single),
+          hidden: !single || !canRename,
+        },
+        {
+          id: 'batch-rename',
+          label: `批量重命名 ${targets.length} 项`,
+          icon: <Rows3 size={14} />,
+          onSelect: () => setBatchRenaming(targets),
+          hidden: targets.length < 2 || !canRename,
+        },
+        {
+          id: 'move',
+          label: '移动到…',
+          icon: <FolderInput size={14} />,
+          onSelect: () => setMoving(targets.map((t) => t.path)),
+          hidden: !canMove,
+        },
+        {
+          id: 'copy-path',
+          label: '复制路径',
+          icon: <ClipboardCopy size={14} />,
+          onSelect: () => copyPaths(targets),
+        },
+        {
+          id: 'info',
+          label: '详细信息',
+          icon: <Info size={14} />,
+          onSelect: () => single && setDetail(single),
+          hidden: !single || single.isDir,
+        },
+        {
+          id: 'delete',
+          label: targets.length > 1 ? `删除 ${targets.length} 项` : '删除',
+          icon: <Trash2 size={14} />,
+          hint: 'Del',
+          separated: true,
+          danger: true,
+          onSelect: () => void remove(targets),
+          hidden: !canDelete,
+        },
+      ]
+    },
+    [
+      canDelete, canDownload, canMkdir, canMove, canRead, canRemote, canRename, canShare, canWrite,
+      copyLink, copyPaths, load, openEntry, quickDownload, remove, selection,
+    ],
+  )
+
+  const onEntryContextMenu = useCallback(
+    (entry: Entry, position: { x: number; y: number }) => {
+      // Right-clicking outside the current selection selects that entry
+      // first, which is what every file manager does and what stops an action
+      // from silently applying to something else.
+      const targets = selected.has(entry.path) ? selectedItems : [entry]
+      if (!selected.has(entry.path)) selection.only(entry.path)
+      openMenu(position, buildMenu(targets), targets.length > 1 ? `已选 ${targets.length} 项` : entry.name)
+    },
+    [buildMenu, openMenu, selected, selectedItems, selection],
+  )
+
+  const onEmptyContextMenu = useCallback(
+    (position: { x: number; y: number }) => {
+      selection.clear()
+      openMenu(position, buildMenu([]), listing?.path)
+    },
+    [buildMenu, listing?.path, openMenu, selection],
+  )
+
+  // Keyboard shortcuts are scoped to the listing: typing in a dialog must not
+  // delete the files behind it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      if (previewIndex !== null || newFolderOpen || renaming || batchRenaming || uploadOpen) return
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault()
+        selection.selectAll()
+      } else if (e.key === 'Escape') {
+        selection.clear()
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        selection.moveCursor(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey)
+      } else if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault()
+        selection.moveCursor(e.key === 'Home' ? -sortedEntries.length : sortedEntries.length, e.shiftKey)
+      } else if (e.key === 'Enter' && selectedItems.length === 1) {
+        e.preventDefault()
+        openEntry(selectedItems[0])
+      } else if (e.key === 'F2' && selectedItems.length === 1 && canRename) {
+        e.preventDefault()
+        setRenaming(selectedItems[0])
+      } else if (e.key === 'Delete' && selectedItems.length > 0 && canDelete) {
+        e.preventDefault()
+        void remove(selectedItems)
+      } else if (e.key === 'F5') {
+        e.preventDefault()
+        void load()
+      }
+    }
+
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [
+    batchRenaming, canDelete, canRename, load, newFolderOpen, openEntry, previewIndex, remove,
+    renaming, selectedItems, selection, sortedEntries.length, uploadOpen,
+  ])
+
+  const onMarquee = useCallback(
+    (keys: string[], additive: boolean) => {
+      if (additive) selection.add(keys)
+      else selection.set(keys)
+    },
+    [selection],
+  )
+  const { marquee, onPointerDown: onMarqueePointerDown } = useMarquee(scrollRef, onMarquee)
+
+  const { pull, refreshing, threshold } = usePullToRefresh(scrollRef, load)
+  useEdgeSwipe(() => {
+    if (path === '/') return
+    const parent = path.slice(0, path.lastIndexOf('/')) || '/'
+    onNavigate(`/files${parent === '/' ? '' : parent}`)
+  })
+
   useEffect(() => {
     dragCounterRef.current = 0
     setDragging(false)
@@ -104,36 +472,23 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
       dragCounterRef.current = 0
       setDragging(false)
     }
-
     const handleWindowDragLeave = (e: DragEvent) => {
       if (
-        e.clientX <= 0 ||
-        e.clientY <= 0 ||
-        e.clientX >= window.innerWidth ||
-        e.clientY >= window.innerHeight ||
+        e.clientX <= 0 || e.clientY <= 0 ||
+        e.clientX >= window.innerWidth || e.clientY >= window.innerHeight ||
         !e.relatedTarget
       ) {
         resetDrag()
       }
     }
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        resetDrag()
-      }
-    }
-
     window.addEventListener('dragend', resetDrag)
     window.addEventListener('drop', resetDrag)
     window.addEventListener('dragleave', handleWindowDragLeave)
-    window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('blur', resetDrag)
-
     return () => {
       window.removeEventListener('dragend', resetDrag)
       window.removeEventListener('drop', resetDrag)
       window.removeEventListener('dragleave', handleWindowDragLeave)
-      window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('blur', resetDrag)
     }
   }, [])
@@ -157,114 +512,18 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
     }
   }
 
-  const toggle = (entry: Entry, additive: boolean) => {
-    setSelected((prev) => {
-      const next = additive ? new Set(prev) : new Set<string>()
-      if (prev.has(entry.path) && additive) next.delete(entry.path)
-      else next.add(entry.path)
-      return next
-    })
-  }
-
-  const open = (entry: Entry) => {
-    if (entry.isDir) {
-      onNavigate(`/files${entry.path}`)
-    } else {
-      setDetail(entry)
-    }
-  }
-
-  const startUpload = useCallback(
-    async (files: FileList | File[]) => {
-      const list = Array.from(files)
-      if (list.length === 0) return
-
-      if (list.length === 1) {
-        toast(`已添加 "${list[0].name}" 到上传队列`, 'info')
-      } else {
-        toast(`已添加 ${list.length} 个文件到上传队列`, 'info')
-      }
-
-      await Promise.all(
-        list.map(async (file) => {
-          try {
-            await uploads.upload(file, path, () => {
-              toast(`"${file.name}" 上传完成`, 'success')
-              void load()
-            })
-          } catch (err) {
-            toast(
-              `${file.name} 上传失败：${err instanceof Error ? err.message : String(err)}`,
-              'error',
-            )
-          }
-        }),
-      )
-    },
-    [path, load],
-  )
-
-  const remove = async () => {
-    const paths = [...selected]
-    if (paths.length === 0) return
-    if (!confirm(`确定删除这 ${paths.length} 项？Telegram 上的对应消息也会一并删除，无法撤销。`)) {
-      return
-    }
-    try {
-      await api.remove(paths)
-      toast(`已删除 ${paths.length} 项`, 'success')
-      if (detail && paths.includes(detail.path)) setDetail(null)
-      await load()
-    } catch (err) {
-      toast(err instanceof Error ? err.message : String(err), 'error')
-    }
-  }
-
-  const sortedEntries = useMemo(() => {
-    if (!listing?.entries) return []
-    return [...listing.entries].sort((a, b) => {
-      if (a.isDir !== b.isDir) {
-        return a.isDir ? -1 : 1
-      }
-      let cmp = 0
-      if (sortField === 'name') {
-        cmp = a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' })
-      } else if (sortField === 'size') {
-        cmp = a.size - b.size
-      } else if (sortField === 'time') {
-        cmp = a.modifiedAt - b.modifiedAt
-      }
-      return sortOrder === 'asc' ? cmp : -cmp
-    })
-  }, [listing?.entries, sortField, sortOrder])
-
-  const selectedEntries = useMemo(
-    () => sortedEntries.filter((e) => selected.has(e.path)),
-    [sortedEntries, selected],
-  )
-
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault()
-    if (e.dataTransfer.types && !Array.from(e.dataTransfer.types).includes('Files')) {
-      return
-    }
+    if (e.dataTransfer.types && !Array.from(e.dataTransfer.types).includes('Files')) return
     dragCounterRef.current += 1
-    if (dragCounterRef.current === 1) {
-      setDragging(true)
-    }
+    if (dragCounterRef.current === 1) setDragging(true)
   }
-
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
-    if (e.dataTransfer.types && !Array.from(e.dataTransfer.types).includes('Files')) {
-      return
-    }
+    if (e.dataTransfer.types && !Array.from(e.dataTransfer.types).includes('Files')) return
     e.dataTransfer.dropEffect = 'copy'
-    if (!dragging) {
-      setDragging(true)
-    }
+    if (!dragging) setDragging(true)
   }
-
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault()
     dragCounterRef.current -= 1
@@ -273,14 +532,18 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
       setDragging(false)
     }
   }
-
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     dragCounterRef.current = 0
     setDragging(false)
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      void startUpload(e.dataTransfer.files)
-    }
+    if (e.dataTransfer.files?.length) void startUpload(e.dataTransfer.files)
+  }
+
+  const rowProps = {
+    selection,
+    onOpen: openEntry,
+    onContextMenu: onEntryContextMenu,
+    onInfo: setDetail,
   }
 
   return (
@@ -303,9 +566,35 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
           onUpload={() => setUploadOpen(true)}
           onNewFolder={() => setNewFolderOpen(true)}
           onRemote={() => setRemoteOpen(true)}
+          canUpload={canWrite}
+          canMkdir={canMkdir}
+          canRemote={canRemote}
         />
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-24 sm:px-5 sm:pb-6">
+        {(pull > 0 || refreshing) && (
+          <div
+            className="flex shrink-0 items-center justify-center overflow-hidden text-xs text-[var(--muted)]"
+            style={{ height: refreshing ? threshold * 0.6 : pull }}
+          >
+            {refreshing ? (
+              <Spinner />
+            ) : (
+              <span>{pull >= threshold ? '松手刷新' : '下拉刷新'}</span>
+            )}
+          </div>
+        )}
+
+        <div
+          ref={scrollRef}
+          className="relative min-h-0 flex-1 overflow-y-auto px-3 pb-24 sm:px-5 sm:pb-6"
+          onPointerDown={onMarqueePointerDown}
+          onContextMenu={(e) => {
+            const target = e.target as HTMLElement
+            if (target.closest('[data-selectable]')) return
+            e.preventDefault()
+            onEmptyContextMenu({ x: e.clientX, y: e.clientY })
+          }}
+        >
           {loading ? (
             <div className="flex justify-center py-20">
               <Spinner />
@@ -323,34 +612,44 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
               title="这里还什么都没有"
               description="把文件拖到这里，或者用上传按钮。超过 2 GB 的文件会自动分卷，在这里仍然显示为一个文件。"
               action={
-                <Button variant="primary" icon={<Upload size={15} />} onClick={() => setUploadOpen(true)}>
-                  上传文件
-                </Button>
+                canWrite ? (
+                  <Button variant="primary" icon={<Upload size={15} />} onClick={() => setUploadOpen(true)}>
+                    上传文件
+                  </Button>
+                ) : undefined
               }
             />
           ) : view === 'list' ? (
             <ListView
               entries={sortedEntries}
-              selected={selected}
-              onToggle={toggle}
-              onOpen={open}
-              onInfo={setDetail}
               sortField={sortField}
               sortOrder={sortOrder}
               onSort={handleSort}
+              onDownload={quickDownload}
+              onDelete={(entry) => void remove([entry])}
+              canDownload={canDownload}
+              canDelete={canDelete}
+              {...rowProps}
             />
           ) : (
-            <GridView
-              entries={sortedEntries}
-              selected={selected}
-              onToggle={toggle}
-              onOpen={open}
+            <GridView entries={sortedEntries} {...rowProps} />
+          )}
+
+          {marquee.rect && marquee.active && (
+            <div
+              className="pointer-events-none absolute z-10 rounded-sm border border-[var(--color-clay)] bg-[var(--color-clay)]/10"
+              style={{
+                left: marquee.rect.left,
+                top: marquee.rect.top,
+                width: marquee.rect.width,
+                height: marquee.rect.height,
+              }}
             />
           )}
         </div>
 
         {dragging && (
-          <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-[var(--bg)]/80 backdrop-blur-[2px] p-4 fade-in">
+          <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-[var(--bg)]/80 p-4 backdrop-blur-[2px] fade-in">
             <div className="flex h-full w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[var(--color-clay)] bg-[var(--clay-soft)]/20 p-6 text-center">
               <div className="panel px-6 py-5 text-center shadow-lg">
                 <Upload size={28} className="mx-auto mb-2 text-[var(--color-clay)]" />
@@ -362,76 +661,40 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
         )}
       </div>
 
-      {detail && (
-        <DetailPanel entry={detail} onClose={() => setDetail(null)} />
+      {detail && <DetailPanel entry={detail} onClose={() => setDetail(null)} onDownload={quickDownload} />}
+
+      {selection.size > 0 && (
+        <SelectionBar
+          count={selection.size}
+          allSelected={selection.size === sortedEntries.length}
+          entries={selectedItems}
+          onSelectAll={() => (selection.size === sortedEntries.length ? selection.clear() : selection.selectAll())}
+          onClear={selection.clear}
+          onRename={() => setRenaming(selectedItems[0] ?? null)}
+          onBatchRename={() => setBatchRenaming(selectedItems)}
+          onMove={() => setMoving([...selected])}
+          onDownload={() => selectedItems.filter((e) => !e.isDir).forEach((e) => void quickDownload(e))}
+          onDelete={() => void remove(selectedItems)}
+          canRename={canRename}
+          canMove={canMove}
+          canDownload={canDownload}
+          canDelete={canDelete}
+        />
       )}
 
-      {/* Floating bottom action bar */}
-      {selected.size > 0 && (
-        <div className="fixed bottom-6 inset-x-0 z-30 mx-auto flex w-fit max-w-[92vw] items-center gap-1.5 rounded-full border border-[var(--line-strong)] bg-[var(--surface)]/95 px-4 py-2 shadow-lg backdrop-blur-md rise-in">
-          <span className="text-xs font-medium text-[var(--ink)] shrink-0 mr-1">
-            已选 {selected.size} 项
-          </span>
-          <div className="h-4 w-px bg-[var(--line)]" />
-          <button
-            onClick={() => {
-              if (selected.size === sortedEntries.length) {
-                setSelected(new Set())
-              } else {
-                setSelected(new Set(sortedEntries.map((e) => e.path)))
-              }
-            }}
-            className="btn btn-ghost !px-2 !py-1 text-xs"
-          >
-            {selected.size === sortedEntries.length ? '取消全选' : '全选'}
-          </button>
-          {selected.size === 1 && (
-            <button
-              onClick={() => setRenaming(selectedEntries[0] ?? null)}
-              className="btn btn-ghost !px-2 !py-1 text-xs"
-              title="重命名"
-            >
-              <Pencil size={14} className="text-[var(--muted)]" />
-              <span className="hidden sm:inline">重命名</span>
-            </button>
-          )}
-          <button
-            onClick={() => setMoving([...selected])}
-            className="btn btn-ghost !px-2 !py-1 text-xs"
-            title="移动到..."
-          >
-            <FolderInput size={14} className="text-[var(--muted)]" />
-            <span className="hidden sm:inline">移动</span>
-          </button>
-          {selected.size === 1 && !selectedEntries[0]?.isDir && (
-            <a
-              href={`/api/download${selectedEntries[0]?.path}`}
-              download={selectedEntries[0]?.name}
-              className="btn btn-ghost !px-2 !py-1 text-xs"
-              title="下载"
-            >
-              <Download size={14} className="text-[var(--muted)]" />
-              <span className="hidden sm:inline">下载</span>
-            </a>
-          )}
-          <button
-            onClick={remove}
-            className="btn btn-danger !px-2 !py-1 text-xs"
-            title="删除"
-          >
-            <Trash2 size={14} />
-            <span className="hidden sm:inline">删除</span>
-          </button>
-          <div className="h-4 w-px bg-[var(--line)]" />
-          <IconButton
-            label="取消选择"
-            onClick={() => setSelected(new Set())}
-            className="!p-1 text-[var(--faint)] hover:text-[var(--ink)]"
-          >
-            <X size={15} />
-          </IconButton>
-        </div>
+      <ContextMenu state={menu} onClose={closeMenu} />
+
+      {previewIndex !== null && previewable.length > 0 && (
+        <PreviewModal
+          entries={previewable}
+          index={Math.min(previewIndex, previewable.length - 1)}
+          onIndexChange={setPreviewIndex}
+          onClose={() => setPreviewIndex(null)}
+          onDownload={quickDownload}
+        />
       )}
+
+      <DownloadDialog entry={downloadTarget} onClose={() => setDownloadTarget(null)} />
 
       <NewFolderModal
         open={newFolderOpen}
@@ -439,24 +702,20 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
         onClose={() => setNewFolderOpen(false)}
         onCreated={() => void load()}
       />
-      <RenameModal
-        entry={renaming}
-        onClose={() => setRenaming(null)}
-        onRenamed={() => void load()}
+      <RenameModal entry={renaming} onClose={() => setRenaming(null)} onRenamed={() => void load()} />
+      <BatchRename
+        open={batchRenaming !== null}
+        entries={batchRenaming ?? []}
+        onClose={() => setBatchRenaming(null)}
+        onDone={() => void load()}
       />
-      <RemoteModal
-        open={remoteOpen}
-        path={path}
-        onClose={() => setRemoteOpen(false)}
-      />
+      <RemoteModal open={remoteOpen} path={path} onClose={() => setRemoteOpen(false)} />
       <UploadModal
         open={uploadOpen}
         destinationPath={path}
-        localEnabled={status?.localEnabled ?? false}
+        localEnabled={(status?.localEnabled ?? false) && can(user, 'uploadLocal')}
         onClose={() => setUploadOpen(false)}
-        onBrowserFiles={(files) => {
-          void startUpload(files)
-        }}
+        onBrowserFiles={(files) => void startUpload(files)}
         onLocalStarted={() => void load()}
       />
       <MovePicker
@@ -465,6 +724,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
         onClose={() => setMoving(null)}
         onMoved={() => {
           toast('已移动', 'success')
+          selection.clear()
           void load()
         }}
       />
@@ -483,6 +743,9 @@ function Toolbar({
   onUpload,
   onNewFolder,
   onRemote,
+  canUpload,
+  canMkdir,
+  canRemote,
 }: {
   breadcrumbs: { name: string; path: string }[]
   onNavigate: (to: string) => void
@@ -494,6 +757,9 @@ function Toolbar({
   onUpload: () => void
   onNewFolder: () => void
   onRemote: () => void
+  canUpload: boolean
+  canMkdir: boolean
+  canRemote: boolean
 }) {
   return (
     <div className="sticky top-0 z-20 border-b border-[var(--line)] bg-[var(--bg)]/85 px-3 py-2.5 backdrop-blur sm:px-5">
@@ -543,15 +809,21 @@ function Toolbar({
             </button>
           </div>
 
-          <IconButton label="新建文件夹" onClick={onNewFolder}>
-            <FolderPlus size={16} />
-          </IconButton>
-          <IconButton label="从链接下载" onClick={onRemote}>
-            <CloudDownload size={16} />
-          </IconButton>
-          <Button variant="primary" icon={<Upload size={15} />} onClick={onUpload}>
-            <span className="hidden sm:inline">上传</span>
-          </Button>
+          {canMkdir && (
+            <IconButton label="新建文件夹" onClick={onNewFolder}>
+              <FolderPlus size={16} />
+            </IconButton>
+          )}
+          {canRemote && (
+            <IconButton label="从链接下载" onClick={onRemote}>
+              <CloudDownload size={16} />
+            </IconButton>
+          )}
+          {canUpload && (
+            <Button variant="primary" icon={<Upload size={15} />} onClick={onUpload}>
+              <span className="hidden sm:inline">上传</span>
+            </Button>
+          )}
         </div>
       </div>
     </div>
@@ -573,9 +845,7 @@ function SortMenu({
   useEffect(() => {
     if (!open) return
     const handleClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false)
     }
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
@@ -630,134 +900,332 @@ function SortMenu({
   )
 }
 
+type RowShared = {
+  selection: ReturnType<typeof useSelection<Entry>>
+  onOpen: (entry: Entry) => void
+  onContextMenu: (entry: Entry, position: { x: number; y: number }) => void
+  onInfo: (entry: Entry) => void
+}
+
 function ListView({
   entries,
-  selected,
-  onToggle,
+  selection,
   onOpen,
+  onContextMenu,
   onInfo,
+  onDownload,
+  onDelete,
   sortField,
   sortOrder,
   onSort,
-}: {
+  canDownload,
+  canDelete,
+}: RowShared & {
   entries: Entry[]
-  selected: Set<string>
-  onToggle: (e: Entry, additive: boolean) => void
-  onOpen: (e: Entry) => void
-  onInfo: (e: Entry) => void
   sortField: SortField
   sortOrder: SortOrder
   onSort: (field: SortField) => void
+  onDownload: (entry: Entry) => void
+  onDelete: (entry: Entry) => void
+  canDownload: boolean
+  canDelete: boolean
 }) {
   return (
     <div className="pt-2">
-      <div className="hidden px-3 pb-1.5 text-[11px] font-medium tracking-wide text-[var(--faint)] sm:grid sm:grid-cols-[1fr_7rem_9rem_2rem] sm:gap-3 select-none">
-        <button
-          onClick={() => onSort('name')}
-          className="flex items-center gap-1 text-left transition-colors hover:text-[var(--ink)] cursor-pointer"
-        >
-          <span>名称</span>
-          {sortField === 'name' && (
-            sortOrder === 'asc' ? <ArrowUp size={12} className="text-[var(--color-clay)]" /> : <ArrowDown size={12} className="text-[var(--color-clay)]" />
-          )}
-        </button>
-        <button
-          onClick={() => onSort('size')}
-          className="flex items-center justify-end gap-1 text-right transition-colors hover:text-[var(--ink)] cursor-pointer"
-        >
-          <span>大小</span>
-          {sortField === 'size' && (
-            sortOrder === 'asc' ? <ArrowUp size={12} className="text-[var(--color-clay)]" /> : <ArrowDown size={12} className="text-[var(--color-clay)]" />
-          )}
-        </button>
-        <button
-          onClick={() => onSort('time')}
-          className="flex items-center gap-1 text-left transition-colors hover:text-[var(--ink)] cursor-pointer"
-        >
-          <span>修改时间</span>
-          {sortField === 'time' && (
-            sortOrder === 'asc' ? <ArrowUp size={12} className="text-[var(--color-clay)]" /> : <ArrowDown size={12} className="text-[var(--color-clay)]" />
-          )}
-        </button>
+      <div className="hidden select-none px-3 pb-1.5 text-[11px] font-medium tracking-wide text-[var(--faint)] sm:grid sm:grid-cols-[1fr_7rem_9rem_2rem] sm:gap-3">
+        <SortHeader label="名称" field="name" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
+        <SortHeader label="大小" field="size" sortField={sortField} sortOrder={sortOrder} onSort={onSort} align="end" />
+        <SortHeader label="修改时间" field="time" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
         <span />
       </div>
       <div className="space-y-0.5">
         {entries.map((entry) => (
-          <div
+          <FileRow
             key={entry.path}
-            data-selected={selected.has(entry.path)}
-            className="row cursor-pointer sm:grid sm:grid-cols-[1fr_7rem_9rem_2rem] sm:items-center sm:gap-3"
-            onClick={(e) => onToggle(entry, e.metaKey || e.ctrlKey)}
-            onDoubleClick={() => onOpen(entry)}
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') onOpen(entry)
-            }}
-          >
-            <div className="flex min-w-0 items-center gap-2.5">
-              <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} />
-              <span className="truncate text-sm">{entry.name}</span>
-              <SegmentBadge entry={entry} />
-              <BrokenBadge entry={entry} />
-            </div>
-            <span className="hidden text-right text-xs tabular-nums text-[var(--muted)] sm:block">
-              {entry.isDir ? '—' : formatBytes(entry.size)}
-            </span>
-            <span className="hidden text-xs text-[var(--muted)] sm:block">
-              {formatDate(entry.modifiedAt)}
-            </span>
-            <div className="hidden justify-end sm:flex">
-              {!entry.isDir && (
-                <IconButton
-                  label="详情"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onInfo(entry)
-                  }}
-                >
-                  <Info size={14} />
-                </IconButton>
-              )}
-            </div>
-            <span className="text-xs text-[var(--faint)] sm:hidden">
-              {entry.isDir ? '文件夹' : formatBytes(entry.size)} · {formatDate(entry.modifiedAt)}
-            </span>
-          </div>
+            entry={entry}
+            selection={selection}
+            onOpen={onOpen}
+            onContextMenu={onContextMenu}
+            onInfo={onInfo}
+            onDownload={onDownload}
+            onDelete={onDelete}
+            canDownload={canDownload}
+            canDelete={canDelete}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-function GridView({
-  entries,
-  selected,
-  onToggle,
-  onOpen,
+function SortHeader({
+  label,
+  field,
+  sortField,
+  sortOrder,
+  onSort,
+  align,
 }: {
-  entries: Entry[]
-  selected: Set<string>
-  onToggle: (e: Entry, additive: boolean) => void
-  onOpen: (e: Entry) => void
+  label: string
+  field: SortField
+  sortField: SortField
+  sortOrder: SortOrder
+  onSort: (field: SortField) => void
+  align?: 'end'
 }) {
+  return (
+    <button
+      onClick={() => onSort(field)}
+      className={clsx(
+        'flex cursor-pointer items-center gap-1 transition-colors hover:text-[var(--ink)]',
+        align === 'end' ? 'justify-end text-right' : 'text-left',
+      )}
+    >
+      <span>{label}</span>
+      {sortField === field &&
+        (sortOrder === 'asc' ? (
+          <ArrowUp size={12} className="text-[var(--color-clay)]" />
+        ) : (
+          <ArrowDown size={12} className="text-[var(--color-clay)]" />
+        ))}
+    </button>
+  )
+}
+
+/** FileRow carries the whole interaction surface for one entry: click
+ *  selection, double-click open, right-click menu, long-press menu and a
+ *  left-swipe action drawer on touch. */
+function FileRow({
+  entry,
+  selection,
+  onOpen,
+  onContextMenu,
+  onInfo,
+  onDownload,
+  onDelete,
+  canDownload,
+  canDelete,
+}: RowShared & {
+  entry: Entry
+  onDownload: (entry: Entry) => void
+  onDelete: (entry: Entry) => void
+  canDownload: boolean
+  canDelete: boolean
+}) {
+  const longPress = useLongPress({
+    onLongPress: ({ clientX, clientY }) => onContextMenu(entry, { x: clientX, y: clientY }),
+  })
+
+  const selected = selection.isSelected(entry.path)
+  const isCursor = selection.cursor === entry.path
+
+  return (
+    <div className="relative overflow-hidden rounded-[var(--radius-control)]">
+      <div
+        data-selectable={entry.path}
+        data-selected={selected}
+        tabIndex={0}
+        className={clsx(
+          'row relative cursor-pointer sm:grid sm:grid-cols-[1fr_7rem_9rem_2rem] sm:items-center sm:gap-3',
+          isCursor && !selected && 'ring-1 ring-inset ring-[var(--line-strong)]',
+        )}
+        onClick={(e) => selection.click(entry.path, e)}
+        onDoubleClick={() => onOpen(entry)}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          onContextMenu(entry, { x: e.clientX, y: e.clientY })
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onOpen(entry)
+        }}
+        {...longPress}
+      >
+        <div className="flex min-w-0 items-center gap-2.5">
+          <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} />
+          <span className="truncate text-sm">{entry.name}</span>
+          <SegmentBadge entry={entry} />
+          <BrokenBadge entry={entry} />
+        </div>
+        <span className="hidden text-right text-xs tabular-nums text-[var(--muted)] sm:block">
+          {entry.isDir ? '—' : formatBytes(entry.size)}
+        </span>
+        <span className="hidden text-xs text-[var(--muted)] sm:block">
+          {formatDate(entry.modifiedAt)}
+        </span>
+        <div className="hidden justify-end sm:flex">
+          {!entry.isDir && (
+            <IconButton
+              label="详情"
+              onClick={(e) => {
+                e.stopPropagation()
+                onInfo(entry)
+              }}
+            >
+              <Info size={14} />
+            </IconButton>
+          )}
+        </div>
+        <span className="text-xs text-[var(--faint)] sm:hidden">
+          {entry.isDir ? '文件夹' : formatBytes(entry.size)} · {formatDate(entry.modifiedAt)}
+        </span>
+      </div>
+
+      {/* Touch-only quick actions, revealed by a left swipe. */}
+      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-stretch sm:hidden">
+        {!entry.isDir && canDownload && (
+          <button
+            className="pointer-events-auto flex w-14 items-center justify-center bg-[var(--sunk)] text-[var(--muted)]"
+            onClick={() => onDownload(entry)}
+            aria-label="下载"
+          >
+            <Download size={16} />
+          </button>
+        )}
+        {canDelete && (
+          <button
+            className="pointer-events-auto flex w-14 items-center justify-center bg-[var(--color-danger)] text-white"
+            onClick={() => onDelete(entry)}
+            aria-label="删除"
+          >
+            <Trash2 size={16} />
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function GridView({ entries, selection, onOpen, onContextMenu }: RowShared & { entries: Entry[] }) {
   return (
     <div className="grid grid-cols-2 gap-2 pt-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
       {entries.map((entry) => (
-        <button
+        <GridTile
           key={entry.path}
-          data-selected={selected.has(entry.path)}
-          onClick={(e) => onToggle(entry, e.metaKey || e.ctrlKey)}
-          onDoubleClick={() => onOpen(entry)}
-          className="surface flex flex-col items-start gap-2 p-3 text-left transition-colors hover:border-[var(--line-strong)] data-[selected=true]:border-[var(--color-clay)] data-[selected=true]:bg-[var(--clay-soft)]"
-        >
-          <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} size={22} />
-          <span className="line-clamp-2 w-full text-sm leading-snug break-all">{entry.name}</span>
-          <span className="flex items-center gap-1.5 text-[11px] text-[var(--faint)]">
-            {entry.isDir ? '文件夹' : formatBytes(entry.size)}
-            <SegmentBadge entry={entry} />
-          </span>
-        </button>
+          entry={entry}
+          selection={selection}
+          onOpen={onOpen}
+          onContextMenu={onContextMenu}
+        />
       ))}
+    </div>
+  )
+}
+
+function GridTile({
+  entry,
+  selection,
+  onOpen,
+  onContextMenu,
+}: {
+  entry: Entry
+  selection: ReturnType<typeof useSelection<Entry>>
+  onOpen: (entry: Entry) => void
+  onContextMenu: (entry: Entry, position: { x: number; y: number }) => void
+}) {
+  const longPress = useLongPress({
+    onLongPress: ({ clientX, clientY }) => onContextMenu(entry, { x: clientX, y: clientY }),
+  })
+
+  return (
+    <button
+      data-selectable={entry.path}
+      data-selected={selection.isSelected(entry.path)}
+      onClick={(e) => selection.click(entry.path, e)}
+      onDoubleClick={() => onOpen(entry)}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        onContextMenu(entry, { x: e.clientX, y: e.clientY })
+      }}
+      {...longPress}
+      className="surface flex flex-col items-start gap-2 p-3 text-left transition-colors hover:border-[var(--line-strong)] data-[selected=true]:border-[var(--color-clay)] data-[selected=true]:bg-[var(--clay-soft)]"
+    >
+      <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} size={22} />
+      <span className="line-clamp-2 w-full break-all text-sm leading-snug">{entry.name}</span>
+      <span className="flex items-center gap-1.5 text-[11px] text-[var(--faint)]">
+        {entry.isDir ? '文件夹' : formatBytes(entry.size)}
+        <SegmentBadge entry={entry} />
+      </span>
+    </button>
+  )
+}
+
+function SelectionBar({
+  count,
+  allSelected,
+  entries,
+  onSelectAll,
+  onClear,
+  onRename,
+  onBatchRename,
+  onMove,
+  onDownload,
+  onDelete,
+  canRename,
+  canMove,
+  canDownload,
+  canDelete,
+}: {
+  count: number
+  allSelected: boolean
+  entries: Entry[]
+  onSelectAll: () => void
+  onClear: () => void
+  onRename: () => void
+  onBatchRename: () => void
+  onMove: () => void
+  onDownload: () => void
+  onDelete: () => void
+  canRename: boolean
+  canMove: boolean
+  canDownload: boolean
+  canDelete: boolean
+}) {
+  const files = entries.filter((e) => !e.isDir)
+  return (
+    <div className="fixed inset-x-0 bottom-6 z-30 mx-auto flex w-fit max-w-[92vw] items-center gap-1.5 rounded-full border border-[var(--line-strong)] bg-[var(--surface)]/95 px-4 py-2 shadow-lg backdrop-blur-md rise-in">
+      <span className="mr-1 shrink-0 text-xs font-medium text-[var(--ink)]">已选 {count} 项</span>
+      <div className="h-4 w-px bg-[var(--line)]" />
+      <button onClick={onSelectAll} className="btn btn-ghost !px-2 !py-1 text-xs">
+        {allSelected ? '取消全选' : '全选'}
+      </button>
+      {canRename && count === 1 && (
+        <button onClick={onRename} className="btn btn-ghost !px-2 !py-1 text-xs" title="重命名">
+          <Pencil size={14} className="text-[var(--muted)]" />
+          <span className="hidden sm:inline">重命名</span>
+        </button>
+      )}
+      {canRename && count > 1 && (
+        <button onClick={onBatchRename} className="btn btn-ghost !px-2 !py-1 text-xs" title="批量重命名">
+          <Rows3 size={14} className="text-[var(--muted)]" />
+          <span className="hidden sm:inline">批量重命名</span>
+        </button>
+      )}
+      {canMove && (
+        <button onClick={onMove} className="btn btn-ghost !px-2 !py-1 text-xs" title="移动到...">
+          <FolderInput size={14} className="text-[var(--muted)]" />
+          <span className="hidden sm:inline">移动</span>
+        </button>
+      )}
+      {canDownload && files.length > 0 && (
+        <button onClick={onDownload} className="btn btn-ghost !px-2 !py-1 text-xs" title="下载">
+          <Download size={14} className="text-[var(--muted)]" />
+          <span className="hidden sm:inline">下载</span>
+        </button>
+      )}
+      {canDelete && (
+        <button onClick={onDelete} className="btn btn-danger !px-2 !py-1 text-xs" title="删除">
+          <Trash2 size={14} />
+          <span className="hidden sm:inline">删除</span>
+        </button>
+      )}
+      <div className="h-4 w-px bg-[var(--line)]" />
+      <IconButton
+        label="取消选择"
+        onClick={onClear}
+        className="!p-1 text-[var(--faint)] hover:text-[var(--ink)]"
+      >
+        <X size={15} />
+      </IconButton>
     </div>
   )
 }
@@ -790,15 +1258,22 @@ function BrokenBadge({ entry }: { entry: Entry }) {
   )
 }
 
-function DetailPanel({ entry, onClose }: { entry: Entry; onClose: () => void }) {
+function DetailPanel({
+  entry,
+  onClose,
+  onDownload,
+}: {
+  entry: Entry
+  onClose: () => void
+  onDownload: (entry: Entry) => void
+}) {
   const [segments, setSegments] = useState<{ index: number; size: number; messageId: number }[]>([])
-  const [link, setLink] = useState<string | null>(null)
 
   useEffect(() => {
     if (entry.isDir) return
-    void api.segments(entry.id).then((r) => setSegments(r.segments)).catch(() => {})
-    void request<{ download: string }>(`/files/${entry.id}/link`)
-      .then((l) => setLink(l.download))
+    void api
+      .segments(entry.id)
+      .then((r) => setSegments(r.segments))
       .catch(() => {})
   }, [entry.id, entry.isDir])
 
@@ -812,18 +1287,14 @@ function DetailPanel({ entry, onClose }: { entry: Entry; onClose: () => void }) 
       </div>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
-        <Preview entry={entry} />
-
-        {link && (
-          <Button
-            variant="primary"
-            className="w-full"
-            icon={<Download size={15} />}
-            onClick={() => window.open(link, '_blank')}
-          >
-            下载 {formatBytes(entry.size)}
-          </Button>
-        )}
+        <Button
+          variant="primary"
+          className="w-full"
+          icon={<Download size={15} />}
+          onClick={() => onDownload(entry)}
+        >
+          下载 {formatBytes(entry.size)}
+        </Button>
 
         <dl className="space-y-2 text-sm">
           <Row label="大小" value={formatBytes(entry.size)} />
@@ -1171,13 +1642,17 @@ function UploadModal({
 
           {!localEnabled ? (
             <p className="rounded-[var(--radius-card)] bg-[var(--sunk)] p-4 text-xs leading-relaxed text-[var(--muted)]">
-              尚未配置 VPS 文件目录。请管理员前往“设置 → 运行参数”填写服务器目录（Docker 下通常为
-              <span className="mx-1 font-[family-name:var(--font-mono)]">/vps</span>），并确保该目录已挂载且可读。
+              尚未配置 VPS 文件目录，或当前账号没有这个权限。管理员可以前往「设置 → 存储」填写服务器目录（Docker
+              下通常为 <span className="mx-1 font-[family-name:var(--font-mono)]">/vps</span>）。
             </p>
           ) : (
             <div className="rounded-[var(--radius-card)] border border-[var(--line)]">
               <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--line)] px-2 py-1.5">
-                <IconButton label="返回上一级" disabled={localPath === '/'} onClick={() => void browse(parentPath)}>
+                <IconButton
+                  label="返回上一级"
+                  disabled={localPath === '/'}
+                  onClick={() => void browse(parentPath)}
+                >
                   <ChevronLeft size={15} />
                 </IconButton>
                 {listing?.breadcrumbs.map((crumb, index) => (
@@ -1219,7 +1694,9 @@ function UploadModal({
                       <span className="shrink-0 text-xs tabular-nums text-[var(--muted)]">
                         {entry.isDir ? '文件夹' : formatBytes(entry.size)}
                       </span>
-                      {selected.has(entry.path) && <Check size={14} className="shrink-0 text-[var(--color-clay)]" />}
+                      {selected.has(entry.path) && (
+                        <Check size={14} className="shrink-0 text-[var(--color-clay)]" />
+                      )}
                     </button>
                   ))}
                 </div>

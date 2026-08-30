@@ -84,8 +84,37 @@ func contentLengthFrom(ctx context.Context) (int64, bool) {
 	return n, ok
 }
 
-func (f *FileSystem) Mkdir(ctx context.Context, name string, _ os.FileMode) error {
+// resolve turns a WebDAV path into a real drive path for the authenticated
+// account, applying its directory scope. WebDAV clients have no notion of a
+// scope, so the account's subtree simply becomes their root.
+func resolve(ctx context.Context, name string) (string, error) {
 	clean, err := drive.CleanPath(name)
+	if err != nil {
+		return "", err
+	}
+	user, ok := auth.FromContext(ctx)
+	if !ok {
+		return clean, nil
+	}
+	return drive.ScopeOf(user).ToReal(clean)
+}
+
+// allowed reports whether the authenticated account holds a permission. WebDAV
+// gets the same permission checks as the API: it is a second door into one
+// drive, not a bypass.
+func allowed(ctx context.Context, perm database.Perm) bool {
+	user, ok := auth.FromContext(ctx)
+	if !ok {
+		return false
+	}
+	return user.Can(perm)
+}
+
+func (f *FileSystem) Mkdir(ctx context.Context, name string, _ os.FileMode) error {
+	if !allowed(ctx, database.PermMkdir) {
+		return os.ErrPermission
+	}
+	clean, err := resolve(ctx, name)
 	if err != nil {
 		return translate(err)
 	}
@@ -105,22 +134,31 @@ func (f *FileSystem) Mkdir(ctx context.Context, name string, _ os.FileMode) erro
 }
 
 func (f *FileSystem) RemoveAll(ctx context.Context, name string) error {
-	clean, err := drive.CleanPath(name)
+	if !allowed(ctx, database.PermDelete) {
+		return os.ErrPermission
+	}
+	clean, err := resolve(ctx, name)
 	if err != nil {
 		return translate(err)
 	}
-	if clean == drive.Root {
+	if clean == drive.Root || clean == scopeRootOf(ctx) {
 		return os.ErrPermission
 	}
 	return translate(f.drive.Delete(ctx, clean))
 }
 
 func (f *FileSystem) Rename(ctx context.Context, oldName, newName string) error {
-	from, err := drive.CleanPath(oldName)
+	// A MOVE that only changes the name needs rename; one that changes the
+	// directory needs move as well. Requiring both is the honest reading of an
+	// operation that can do either.
+	if !allowed(ctx, database.PermRename) || !allowed(ctx, database.PermMove) {
+		return os.ErrPermission
+	}
+	from, err := resolve(ctx, oldName)
 	if err != nil {
 		return translate(err)
 	}
-	to, err := drive.CleanPath(newName)
+	to, err := resolve(ctx, newName)
 	if err != nil {
 		return translate(err)
 	}
@@ -148,7 +186,10 @@ func (f *FileSystem) Rename(ctx context.Context, oldName, newName string) error 
 }
 
 func (f *FileSystem) Stat(ctx context.Context, name string) (os.FileInfo, error) {
-	clean, err := drive.CleanPath(name)
+	if !allowed(ctx, database.PermRead) {
+		return nil, os.ErrPermission
+	}
+	clean, err := resolve(ctx, name)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -159,16 +200,32 @@ func (f *FileSystem) Stat(ctx context.Context, name string) (os.FileInfo, error)
 	return &fileInfo{entry: entry}, nil
 }
 
+// scopeRootOf is the real path an account sees as its root, which must not be
+// deletable through WebDAV any more than the drive root is.
+func scopeRootOf(ctx context.Context) string {
+	user, ok := auth.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+	return drive.ScopeOf(user).Root
+}
+
 // OpenFile serves both reads and writes. The flags tell them apart: WebDAV PUT
 // arrives with O_WRONLY|O_CREATE|O_TRUNC.
 func (f *FileSystem) OpenFile(ctx context.Context, name string, flag int, _ os.FileMode) (webdav.File, error) {
-	clean, err := drive.CleanPath(name)
+	clean, err := resolve(ctx, name)
 	if err != nil {
 		return nil, translate(err)
 	}
 
 	if flag&(os.O_WRONLY|os.O_RDWR) != 0 {
+		if !allowed(ctx, database.PermUpload) {
+			return nil, os.ErrPermission
+		}
 		return f.openForWrite(ctx, clean, flag)
+	}
+	if !allowed(ctx, database.PermRead) {
+		return nil, os.ErrPermission
 	}
 
 	entry, err := f.drive.Stat(ctx, clean)
@@ -179,11 +236,26 @@ func (f *FileSystem) OpenFile(ctx context.Context, name string, flag int, _ os.F
 		return &dirHandle{fs: f, ctx: ctx, path: clean, info: fileInfo{entry: entry}}, nil
 	}
 
+	// Reading the bytes needs the download permission on top of read, so an
+	// account can be allowed to browse without being allowed to pull the
+	// contents out.
+	if !allowed(ctx, database.PermDownload) {
+		return nil, os.ErrPermission
+	}
 	file, err := f.db.FileByID(ctx, entry.ID)
 	if err != nil {
 		return nil, translate(err)
 	}
-	return &readHandle{fs: f, ctx: ctx, file: file, info: fileInfo{entry: entry}}, nil
+	user, _ := auth.FromContext(ctx)
+	return &readHandle{
+		fs:   f,
+		ctx:  ctx,
+		file: file,
+		info: fileInfo{entry: entry},
+		// Every range request a WebDAV client makes for this file shares one
+		// download slot, exactly as a browser download does.
+		sessionKey: "dav:" + user.ID + ":" + file.ID,
+	}, nil
 }
 
 func (f *FileSystem) openForWrite(ctx context.Context, clean string, flag int) (webdav.File, error) {

@@ -1,352 +1,902 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { AlertTriangle, Ban, Check, CloudDownload, HardDrive, Inbox, Layers } from 'lucide-react'
-import { api, type UploadJob } from '../lib/api'
+import {
+  AlertTriangle,
+  Ban,
+  Check,
+  ChevronDown,
+  CloudDownload,
+  Download,
+  HardDrive,
+  Inbox,
+  Layers,
+  Link2,
+  RotateCw,
+  Rows2,
+  Rows3,
+  Search,
+  Server,
+  Trash2,
+  Upload as UploadIcon,
+  X,
+} from 'lucide-react'
+import { api, type TransferRow } from '../lib/api'
 import { events } from '../lib/events'
-import { formatBytes, formatDate } from '../lib/format'
+import { formatBytes, formatDate, formatDateTime, formatDuration, formatSpeed } from '../lib/format'
 import { uploads, type Transfer } from '../lib/uploads'
-import { Button, EmptyState, IconButton, Progress } from '../components/primitives'
+import { downloads, type LocalDownload } from '../lib/downloads'
+import { Button, Chip, EmptyState, IconButton, Segmented, Select, Spinner, toast } from '../components/primitives'
 
 /**
- * The transfer panel merges two sources: uploads this browser is driving, held
- * in memory by the upload manager, and server-side jobs (remote URL fetches,
- * WebDAV writes, other sessions) that arrive over the event stream.
+ * The transfer panel.
+ *
+ * Three sources have to look like one list: uploads this browser is driving,
+ * downloads this browser is driving, and the server's own record of both —
+ * remote fetches, WebDAV writes, staged downloads, and everything anyone did
+ * yesterday. The live ones win where they overlap, because only the browser
+ * knows the byte count between two server-side checkpoints.
+ *
+ * The layout is deliberately dense. A transfer list is something you scan, and
+ * the previous three-line-per-row card meant four transfers filled the screen.
  */
+
+type KindFilter = 'all' | 'upload' | 'download'
+type Density = 'compact' | 'comfortable'
+type DatePreset = 'any' | 'today' | 'week' | 'month' | 'custom'
+
+interface Row {
+  id: string
+  kind: 'upload' | 'download'
+  name: string
+  status: string
+  /** 'running' covers pending too: both mean "not finished". */
+  active: boolean
+  total: number
+  done: number
+  speed: number
+  avgSpeed: number
+  createdAt: number
+  finishedAt?: number
+  startedAt?: number
+  source: string
+  segmentCount: number
+  error?: string
+  note?: string
+  /** Set for transfers this browser is driving, which can be cancelled. */
+  localId?: string
+  fileId?: string
+  mode?: string
+}
+
+const SOURCE_META: Record<string, { label: string; tone: 'clay' | 'blue' | 'green' | 'purple' | 'neutral' }> = {
+  webui: { label: 'WebUI', tone: 'clay' },
+  webdav: { label: 'WebDAV', tone: 'blue' },
+  local: { label: 'VPS 本地', tone: 'green' },
+  remote: { label: '离线下载', tone: 'purple' },
+  direct: { label: '直接下载', tone: 'clay' },
+  staged: { label: '服务器暂存', tone: 'blue' },
+  segments: { label: '分卷下载', tone: 'purple' },
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  pending: '排队中',
+  running: '进行中',
+  ready: '暂存完成',
+  complete: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+  expired: '已过期',
+}
+
 export function Transfers() {
   const [local, setLocal] = useState<Transfer[]>([])
-  const [jobs, setJobs] = useState<UploadJob[]>([])
-  const [remoteSpeeds, setRemoteSpeeds] = useState<Record<string, number>>({})
+  const [localDownloads, setLocalDownloads] = useState<LocalDownload[]>([])
+  const [remote, setRemote] = useState<TransferRow[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const [kind, setKind] = useState<KindFilter>('all')
+  const [statuses, setStatuses] = useState<Set<string>>(new Set())
+  const [sources, setSources] = useState<Set<string>>(new Set())
+  const [datePreset, setDatePreset] = useState<DatePreset>('any')
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
+  const [search, setSearch] = useState('')
+  const [density, setDensity] = useState<Density>(
+    () => (localStorage.getItem('tdrive.transferDensity') as Density) || 'compact',
+  )
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   useEffect(() => uploads.subscribe(setLocal), [])
+  useEffect(() => downloads.subscribe(setLocalDownloads), [])
+
+  const range = useMemo(() => dateRange(datePreset, customFrom, customTo), [datePreset, customFrom, customTo])
+
+  const reload = useCallback(async () => {
+    try {
+      const result = await api.transfers({
+        kind: kind === 'all' ? undefined : kind,
+        status: [...statuses],
+        source: [...sources],
+        from: range.from,
+        to: range.to,
+        q: search.trim() || undefined,
+        limit: 400,
+      })
+      setRemote(result.transfers)
+    } catch {
+      /* a failed refresh leaves the previous list rather than blanking it */
+    } finally {
+      setLoading(false)
+    }
+  }, [kind, range.from, range.to, search, sources, statuses])
 
   useEffect(() => {
-    const history = new Map<string, { bytes: number; time: number; speed: number }>()
-    let knownJobs: UploadJob[] = []
+    void reload()
+  }, [reload])
 
-    const terminal = (status: UploadJob['status']) =>
-      status === 'complete' || status === 'failed' || status === 'cancelled'
-
-    // The jobs endpoint is backed by completed-segment state and can therefore
-    // lag behind the SSE stream. Keep progress monotonic when those two sources
-    // cross in flight, otherwise a refresh briefly produces a fake speed spike.
-    const mergeJob = (current: UploadJob | undefined, incoming: UploadJob): UploadJob => {
-      if (!current) return incoming
-
-      let status = incoming.status
-      if (terminal(current.status) && !terminal(incoming.status)) {
-        status = current.status
-      } else if (!terminal(current.status) && !terminal(incoming.status)) {
-        status = current.status === 'running' || incoming.status === 'running' ? 'running' : 'pending'
-      }
-
-      return {
-        ...current,
-        ...incoming,
-        uploadedBytes: Math.max(current.uploadedBytes, incoming.uploadedBytes),
-        totalSize: incoming.totalSize || current.totalSize,
-        segmentSize: incoming.segmentSize || current.segmentSize,
-        segmentCount: incoming.segmentCount || current.segmentCount,
-        status,
-      }
-    }
-
-    const calculateSpeed = (id: string, uploadedBytes: number, status: UploadJob['status']) => {
-      const now = performance.now()
-      if (status !== 'running' && status !== 'pending') {
-        history.delete(id)
-        return 0
-      }
-      const prev = history.get(id)
-      if (prev) {
-        const dt = (now - prev.time) / 1000
-        if (dt > 5.0) {
-          history.set(id, { bytes: uploadedBytes, time: now, speed: 0 })
-          return 0
-        } else if (dt >= 0.25) {
-          const db = Math.max(0, uploadedBytes - prev.bytes)
-          const instantSpeed = db / dt
-          const smooth = prev.speed === 0 ? instantSpeed : prev.speed * 0.7 + instantSpeed * 0.3
-          history.set(id, { bytes: uploadedBytes, time: now, speed: smooth })
-          return smooth
-        }
-        return prev.speed
-      } else {
-        history.set(id, { bytes: uploadedBytes, time: now, speed: 0 })
-        return 0
-      }
-    }
-
-    const publishJobs = (next: UploadJob[]) => {
-      knownJobs = next
-      const currentIds = new Set(knownJobs.map((j) => j.id))
-      for (const id of history.keys()) {
-        if (!currentIds.has(id)) history.delete(id)
-      }
-      const speeds: Record<string, number> = {}
-      for (const j of knownJobs) {
-        speeds[j.id] = calculateSpeed(j.id, j.uploadedBytes, j.status)
-      }
-      setJobs(knownJobs)
-      setRemoteSpeeds(speeds)
-    }
-
-    const updateJobs = (next: UploadJob[]) => {
-      const incomingIds = new Set(next.map((j) => j.id))
-      const merged = next.map((j) => mergeJob(knownJobs.find((current) => current.id === j.id), j))
-      // Do not let a stale list response discard an event that arrived before it.
-      merged.push(...knownJobs.filter((j) => !incomingIds.has(j.id)))
-      publishJobs(merged)
-    }
-
-    const updateJob = (incoming: UploadJob) => {
-      const idx = knownJobs.findIndex((j) => j.id === incoming.id)
-      if (idx < 0) {
-        publishJobs([incoming, ...knownJobs])
-        return
-      }
-      const next = [...knownJobs]
-      next[idx] = mergeJob(next[idx], incoming)
-      publishJobs(next)
-    }
-
-    const load = () => void api.jobs().then(updateJobs).catch(() => {})
-
-    // Subscribe first so an upload event cannot arrive between the initial
-    // snapshot request and the subscription being established.
-    const unsubscribe = events.subscribe((event) => {
-      if (event.type === 'upload') {
-        const data = event.data as {
-          jobId: string
-          fileId?: string
-          name: string
-          uploaded: number
-          total: number
-          segmentCount: number
-          status: UploadJob['status']
-          error?: string
-          source?: string
-          sourceUrl?: string
-        }
-        if (!data || !data.jobId) {
-          load()
-          return
-        }
-
-        const current = knownJobs.find((j) => j.id === data.jobId)
-        const now = new Date().toISOString()
-        updateJob({
-          id: data.jobId,
-          fileId: data.fileId || current?.fileId,
-          dirId: current?.dirId,
-          name: data.name || current?.name || '上传',
-          totalSize: data.total || current?.totalSize || 0,
-          segmentSize: current?.segmentSize || 0,
-          segmentCount: data.segmentCount || current?.segmentCount || 0,
-          uploadedBytes: Math.max(0, data.uploaded || 0),
-          status: data.status,
-          error: data.error,
-          source: data.source || current?.source,
-          sourceUrl: data.sourceUrl || current?.sourceUrl,
-          createdAt: current?.createdAt || now,
-          updatedAt: now,
-        })
-      }
+  // Progress arrives over SSE far more often than a list refresh could poll
+  // for it, so the stream drives a debounced reload rather than the list
+  // being rebuilt per event.
+  const reloadTimer = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    return events.subscribe((event) => {
+      if (event.type !== 'upload' && event.type !== 'download') return
+      window.clearTimeout(reloadTimer.current)
+      reloadTimer.current = window.setTimeout(() => void reload(), 600)
     })
+  }, [reload])
 
-    load()
-    return unsubscribe
-  }, [])
-  // A job this browser is already showing locally would otherwise appear
-  // twice, once with live progress and once with the server's last snapshot.
-  const localIds = new Set(local.map((t) => t.id))
-  const remote = jobs.filter((j) => !localIds.has(j.id))
+  const setDensityMode = (next: Density) => {
+    setDensity(next)
+    localStorage.setItem('tdrive.transferDensity', next)
+  }
 
-  const empty = local.length === 0 && remote.length === 0
+  const rows = useMemo(
+    () => mergeRows(local, localDownloads, remote),
+    [local, localDownloads, remote],
+  )
+
+  // The server already applied the filters to its own rows; the live local
+  // ones have to be filtered here so the two halves agree.
+  const visible = useMemo(() => {
+    return rows.filter((row) => {
+      if (kind !== 'all' && row.kind !== kind) return false
+      if (statuses.size > 0 && !statuses.has(normalizeStatus(row.status))) return false
+      if (sources.size > 0 && !sources.has(row.source)) return false
+      if (range.from && row.createdAt < range.from) return false
+      if (range.to && row.createdAt > range.to) return false
+      if (search.trim() && !row.name.toLowerCase().includes(search.trim().toLowerCase())) return false
+      return true
+    })
+  }, [kind, range.from, range.to, rows, search, sources, statuses])
+
+  const stats = useMemo(() => {
+    const active = visible.filter((r) => r.active)
+    const up = active.filter((r) => r.kind === 'upload')
+    const down = active.filter((r) => r.kind === 'download')
+    const todayStart = startOfDay(Date.now())
+    const doneToday = rows.filter((r) => !r.active && (r.finishedAt ?? r.createdAt) >= todayStart)
+    return {
+      active: active.length,
+      upSpeed: up.reduce((sum, r) => sum + r.speed, 0),
+      downSpeed: down.reduce((sum, r) => sum + r.speed, 0),
+      doneToday: doneToday.length,
+      bytesToday: doneToday.reduce((sum, r) => sum + r.total, 0),
+    }
+  }, [rows, visible])
+
+  const finished = visible.filter((r) => !r.active)
+  const selectedRows = visible.filter((r) => selected.has(r.id))
+
+  const toggleFilter = (set: Set<string>, apply: (next: Set<string>) => void, value: string) => {
+    const next = new Set(set)
+    if (next.has(value)) next.delete(value)
+    else next.add(value)
+    apply(next)
+    setSelected(new Set())
+  }
+
+  const deleteSelected = async () => {
+    const removable = selectedRows.filter((r) => !r.active)
+    if (removable.length === 0) return
+    if (!confirm(`删除 ${removable.length} 条传输记录？暂存在服务器上的文件也会一并删除。`)) return
+    try {
+      await api.deleteTransfers({ ids: removable.map((r) => r.id) })
+      toast(`已删除 ${removable.length} 条记录`, 'success')
+      setSelected(new Set())
+      uploads.clearFinished()
+      downloads.clearFinished()
+      await reload()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error')
+    }
+  }
+
+  const clearFinished = async (scope: 'filtered' | 'all') => {
+    const message =
+      scope === 'all'
+        ? '清空全部已结束的传输记录？暂存在服务器上的文件也会一并删除。'
+        : `清空当前筛选下的 ${finished.length} 条已结束记录？`
+    if (!confirm(message)) return
+    try {
+      const result = await api.deleteTransfers(
+        scope === 'all'
+          ? {}
+          : {
+              ids: finished.map((r) => r.id),
+            },
+      )
+      toast(`已清除 ${result.removed} 条记录`, 'success')
+      uploads.clearFinished()
+      downloads.clearFinished()
+      setSelected(new Set())
+      await reload()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error')
+    }
+  }
+
+  const removeOne = async (row: Row) => {
+    try {
+      if (row.localId) {
+        uploads.clearFinished()
+        downloads.clearFinished()
+      }
+      await api.deleteTransfer(row.kind, row.id)
+      await reload()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error')
+    }
+  }
+
+  const cancel = (row: Row) => {
+    if (row.kind === 'upload') {
+      if (row.localId) uploads.cancel(row.localId)
+      else void api.cancelUpload(row.id).then(reload).catch(() => {})
+    } else {
+      if (row.localId) downloads.cancel(row.localId)
+      else void api.cancelDownload(row.id).then(reload).catch(() => {})
+    }
+  }
+
+  const filtersActive =
+    statuses.size > 0 || sources.size > 0 || datePreset !== 'any' || search.trim() !== ''
 
   return (
-    <div className="h-full min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
-        <header className="mb-5 flex items-center justify-between">
-          <div>
-            <h1 className="display text-xl">传输</h1>
-            <p className="mt-1 text-sm text-[var(--muted)]">
-              大文件会拆成多个分卷分别上传，失败时只重传缺失的那一卷。
-            </p>
+    <div className="flex h-full min-h-0 flex-1 flex-col">
+      <div className="sticky top-0 z-20 shrink-0 border-b border-[var(--line)] bg-[var(--bg)]/90 backdrop-blur">
+        <div className="mx-auto w-full max-w-5xl px-4 pt-4 sm:px-6">
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <h1 className="display text-lg">传输</h1>
+            <SummaryBar {...stats} />
+            <div className="ml-auto flex items-center gap-1">
+              <IconButton
+                label={density === 'compact' ? '切换为舒适密度' : '切换为紧凑密度'}
+                onClick={() => setDensityMode(density === 'compact' ? 'comfortable' : 'compact')}
+              >
+                {density === 'compact' ? <Rows3 size={15} /> : <Rows2 size={15} />}
+              </IconButton>
+              <IconButton label="刷新" onClick={() => void reload()}>
+                <RotateCw size={15} />
+              </IconButton>
+            </div>
           </div>
-          {local.some((t) => t.state === 'complete' || t.state === 'cancelled') && (
-            <Button onClick={() => uploads.clearFinished()}>清除已完成</Button>
-          )}
-        </header>
 
-        {empty ? (
-          <EmptyState
-            icon={<Inbox size={30} />}
-            title="没有正在进行的传输"
-            description="上传或从链接下载时，进度会显示在这里。"
+          <div className="flex flex-wrap items-center gap-2 pb-3">
+            <Segmented
+              value={kind}
+              onChange={(next) => {
+                setKind(next)
+                setSelected(new Set())
+              }}
+              options={[
+                { value: 'all', label: '全部' },
+                { value: 'upload', label: '上传' },
+                { value: 'download', label: '下载' },
+              ]}
+            />
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(['running', 'complete', 'failed', 'cancelled'] as const).map((status) => (
+                <Chip
+                  key={status}
+                  active={statuses.has(status)}
+                  tone="neutral"
+                  onClick={() => toggleFilter(statuses, setStatuses, status)}
+                >
+                  {STATUS_LABEL[status]}
+                </Chip>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {Object.entries(SOURCE_META)
+                .filter(([key]) => ['webui', 'webdav', 'local', 'remote', 'staged'].includes(key))
+                .map(([key, meta]) => (
+                  <Chip
+                    key={key}
+                    active={sources.has(key)}
+                    tone={meta.tone}
+                    onClick={() => toggleFilter(sources, setSources, key)}
+                  >
+                    {meta.label}
+                  </Chip>
+                ))}
+            </div>
+
+            <Select
+              className="!w-auto !py-1.5 text-xs"
+              value={datePreset}
+              onChange={(e) => setDatePreset(e.target.value as DatePreset)}
+            >
+              <option value="any">全部时间</option>
+              <option value="today">今天</option>
+              <option value="week">近 7 天</option>
+              <option value="month">近 30 天</option>
+              <option value="custom">自定义…</option>
+            </Select>
+
+            {datePreset === 'custom' && (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={customFrom}
+                  onChange={(e) => setCustomFrom(e.target.value)}
+                  className="input !w-auto !py-1.5 text-xs"
+                />
+                <span className="text-xs text-[var(--faint)]">至</span>
+                <input
+                  type="date"
+                  value={customTo}
+                  onChange={(e) => setCustomTo(e.target.value)}
+                  className="input !w-auto !py-1.5 text-xs"
+                />
+              </div>
+            )}
+
+            <div className="relative ml-auto min-w-40 flex-1 sm:max-w-56 sm:flex-none">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--faint)]" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="搜索文件名"
+                className="input !py-1.5 !pl-7 text-xs"
+              />
+            </div>
+
+            {filtersActive && (
+              <IconButton
+                label="清除筛选"
+                onClick={() => {
+                  setStatuses(new Set())
+                  setSources(new Set())
+                  setDatePreset('any')
+                  setSearch('')
+                }}
+              >
+                <X size={14} />
+              </IconButton>
+            )}
+          </div>
+
+          {(selected.size > 0 || finished.length > 0) && (
+            <div className="flex flex-wrap items-center gap-2 border-t border-[var(--line)] py-2 text-xs">
+              {selected.size > 0 ? (
+                <>
+                  <span className="text-[var(--muted)]">已选 {selected.size} 条</span>
+                  <button
+                    className="btn btn-danger !px-2 !py-1 text-xs"
+                    onClick={() => void deleteSelected()}
+                  >
+                    <Trash2 size={13} />
+                    删除所选记录
+                  </button>
+                  <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => setSelected(new Set())}>
+                    取消选择
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="text-[var(--faint)]">{finished.length} 条已结束</span>
+                  <button
+                    className="btn btn-ghost !px-2 !py-1 text-xs"
+                    onClick={() => void clearFinished('filtered')}
+                  >
+                    清除当前筛选结果
+                  </button>
+                  <button
+                    className="btn btn-ghost !px-2 !py-1 text-xs text-[var(--color-danger)]"
+                    onClick={() => void clearFinished('all')}
+                  >
+                    清空全部历史
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-5xl px-4 py-3 sm:px-6">
+          {loading ? (
+            <div className="flex justify-center py-20">
+              <Spinner />
+            </div>
+          ) : visible.length === 0 ? (
+            <EmptyState
+              icon={<Inbox size={30} />}
+              title={filtersActive ? '没有符合条件的传输' : '还没有任何传输'}
+              description={
+                filtersActive
+                  ? '换个筛选条件试试，或者清除筛选看全部记录。'
+                  : '上传、下载和离线下载的进度都会出现在这里。'
+              }
+              action={
+                filtersActive ? (
+                  <Button
+                    onClick={() => {
+                      setStatuses(new Set())
+                      setSources(new Set())
+                      setDatePreset('any')
+                      setSearch('')
+                      setKind('all')
+                    }}
+                  >
+                    清除筛选
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <div className={clsx('divide-y divide-[var(--line)]')}>
+              {visible.map((row) => (
+                <TransferRowView
+                  key={`${row.kind}:${row.id}`}
+                  row={row}
+                  density={density}
+                  selected={selected.has(row.id)}
+                  expanded={expanded.has(row.id)}
+                  onToggleSelect={() =>
+                    setSelected((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(row.id)) next.delete(row.id)
+                      else next.add(row.id)
+                      return next
+                    })
+                  }
+                  onToggleExpand={() =>
+                    setExpanded((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(row.id)) next.delete(row.id)
+                      else next.add(row.id)
+                      return next
+                    })
+                  }
+                  onCancel={() => cancel(row)}
+                  onDelete={() => void removeOne(row)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SummaryBar({
+  active,
+  upSpeed,
+  downSpeed,
+  doneToday,
+  bytesToday,
+}: {
+  active: number
+  upSpeed: number
+  downSpeed: number
+  doneToday: number
+  bytesToday: number
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--muted)]">
+      {active > 0 ? (
+        <span className="flex items-center gap-1.5">
+          <span className="size-1.5 animate-pulse rounded-full bg-[var(--color-clay)]" />
+          进行中 {active}
+        </span>
+      ) : (
+        <span className="text-[var(--faint)]">空闲</span>
+      )}
+      {upSpeed > 0 && (
+        <span className="flex items-center gap-1 tabular-nums">
+          <UploadIcon size={11} />
+          {formatSpeed(upSpeed)}
+        </span>
+      )}
+      {downSpeed > 0 && (
+        <span className="flex items-center gap-1 tabular-nums">
+          <Download size={11} />
+          {formatSpeed(downSpeed)}
+        </span>
+      )}
+      <span className="text-[var(--faint)]">
+        今日完成 {doneToday} 个 · {formatBytes(bytesToday)}
+      </span>
+    </div>
+  )
+}
+
+function TransferRowView({
+  row,
+  density,
+  selected,
+  expanded,
+  onToggleSelect,
+  onToggleExpand,
+  onCancel,
+  onDelete,
+}: {
+  row: Row
+  density: Density
+  selected: boolean
+  expanded: boolean
+  onToggleSelect: () => void
+  onToggleExpand: () => void
+  onCancel: () => void
+  onDelete: () => void
+}) {
+  const pct = row.total > 0 ? Math.min(100, (row.done / row.total) * 100) : 0
+  const source = SOURCE_META[row.source] ?? SOURCE_META.webui
+
+  return (
+    <div
+      className={clsx(
+        'group relative',
+        density === 'compact' ? 'py-1.5' : 'py-3',
+        selected && 'bg-[var(--clay-soft)]/40',
+      )}
+    >
+      {/* Progress is the row's own background rather than a separate bar: it
+          saves a line of height per row without losing the information. */}
+      {row.active && (
+        <div
+          className="pointer-events-none absolute inset-y-0 left-0 bg-[var(--clay-soft)]/60 transition-[width] duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      )}
+
+      <div className="relative flex items-center gap-2.5 px-2">
+        <button
+          onClick={onToggleSelect}
+          aria-label="选择"
+          className={clsx(
+            'flex size-4 shrink-0 items-center justify-center rounded border transition-colors',
+            selected
+              ? 'border-[var(--color-clay)] bg-[var(--color-clay)] text-white'
+              : 'border-[var(--line-strong)] opacity-0 group-hover:opacity-100',
+          )}
+        >
+          {selected && <Check size={11} />}
+        </button>
+
+        <StateIcon row={row} />
+
+        <button onClick={onToggleExpand} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+          <span className="truncate text-sm">{row.name}</span>
+          {row.segmentCount > 1 && (
+            <span className="chip shrink-0" title={`${row.segmentCount} 个分卷`}>
+              <Layers size={10} />
+              {row.segmentCount}
+            </span>
+          )}
+          {density === 'comfortable' && (
+            <span className={clsx('chip shrink-0 !border-transparent', toneClass(source.tone))}>
+              {source.label}
+            </span>
+          )}
+        </button>
+
+        <div className="flex shrink-0 items-center gap-3 text-xs tabular-nums text-[var(--muted)]">
+          {row.active ? (
+            <>
+              {row.speed > 0 && (
+                <span className="hidden font-medium text-[var(--color-clay)] sm:inline">
+                  {formatSpeed(row.speed)}
+                </span>
+              )}
+              <span className="hidden sm:inline">
+                {formatBytes(row.done)} / {formatBytes(row.total)}
+              </span>
+              <span className="w-9 text-right sm:hidden">{Math.round(pct)}%</span>
+            </>
+          ) : (
+            <>
+              {row.avgSpeed > 0 && (
+                <span className="hidden text-[var(--faint)] sm:inline" title="平均速度">
+                  均 {formatSpeed(row.avgSpeed)}
+                </span>
+              )}
+              <span>{formatBytes(row.total)}</span>
+              <span className="hidden text-[var(--faint)] lg:inline" title={formatDateTime(row.createdAt)}>
+                {formatDate(row.finishedAt ?? row.createdAt)}
+              </span>
+            </>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center">
+          {row.active ? (
+            <IconButton label="取消" onClick={onCancel} className="!p-1.5">
+              <Ban size={14} />
+            </IconButton>
+          ) : (
+            <IconButton
+              label="删除记录"
+              onClick={onDelete}
+              className="!p-1.5 opacity-0 group-hover:opacity-100"
+            >
+              <Trash2 size={14} />
+            </IconButton>
+          )}
+          <ChevronDown
+            size={14}
+            className={clsx(
+              'shrink-0 text-[var(--faint)] transition-transform',
+              expanded && 'rotate-180',
+            )}
           />
-        ) : (
-          <div className="space-y-2">
-            {local.map((t) => (
-              <LocalRow key={t.id} transfer={t} />
-            ))}
-            {remote.map((j) => (
-              <RemoteRow key={j.id} job={j} speed={remoteSpeeds[j.id] ?? 0} />
-            ))}
-          </div>
-        )}
+        </div>
       </div>
-    </div>
-  )
-}
 
-function LocalRow({ transfer }: { transfer: Transfer }) {
-  const pct = transfer.size > 0 ? (transfer.uploaded / transfer.size) * 100 : 0
-  const active = transfer.state === 'uploading'
-
-  return (
-    <div className="surface p-3.5">
-      <div className="flex items-start gap-3">
-        <StateDot state={transfer.state} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="truncate text-sm font-medium">{transfer.name}</span>
-            <div className="flex shrink-0 items-center gap-2">
-              {active && transfer.speed !== undefined && transfer.speed > 0 && (
-                <span className="text-xs font-mono font-medium text-[var(--color-clay)] tabular-nums">
-                  {formatBytes(transfer.speed)}/s
-                </span>
-              )}
-              <span className="text-xs tabular-nums text-[var(--muted)]">
-                {active
-                  ? `${formatBytes(transfer.uploaded)} / ${formatBytes(transfer.size)}`
-                  : formatBytes(transfer.size)}
-              </span>
-            </div>
-          </div>
-
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-            <span className="chip shrink-0 !bg-[var(--clay-soft)] !text-[var(--color-clay)] !border-transparent">
-              WebUI
-            </span>
-            <span className="truncate">{transfer.path}</span>
-            {transfer.segmentCount > 1 && (
-              <span className="chip shrink-0" title="这个文件被拆成多个分卷">
-                <Layers size={10} />
-                {transfer.segmentsDone}/{transfer.segmentCount} 卷
-              </span>
-            )}
-          </div>
-
-          {active && <Progress value={pct} className="mt-2.5" />}
-
-          {transfer.error && (
-            <p className="mt-2 text-xs text-[var(--color-danger)]">{transfer.error}</p>
+      {(expanded || row.error) && (
+        <div className="relative mt-1.5 space-y-1 px-2 pl-12 text-xs text-[var(--muted)]">
+          {row.error && <p className="text-[var(--color-danger)]">{row.error}</p>}
+          {row.note && <p className="text-[var(--faint)]">{row.note}</p>}
+          {expanded && (
+            <dl className="grid gap-x-6 gap-y-0.5 sm:grid-cols-2">
+              <Detail label="来源" value={source.label} />
+              <Detail label="状态" value={STATUS_LABEL[normalizeStatus(row.status)] ?? row.status} />
+              <Detail label="开始" value={row.startedAt ? formatDateTime(row.startedAt) : '—'} />
+              <Detail
+                label="用时"
+                value={
+                  row.startedAt && row.finishedAt
+                    ? formatDuration((row.finishedAt - row.startedAt) / 1000) || '不到 1 秒'
+                    : '—'
+                }
+              />
+              <Detail label="平均速度" value={row.avgSpeed > 0 ? formatSpeed(row.avgSpeed) : '—'} />
+              <Detail label="创建" value={formatDateTime(row.createdAt)} />
+            </dl>
           )}
         </div>
-
-        {active && (
-          <IconButton label="取消" onClick={() => uploads.cancel(transfer.id)}>
-            <Ban size={15} />
-          </IconButton>
-        )}
-      </div>
+      )}
     </div>
   )
 }
 
-function RemoteRow({ job, speed }: { job: UploadJob; speed: number }) {
-  const pct = job.totalSize > 0 ? (job.uploadedBytes / job.totalSize) * 100 : 0
-  const active = job.status === 'running' || job.status === 'pending'
-
-  const isWebdav = job.source === 'webdav'
-  const isLocal = job.source === 'local'
-  const isRemote = job.source === 'remote' || Boolean(job.sourceUrl?.startsWith('http://') || job.sourceUrl?.startsWith('https://'))
-
+function Detail({ label, value }: { label: string; value: string }) {
   return (
-    <div className="surface p-3.5">
-      <div className="flex items-start gap-3">
-        <StateDot state={job.status === 'complete' ? 'complete' : job.status === 'failed' ? 'failed' : 'uploading'} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="flex min-w-0 items-center gap-1.5 truncate text-sm font-medium">
-              {isRemote && <CloudDownload size={13} className="shrink-0 text-[var(--faint)]" />}
-              {isLocal && <HardDrive size={13} className="shrink-0 text-[var(--faint)]" />}
-              {job.name}
-            </span>
-            <div className="flex shrink-0 items-center gap-2">
-              {active && speed > 0 && (
-                <span className="text-xs font-mono font-medium text-[var(--color-clay)] tabular-nums">
-                  {formatBytes(speed)}/s
-                </span>
-              )}
-              <span className="text-xs tabular-nums text-[var(--muted)]">
-                {active && job.uploadedBytes > 0
-                  ? `${formatBytes(job.uploadedBytes)} / ${formatBytes(job.totalSize)}`
-                  : formatBytes(job.totalSize)}
-              </span>
-            </div>
-          </div>
-
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
-            {isWebdav ? (
-              <span className="chip shrink-0 !bg-blue-500/12 !text-blue-600 dark:!text-blue-400 !border-transparent">
-                WebDAV
-              </span>
-            ) : isLocal ? (
-              <span className="chip shrink-0 !bg-green-500/12 !text-green-700 dark:!text-green-400 !border-transparent">
-                VPS 本地
-              </span>
-            ) : isRemote ? (
-              <span className="chip shrink-0 !bg-purple-500/12 !text-purple-600 dark:!text-purple-400 !border-transparent">
-                离线下载
-              </span>
-            ) : (
-              <span className="chip shrink-0 !bg-[var(--clay-soft)] !text-[var(--color-clay)] !border-transparent">
-                WebUI
-              </span>
-            )}
-            <span>{formatDate(new Date(job.updatedAt).getTime())}</span>
-            {job.segmentCount > 1 && (
-              <span className="chip shrink-0">
-                <Layers size={10} />
-                {job.segmentCount} 卷
-              </span>
-            )}
-          </div>
-
-          {active && <Progress value={pct} className="mt-2.5" />}
-          {job.error && <p className="mt-2 text-xs text-[var(--color-danger)]">{job.error}</p>}
-        </div>
-      </div>
+    <div className="flex justify-between gap-3">
+      <dt className="text-[var(--faint)]">{label}</dt>
+      <dd className="truncate">{value}</dd>
     </div>
   )
 }
 
-function StateDot({ state }: { state: Transfer['state'] }) {
-  if (state === 'complete') {
+function StateIcon({ row }: { row: Row }) {
+  const status = normalizeStatus(row.status)
+  if (status === 'complete' || status === 'ready') {
     return (
-      <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-success)]/12">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-success)]/12">
         <Check size={12} className="text-[var(--color-success)]" />
       </span>
     )
   }
-  if (state === 'failed') {
+  if (status === 'failed') {
     return (
-      <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-danger)]/12">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-danger)]/12">
         <AlertTriangle size={11} className="text-[var(--color-danger)]" />
       </span>
     )
   }
-  if (state === 'cancelled') {
+  if (status === 'cancelled' || status === 'expired') {
     return (
-      <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--sunk)]">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-[var(--sunk)]">
         <Ban size={11} className="text-[var(--faint)]" />
       </span>
     )
   }
+
+  const Icon =
+    row.kind === 'download'
+      ? row.mode === 'staged'
+        ? Server
+        : Download
+      : row.source === 'remote'
+        ? CloudDownload
+        : row.source === 'local'
+          ? HardDrive
+          : row.source === 'webdav'
+            ? Link2
+            : UploadIcon
+
   return (
-    <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center">
-      <span className={clsx('size-2 rounded-full bg-[var(--color-clay)]', 'animate-pulse')} />
+    <span className="flex size-5 shrink-0 items-center justify-center">
+      <Icon size={13} className="text-[var(--color-clay)]" />
     </span>
   )
+}
+
+function toneClass(tone: string): string {
+  switch (tone) {
+    case 'blue':
+      return '!bg-blue-500/12 !text-blue-600 dark:!text-blue-400'
+    case 'green':
+      return '!bg-green-500/12 !text-green-700 dark:!text-green-400'
+    case 'purple':
+      return '!bg-purple-500/12 !text-purple-600 dark:!text-purple-400'
+    case 'neutral':
+      return '!bg-[var(--sunk)] !text-[var(--muted)]'
+    default:
+      return '!bg-[var(--clay-soft)] !text-[var(--color-clay)]'
+  }
+}
+
+function normalizeStatus(status: string): string {
+  return status === 'pending' || status === 'uploading' || status === 'downloading' || status === 'preparing' || status === 'merging'
+    ? 'running'
+    : status
+}
+
+/**
+ * mergeRows folds the three sources into one list.
+ *
+ * A transfer this browser is driving appears in both the live map and the
+ * server's list, and the live one is authoritative: the server only learns of
+ * progress at segment boundaries, so its number lags by up to a whole segment.
+ */
+function mergeRows(
+  localUploads: Transfer[],
+  localDownloads: LocalDownload[],
+  remote: TransferRow[],
+): Row[] {
+  const rows = new Map<string, Row>()
+
+  for (const row of remote) {
+    if (row.upload) {
+      const job = row.upload
+      rows.set(`upload:${row.id}`, {
+        id: row.id,
+        kind: 'upload',
+        name: job.name,
+        status: job.status,
+        active: job.status === 'running' || job.status === 'pending',
+        total: job.totalSize,
+        done: job.uploadedBytes,
+        speed: 0,
+        avgSpeed: job.avgSpeed ?? 0,
+        createdAt: typeof job.createdAt === 'number' ? job.createdAt : Date.parse(String(job.createdAt)),
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        source: job.source ?? 'webui',
+        segmentCount: job.segmentCount,
+        error: job.error,
+        fileId: job.fileId,
+      })
+    } else if (row.download) {
+      const job = row.download
+      rows.set(`download:${row.id}`, {
+        id: row.id,
+        kind: 'download',
+        name: job.name,
+        status: job.status,
+        active: job.status === 'running' || job.status === 'pending',
+        total: job.totalSize,
+        done: job.downloadedBytes,
+        speed: 0,
+        avgSpeed: job.avgSpeed ?? 0,
+        createdAt: job.createdAt,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+        source: job.mode,
+        segmentCount: 0,
+        error: job.error,
+        fileId: job.fileId,
+        mode: job.mode,
+      })
+    }
+  }
+
+  for (const transfer of localUploads) {
+    const key = `upload:${transfer.id}`
+    const existing = rows.get(key)
+    rows.set(key, {
+      id: transfer.id,
+      kind: 'upload',
+      name: transfer.name,
+      status: transfer.state === 'uploading' ? 'running' : transfer.state,
+      active: transfer.state === 'uploading' || transfer.state === 'queued',
+      total: transfer.size,
+      // The live counter can only move forward; a stale server snapshot must
+      // not drag it back.
+      done: Math.max(transfer.uploaded, existing?.done ?? 0),
+      speed: transfer.speed ?? 0,
+      avgSpeed: existing?.avgSpeed ?? 0,
+      createdAt: existing?.createdAt ?? Date.now(),
+      startedAt: existing?.startedAt,
+      finishedAt: existing?.finishedAt,
+      source: existing?.source ?? 'webui',
+      segmentCount: transfer.segmentCount,
+      error: transfer.error,
+      localId: transfer.id,
+    })
+  }
+
+  for (const download of localDownloads) {
+    const key = download.jobId ? `download:${download.jobId}` : `download:${download.id}`
+    const existing = rows.get(key)
+    rows.set(key, {
+      id: download.jobId ?? download.id,
+      kind: 'download',
+      name: download.name,
+      status:
+        download.state === 'downloading' || download.state === 'preparing' || download.state === 'merging'
+          ? 'running'
+          : download.state,
+      active: ['queued', 'preparing', 'downloading', 'merging'].includes(download.state),
+      total: download.size,
+      done: Math.max(download.received, existing?.done ?? 0),
+      speed: download.speed,
+      avgSpeed:
+        download.finishedAt && download.startedAt && download.finishedAt > download.startedAt
+          ? (download.size / (download.finishedAt - download.startedAt)) * 1000
+          : (existing?.avgSpeed ?? 0),
+      createdAt: download.startedAt,
+      startedAt: download.startedAt,
+      finishedAt: download.finishedAt,
+      source: download.mode,
+      segmentCount: 0,
+      error: download.error,
+      note: download.note,
+      localId: download.id,
+      fileId: download.fileId,
+      mode: download.mode,
+    })
+  }
+
+  return [...rows.values()].sort((a, b) => {
+    // Anything moving goes to the top; the rest is newest-first history.
+    if (a.active !== b.active) return a.active ? -1 : 1
+    return b.createdAt - a.createdAt
+  })
+}
+
+function startOfDay(ms: number): number {
+  const date = new Date(ms)
+  date.setHours(0, 0, 0, 0)
+  return date.getTime()
+}
+
+function dateRange(preset: DatePreset, from: string, to: string): { from?: number; to?: number } {
+  const now = Date.now()
+  switch (preset) {
+    case 'today':
+      return { from: startOfDay(now) }
+    case 'week':
+      return { from: startOfDay(now - 6 * 86_400_000) }
+    case 'month':
+      return { from: startOfDay(now - 29 * 86_400_000) }
+    case 'custom': {
+      const parsedFrom = from ? new Date(`${from}T00:00:00`).getTime() : undefined
+      // The end of the chosen day, not its start: picking the same date for
+      // both bounds must include that whole day.
+      const parsedTo = to ? new Date(`${to}T23:59:59.999`).getTime() : undefined
+      return { from: parsedFrom, to: parsedTo }
+    }
+    default:
+      return {}
+  }
 }

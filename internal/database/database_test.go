@@ -75,7 +75,7 @@ func TestRefreshTokenLifecycle(t *testing.T) {
 	}
 
 	hash := []byte("token-hash")
-	tokenID, err := db.StoreRefreshToken(ctx, u.ID, hash, time.Now().Add(time.Hour))
+	tokenID, err := db.StoreRefreshToken(ctx, u.ID, hash, time.Now().Add(time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("StoreRefreshToken: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestRefreshTokenLifecycle(t *testing.T) {
 
 	// An expired token must be rejected even though the row still exists.
 	expired := []byte("expired-hash")
-	if _, err := db.StoreRefreshToken(ctx, u.ID, expired, time.Now().Add(-time.Minute)); err != nil {
+	if _, err := db.StoreRefreshToken(ctx, u.ID, expired, time.Now().Add(-time.Minute), "", ""); err != nil {
 		t.Fatalf("StoreRefreshToken: %v", err)
 	}
 	if _, _, err := db.LookupRefreshToken(ctx, expired); !errors.Is(err, ErrNotFound) {

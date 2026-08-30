@@ -37,6 +37,15 @@ var (
 	ErrBadCredentials = errors.New("auth: incorrect username or password")
 	// ErrWeakPassword is returned when a new password is too short.
 	ErrWeakPassword = fmt.Errorf("auth: password must be at least %d characters", MinPasswordLength)
+	// ErrAccountDisabled is deliberately distinct from ErrBadCredentials: it
+	// is only ever returned after the password already checked out, so it
+	// tells the caller nothing they did not already prove they knew, and
+	// "your account is disabled" is the only message that stops someone
+	// retyping a password that was correct all along.
+	ErrAccountDisabled = errors.New("auth: this account has been disabled")
+	// ErrForbidden is returned when a valid account lacks the permission an
+	// action needs.
+	ErrForbidden = errors.New("auth: this account is not allowed to do that")
 	// ErrBadHash means a stored hash could not be parsed.
 	ErrBadHash = errors.New("auth: stored password hash is malformed")
 )

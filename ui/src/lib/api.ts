@@ -4,12 +4,61 @@
 
 export type Role = 'admin' | 'user'
 
+/** Every permission the server knows. The catalogue endpoint returns the
+ *  authoritative list; this type exists so the UI cannot typo one. */
+export type Perm =
+  | 'read'
+  | 'download'
+  | 'upload'
+  | 'uploadLocal'
+  | 'remoteFetch'
+  | 'mkdir'
+  | 'rename'
+  | 'move'
+  | 'delete'
+  | 'webdav'
+  | 'stage'
+  | 'share'
+
 export interface User {
   id: string
   username: string
   role: Role
   createdAt: string
   updatedAt: string
+  enabled: boolean
+  scopePath: string
+  quotaBytes: number
+  note: string
+  lastLoginIp?: string
+  lastLoginAt?: number
+  perms: Perm[]
+  /** True when the permissions come from the role rather than a stored mask. */
+  permsInherited: boolean
+  usedBytes: number
+  fileCount: number
+  sessions: number
+}
+
+export interface Session {
+  id: string
+  userAgent: string
+  ip: string
+  createdAt: string
+  lastUsedAt: string
+  expiresAt: string
+  current: boolean
+}
+
+export interface AuditEntry {
+  id: string
+  at: string
+  actorId?: string
+  actorName: string
+  action: string
+  target?: string
+  detail?: string
+  ip?: string
 }
 
 export interface Entry {
@@ -95,10 +144,19 @@ export interface RuntimeSettings {
   downloadConcurrency: number
   webdavEnabled: boolean
   logLevel: string
+  cacheDir: string
+  cacheLimit: number
+  cacheTtlHours: number
+  maxDownloadConns: number
+  downloadGraceMs: number
+  shareTtlHours: number
 }
+
+export type JobStatus = 'pending' | 'running' | 'complete' | 'failed' | 'cancelled'
 
 export interface UploadJob {
   id: string
+  kind?: 'upload'
   fileId?: string
   dirId?: string
   name: string
@@ -106,12 +164,67 @@ export interface UploadJob {
   segmentSize: number
   segmentCount: number
   uploadedBytes: number
-  status: 'pending' | 'running' | 'complete' | 'failed' | 'cancelled'
+  status: JobStatus
   error?: string
   source?: string
   sourceUrl?: string
-  createdAt: string
-  updatedAt: string
+  createdAt: number | string
+  updatedAt: number | string
+  startedAt?: number
+  finishedAt?: number
+  /** Bytes per second across the window the transfer was actually moving. */
+  avgSpeed?: number
+}
+
+export type DownloadMode = 'direct' | 'staged' | 'segments'
+export type DownloadStatus =
+  | 'pending'
+  | 'running'
+  | 'ready'
+  | 'complete'
+  | 'failed'
+  | 'cancelled'
+  | 'expired'
+
+export interface DownloadJob {
+  id: string
+  kind?: 'download'
+  fileId?: string
+  name: string
+  totalSize: number
+  downloadedBytes: number
+  mode: DownloadMode
+  status: DownloadStatus
+  error?: string
+  createdAt: number
+  updatedAt: number
+  startedAt?: number
+  finishedAt?: number
+  expiresAt?: number
+  avgSpeed?: number
+  url?: string
+}
+
+/** One row of the merged transfer list. Exactly one side is populated. */
+export interface TransferRow {
+  id: string
+  kind: 'upload' | 'download'
+  name: string
+  status: string
+  createdAt: number
+  upload?: UploadJob
+  download?: DownloadJob
+}
+
+export interface TransferFilter {
+  kind?: 'upload' | 'download'
+  status?: string[]
+  source?: string[]
+  from?: number
+  to?: number
+  q?: string
+  limit?: number
+  all?: boolean
 }
 
 export interface SegmentBound {
@@ -125,6 +238,58 @@ export interface UploadPlan {
   segmentSize: number
   segmentBounds: SegmentBound[]
   pending: number[]
+}
+
+export interface DownloadModeInfo {
+  mode: DownloadMode
+  available: boolean
+  recommended: boolean
+  reason?: string
+}
+
+export interface CacheStatus {
+  dir: string
+  used: number
+  limit: number
+  files: number
+}
+
+export interface DownloadOptions {
+  fileId: string
+  name: string
+  size: number
+  mime?: string
+  segmentCount: number
+  segmentBounds?: SegmentBound[]
+  modes: DownloadModeInfo[]
+  maxConnections: number
+  staged?: DownloadJob
+  cache: CacheStatus
+}
+
+export interface ShareLinkBody {
+  id: string
+  url: string
+  kind: 'file' | 'segment'
+  index?: number
+  name: string
+  size: number
+  expiresAt?: number
+}
+
+export interface ShareResponse {
+  file: ShareLinkBody
+  segments?: ShareLinkBody[]
+}
+
+export interface ShareRecord {
+  id: string
+  fileId: string
+  kind: 'file' | 'segment'
+  label?: string
+  revoked: boolean
+  hits: number
+  createdAt: string
 }
 
 export interface Channel {
@@ -164,6 +329,14 @@ export interface IndexStatus {
   error?: string
   startedAt?: number
   finishedAt?: number
+}
+
+export interface BatchRenameResult {
+  path: string
+  name: string
+  ok: boolean
+  newPath?: string
+  error?: string
 }
 
 export class ApiError extends Error {
@@ -262,6 +435,23 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 
 const json = (body: unknown) => JSON.stringify(body)
 
+/** query builds a search string, skipping empty values so the URLs stay
+ *  readable and the server sees "absent" rather than "empty". */
+function query(params: Record<string, string | number | boolean | string[] | undefined>) {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === '' || value === false) continue
+    if (Array.isArray(value)) {
+      if (value.length === 0) continue
+      search.set(key, value.join(','))
+    } else {
+      search.set(key, String(value))
+    }
+  }
+  const s = search.toString()
+  return s ? `?${s}` : ''
+}
+
 export const api = {
   status: () => request<Status>('/status'),
   settings: () => request<RuntimeSettings>('/settings'),
@@ -287,6 +477,8 @@ export const api = {
 
   changeOwnPassword: (current: string, next: string) =>
     request<void>('/me/password', { method: 'POST', body: json({ current, new: next }) }),
+  mySessions: () => request<Session[]>('/me/sessions'),
+  revokeMySession: (id: string) => request<void>(`/me/sessions/${id}`, { method: 'DELETE' }),
 
   list: (path: string) => request<Listing>(`/fs/list?path=${encodeURIComponent(path)}`),
   localList: (path: string) => request<LocalListing>(`/local/list?path=${encodeURIComponent(path)}`),
@@ -294,6 +486,11 @@ export const api = {
   mkdir: (path: string) => request<Entry>('/fs/mkdir', { method: 'POST', body: json({ path }) }),
   rename: (path: string, name: string) =>
     request<Entry>('/fs/rename', { method: 'POST', body: json({ path, name }) }),
+  batchRename: (items: { path: string; name: string }[]) =>
+    request<{ results: BatchRenameResult[]; renamed: number; failed: number }>('/fs/batch-rename', {
+      method: 'POST',
+      body: json({ items }),
+    }),
   move: (path: string, to: string) =>
     request<Entry>('/fs/move', { method: 'POST', body: json({ path, to }) }),
   remove: (paths: string[]) =>
@@ -303,6 +500,42 @@ export const api = {
     request<{ file: Entry; segments: { index: number; size: number; messageId: number }[] }>(
       `/files/${id}/segments`,
     ),
+
+  downloadOptions: (id: string) => request<DownloadOptions>(`/files/${id}/download-options`),
+  share: (id: string, body: { ttlSeconds?: number; segments?: boolean; label?: string } = {}) =>
+    request<ShareResponse>(`/files/${id}/share`, { method: 'POST', body: json(body) }),
+  shares: (all = false) => request<ShareRecord[]>(`/shares${query({ all })}`),
+  revokeShare: (id: string) => request<void>(`/shares/${id}`, { method: 'DELETE' }),
+
+  startDownload: (fileId: string, mode: DownloadMode) =>
+    request<DownloadJob>('/downloads', { method: 'POST', body: json({ fileId, mode }) }),
+  download: (id: string) => request<DownloadJob>(`/downloads/${id}`),
+  reportDownload: (id: string, body: { downloaded?: number; status?: string; error?: string }) =>
+    request<DownloadJob>(`/downloads/${id}/progress`, { method: 'POST', body: json(body) }),
+  cancelDownload: (id: string) => request<void>(`/downloads/${id}`, { method: 'DELETE' }),
+
+  transfers: (filter: TransferFilter = {}) =>
+    request<{ transfers: TransferRow[]; total: number }>(
+      `/transfers${query({
+        kind: filter.kind,
+        status: filter.status,
+        source: filter.source,
+        from: filter.from,
+        to: filter.to,
+        q: filter.q,
+        limit: filter.limit,
+        all: filter.all,
+      })}`,
+    ),
+  deleteTransfers: (body: {
+    ids?: string[]
+    kind?: 'upload' | 'download'
+    statuses?: string[]
+    before?: number
+    all?: boolean
+  }) => request<{ removed: number }>('/transfers', { method: 'DELETE', body: json(body) }),
+  deleteTransfer: (kind: 'upload' | 'download', id: string) =>
+    request<void>(`/transfers/${kind}/${id}`, { method: 'DELETE' }),
 
   beginUpload: (body: {
     path: string
@@ -351,13 +584,43 @@ export const api = {
     request<Channel>('/tg/channels/select', { method: 'POST', body: json({ tgId, accessHash }) }),
 
   users: () => request<User[]>('/users'),
-  createUser: (username: string, password: string, role: Role) =>
-    request<User>('/users', { method: 'POST', body: json({ username, password, role }) }),
+  permissionCatalog: () =>
+    request<{ all: Perm[]; userDefault: Perm[]; adminNote: string }>('/users/permissions'),
+  createUser: (body: {
+    username: string
+    password: string
+    role: Role
+    perms?: Perm[]
+    scopePath?: string
+    quotaBytes?: number
+    note?: string
+  }) => request<User>('/users', { method: 'POST', body: json(body) }),
+  updateUser: (
+    id: string,
+    body: {
+      enabled?: boolean
+      perms?: Perm[]
+      scopePath?: string
+      quotaBytes?: number
+      note?: string
+    },
+  ) => request<User>(`/users/${id}`, { method: 'PATCH', body: json(body) }),
   deleteUser: (id: string) => request<void>(`/users/${id}`, { method: 'DELETE' }),
   setUserPassword: (id: string, password: string) =>
     request<void>(`/users/${id}/password`, { method: 'POST', body: json({ password }) }),
   setUserRole: (id: string, role: Role) =>
     request<void>(`/users/${id}/role`, { method: 'POST', body: json({ role }) }),
+  userSessions: (id: string) => request<Session[]>(`/users/${id}/sessions`),
+  revokeUserSession: (id: string, sid: string) =>
+    request<void>(`/users/${id}/sessions/${sid}`, { method: 'DELETE' }),
+  revokeUserSessions: (id: string) =>
+    request<void>(`/users/${id}/sessions/revoke-all`, { method: 'POST' }),
+
+  audit: (params: { actor?: string; action?: string; from?: number; to?: number; q?: string; limit?: number } = {}) =>
+    request<AuditEntry[]>(`/audit${query(params)}`),
+
+  cache: () => request<CacheStatus>('/cache'),
+  purgeCache: () => request<{ freed: number }>('/cache/purge', { method: 'POST' }),
 
   rebuildIndex: () => request<IndexStatus>('/index/rebuild', { method: 'POST' }),
   indexStatus: () => request<IndexStatus>('/index/status'),
@@ -368,8 +631,23 @@ export function rawUrl(id: string, download = false) {
   return `/api/files/${id}/raw${download ? '?download=1' : ''}`
 }
 
+/** segmentRawUrl is one stored segment as its own object, which is what the
+ *  split-download mode fetches. */
+export function segmentRawUrl(id: string, index: number, token?: string) {
+  const suffix = token ? `?download=1&t=${encodeURIComponent(token)}` : '?download=1'
+  return `/api/files/${id}/segments/${index}/raw${suffix}`
+}
+
 /** currentToken exposes the access token for the few places that need to
  *  authenticate outside the fetch wrapper, such as the EventSource polyfill. */
 export function currentToken() {
   return accessToken
+}
+
+/** can reports whether an account holds a permission. Admins hold everything,
+ *  which the server also enforces; this only decides what to render. */
+export function can(user: User | null, perm: Perm): boolean {
+  if (!user) return false
+  if (user.role === 'admin') return true
+  return user.perms.includes(perm)
 }

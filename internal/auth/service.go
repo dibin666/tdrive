@@ -9,12 +9,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"go.uber.org/zap"
 
 	"github.com/dibin/tdrive/internal/config"
 	"github.com/dibin/tdrive/internal/database"
@@ -26,6 +29,7 @@ type Service struct {
 	db     *database.DB
 	cfg    *config.Config
 	secret []byte
+	log    *zap.Logger
 
 	verified *verifyCache
 }
@@ -42,7 +46,10 @@ type Claims struct {
 // Generating and persisting a secret means a deployment that sets nothing but a
 // data volume still keeps its sessions across restarts, instead of logging
 // everyone out whenever the container is recreated.
-func New(ctx context.Context, cfg *config.Config, db *database.DB) (*Service, error) {
+// The logger is variadic so that tests and any caller that does not care can
+// construct a service with three arguments, as this package has always been
+// used.
+func New(ctx context.Context, cfg *config.Config, db *database.DB, log ...*zap.Logger) (*Service, error) {
 	secret := cfg.Auth.JWTSecret
 	if len(secret) == 0 {
 		stored, err := db.Setting(ctx, database.SettingJWTSecret)
@@ -66,10 +73,16 @@ func New(ctx context.Context, cfg *config.Config, db *database.DB) (*Service, er
 		}
 	}
 
+	logger := zap.NewNop()
+	if len(log) > 0 && log[0] != nil {
+		logger = log[0]
+	}
+
 	return &Service{
 		db:       db,
 		cfg:      cfg,
 		secret:   secret,
+		log:      logger,
 		verified: newVerifyCache(5 * time.Minute),
 	}, nil
 }
@@ -109,8 +122,33 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, rol
 	return s.db.CreateUser(ctx, username, hash, role)
 }
 
+// ClientInfo describes where a session was established, for the session list.
+// It is display-only: nothing here participates in an authentication decision,
+// because all of it is client-controlled.
+type ClientInfo struct {
+	UserAgent string
+	IP        string
+}
+
+// ClientFrom reads the describing details out of a request.
+func ClientFrom(r *http.Request) ClientInfo {
+	return ClientInfo{UserAgent: r.UserAgent(), IP: clientIP(r)}
+}
+
+// clientIP prefers chi's RealIP result, which has already consulted the proxy
+// headers, and falls back to the socket address.
+func clientIP(r *http.Request) string {
+	if ip := r.RemoteAddr; ip != "" {
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			return host
+		}
+		return ip
+	}
+	return ""
+}
+
 // Login verifies credentials and mints a token pair.
-func (s *Service) Login(ctx context.Context, username, password string) (Tokens, database.User, error) {
+func (s *Service) Login(ctx context.Context, username, password string, client ClientInfo) (Tokens, database.User, error) {
 	user, err := s.db.UserByName(ctx, username)
 	if err != nil {
 		if errors.Is(err, database.ErrNotFound) {
@@ -126,9 +164,21 @@ func (s *Service) Login(ctx context.Context, username, password string) (Tokens,
 	if err := VerifyPassword(user.PasswordHash, password); err != nil {
 		return Tokens{}, database.User{}, ErrBadCredentials
 	}
+	// The password check runs first on purpose: answering "this account is
+	// disabled" to anyone who guesses a username would confirm the username.
+	if !user.Enabled {
+		return Tokens{}, database.User{}, ErrAccountDisabled
+	}
 
-	tokens, err := s.issue(ctx, user)
-	return tokens, user, err
+	tokens, err := s.issue(ctx, user, client)
+	if err != nil {
+		return Tokens{}, database.User{}, err
+	}
+	// A failure to record the login is not a reason to reject it.
+	if err := s.db.TouchLogin(ctx, user.ID, client.IP); err != nil {
+		s.log.Warn("could not record a login", zap.String("user", user.Username), zap.Error(err))
+	}
+	return tokens, user, nil
 }
 
 // Tokens is what a successful login hands back. The refresh token is meant for
@@ -140,7 +190,7 @@ type Tokens struct {
 	RefreshExp   time.Time `json:"-"`
 }
 
-func (s *Service) issue(ctx context.Context, user database.User) (Tokens, error) {
+func (s *Service) issue(ctx context.Context, user database.User, client ClientInfo) (Tokens, error) {
 	now := time.Now()
 	accessExp := now.Add(s.cfg.Auth.AccessTTL)
 
@@ -168,7 +218,8 @@ func (s *Service) issue(ctx context.Context, user database.User) (Tokens, error)
 
 	// Only the hash is stored, so a database leak cannot be replayed into
 	// live sessions.
-	if _, err := s.db.StoreRefreshToken(ctx, user.ID, hashToken(refresh), refreshExp); err != nil {
+	if _, err := s.db.StoreRefreshToken(ctx, user.ID, hashToken(refresh), refreshExp,
+		client.UserAgent, client.IP); err != nil {
 		return Tokens{}, err
 	}
 
@@ -182,7 +233,7 @@ func (s *Service) issue(ctx context.Context, user database.User) (Tokens, error)
 
 // Refresh exchanges a refresh token for a new pair, rotating the refresh token
 // so a stolen one is usable at most once.
-func (s *Service) Refresh(ctx context.Context, refresh string) (Tokens, database.User, error) {
+func (s *Service) Refresh(ctx context.Context, refresh string, client ClientInfo) (Tokens, database.User, error) {
 	userID, tokenID, err := s.db.LookupRefreshToken(ctx, hashToken(refresh))
 	if err != nil {
 		return Tokens{}, database.User{}, ErrBadCredentials
@@ -191,11 +242,18 @@ func (s *Service) Refresh(ctx context.Context, refresh string) (Tokens, database
 	if err != nil {
 		return Tokens{}, database.User{}, ErrBadCredentials
 	}
+	// Disabling an account has to end its sessions too, not just stop new
+	// logins — otherwise a browser that is already open keeps working for the
+	// full refresh lifetime.
+	if !user.Enabled {
+		_ = s.db.RevokeUserTokens(ctx, user.ID)
+		return Tokens{}, database.User{}, ErrAccountDisabled
+	}
 	if err := s.db.RevokeRefreshToken(ctx, tokenID); err != nil {
 		return Tokens{}, database.User{}, err
 	}
 
-	tokens, err := s.issue(ctx, user)
+	tokens, err := s.issue(ctx, user, client)
 	return tokens, user, err
 }
 
@@ -243,6 +301,9 @@ func (s *Service) VerifyBasic(ctx context.Context, username, password string) (d
 	if err := VerifyPassword(user.PasswordHash, password); err != nil {
 		return database.User{}, ErrBadCredentials
 	}
+	if !user.Enabled {
+		return database.User{}, ErrAccountDisabled
+	}
 
 	s.verified.put(username, password, user)
 	return user, nil
@@ -268,10 +329,15 @@ func (s *Service) ChangePassword(ctx context.Context, userID, password string) e
 	return s.db.RevokeUserTokens(ctx, userID)
 }
 
-func hashToken(token string) []byte {
+// HashRefreshToken is the stored form of a refresh token. It is exported so
+// the API can resolve the caller's own cookie to its session row and mark
+// which entry in the session list is the device being used right now.
+func HashRefreshToken(token string) []byte {
 	sum := sha256.Sum256([]byte(token))
 	return sum[:]
 }
+
+func hashToken(token string) []byte { return HashRefreshToken(token) }
 
 // MediaTokenTTL bounds how long a media link stays usable.
 const MediaTokenTTL = 6 * time.Hour

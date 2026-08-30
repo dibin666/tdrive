@@ -317,3 +317,89 @@ func FuzzDecode(f *testing.F) {
 		}
 	})
 }
+
+// Ownership travels in the caption so that rebuilding the index from the
+// channel restores who uploaded what, and with it per-account quota
+// accounting.
+func TestFileOwnerRoundTrip(t *testing.T) {
+	caption, err := EncodeFile(Record{
+		Kind:        KindFile,
+		ID:          idA,
+		ParentID:    idB,
+		Name:        "影片.mkv",
+		SegIndex:    2,
+		SegCount:    7,
+		TotalSize:   13421772800,
+		SegmentSize: 1992294400,
+		OwnerID:     idC,
+	})
+	if err != nil {
+		t.Fatalf("EncodeFile: %v", err)
+	}
+	if !strings.Contains(caption, "#own_"+idC) {
+		t.Fatalf("caption does not carry the owner tag: %q", caption)
+	}
+
+	got, err := Decode(caption)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.OwnerID != idC {
+		t.Fatalf("owner id = %q, want %q", got.OwnerID, idC)
+	}
+	// The owner must not leak into the human-readable folder tags, which is
+	// where an unrecognised token would otherwise end up.
+	for _, tag := range got.HumanTags {
+		if strings.HasPrefix(tag, "own_") {
+			t.Fatalf("owner tag leaked into human tags: %v", got.HumanTags)
+		}
+	}
+}
+
+// Captions written before ownership existed have to keep decoding, because
+// they are the ones already sitting in everybody's channel.
+func TestFileWithoutOwnerStillDecodes(t *testing.T) {
+	caption, err := EncodeFile(Record{
+		Kind:        KindFile,
+		ID:          idA,
+		ParentID:    idB,
+		Name:        "old.mkv",
+		SegIndex:    1,
+		SegCount:    1,
+		TotalSize:   100,
+		SegmentSize: 1992294400,
+	})
+	if err != nil {
+		t.Fatalf("EncodeFile: %v", err)
+	}
+	if strings.Contains(caption, "#own_") {
+		t.Fatalf("an empty owner should not write a tag: %q", caption)
+	}
+
+	got, err := Decode(caption)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.OwnerID != "" {
+		t.Fatalf("owner id = %q, want empty", got.OwnerID)
+	}
+}
+
+// A corrupt owner tag loses the accounting, not the file. Refusing to decode
+// the record would drop a real file out of a rebuilt index over a detail that
+// only affects a usage number.
+func TestCorruptOwnerTagIsDroppedNotFatal(t *testing.T) {
+	caption := "movie.mkv\n\n#tdrive #v1 #file #id_" + idA + " #pid_root #n_" +
+		EncodedNameOf("movie.mkv") + " #seg_1_1 #sz_100 #ss_1992294400 #own_notaulid"
+
+	got, err := Decode(caption)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.OwnerID != "" {
+		t.Fatalf("owner id = %q, want it dropped", got.OwnerID)
+	}
+	if got.Name != "movie.mkv" {
+		t.Fatalf("name = %q, want movie.mkv", got.Name)
+	}
+}

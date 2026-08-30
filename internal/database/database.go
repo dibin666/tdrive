@@ -101,6 +101,106 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 	return db, nil
 }
 
+// schemaVersion is what schema.sql describes. Anything older is brought up to
+// it by the steps in migrate.
+const schemaVersion = 3
+
+// upgradeSteps are the statements that take an existing database from the
+// version keyed here to the next one. A fresh database skips all of them,
+// because schema.sql already describes the final shape — which means every
+// step added here must also be reflected in schema.sql.
+var upgradeSteps = map[int][]string{
+	1: {
+		`ALTER TABLE upload_jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'webui'`,
+		`UPDATE upload_jobs SET source = 'remote' WHERE source_url <> ''`,
+	},
+	2: {
+		// Fine-grained accounts. perms = 0 keeps existing accounts on their
+		// role's defaults, so an upgrade changes nobody's access.
+		`ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE users ADD COLUMN perms INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN scope_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN quota_bytes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN note TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN last_login_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN last_login_ip TEXT NOT NULL DEFAULT ''`,
+
+		`ALTER TABLE refresh_tokens ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE refresh_tokens ADD COLUMN ip TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE refresh_tokens ADD COLUMN last_used_at INTEGER NOT NULL DEFAULT 0`,
+
+		// Ownership. Existing rows stay NULL: nothing knows who uploaded them,
+		// and inventing an owner would produce wrong quota numbers. A rebuild
+		// fills these in from the captions written after this release.
+		`ALTER TABLE files ADD COLUMN owner_id TEXT REFERENCES users (id) ON DELETE SET NULL`,
+		`ALTER TABLE dirs ADD COLUMN owner_id TEXT REFERENCES users (id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_files_owner ON files (owner_id)`,
+
+		`ALTER TABLE upload_jobs ADD COLUMN started_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE upload_jobs ADD COLUMN finished_at INTEGER NOT NULL DEFAULT 0`,
+		// Old rows have no timing, so the best available bracket is the row's
+		// own lifetime. It overstates duration for jobs that queued, which is
+		// the conservative direction for a speed number.
+		`UPDATE upload_jobs SET started_at = created_at, finished_at = updated_at
+		 WHERE status IN ('complete', 'failed', 'cancelled')`,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_created ON upload_jobs (created_at)`,
+
+		`CREATE TABLE download_jobs (
+			id               TEXT PRIMARY KEY,
+			user_id          TEXT REFERENCES users (id) ON DELETE CASCADE,
+			file_id          TEXT REFERENCES files (id) ON DELETE SET NULL,
+			name             TEXT NOT NULL,
+			total_size       INTEGER NOT NULL,
+			downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+			mode             TEXT NOT NULL DEFAULT 'direct'
+			                 CHECK (mode IN ('direct', 'staged', 'segments')),
+			status           TEXT NOT NULL
+			                 CHECK (status IN ('pending', 'running', 'ready', 'complete', 'failed', 'cancelled', 'expired')),
+			error            TEXT NOT NULL DEFAULT '',
+			cache_path       TEXT NOT NULL DEFAULT '',
+			created_at       INTEGER NOT NULL,
+			updated_at       INTEGER NOT NULL,
+			started_at       INTEGER NOT NULL DEFAULT 0,
+			finished_at      INTEGER NOT NULL DEFAULT 0,
+			expires_at       INTEGER NOT NULL DEFAULT 0,
+			last_used_at     INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX idx_downloads_user ON download_jobs (user_id)`,
+		`CREATE INDEX idx_downloads_status ON download_jobs (status)`,
+		`CREATE INDEX idx_downloads_created ON download_jobs (created_at)`,
+		`CREATE INDEX idx_downloads_used ON download_jobs (last_used_at)`,
+
+		`CREATE TABLE share_links (
+			id           TEXT PRIMARY KEY,
+			user_id      TEXT REFERENCES users (id) ON DELETE CASCADE,
+			file_id      TEXT NOT NULL REFERENCES files (id) ON DELETE CASCADE,
+			token_hash   BLOB NOT NULL UNIQUE,
+			kind         TEXT NOT NULL DEFAULT 'file' CHECK (kind IN ('file', 'segment')),
+			label        TEXT NOT NULL DEFAULT '',
+			expires_at   INTEGER NOT NULL DEFAULT 0,
+			revoked      INTEGER NOT NULL DEFAULT 0,
+			hits         INTEGER NOT NULL DEFAULT 0,
+			created_at   INTEGER NOT NULL,
+			last_used_at INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX idx_shares_file ON share_links (file_id)`,
+		`CREATE INDEX idx_shares_user ON share_links (user_id)`,
+
+		`CREATE TABLE audit_log (
+			id         TEXT PRIMARY KEY,
+			at         INTEGER NOT NULL,
+			actor_id   TEXT,
+			actor_name TEXT NOT NULL DEFAULT '',
+			action     TEXT NOT NULL,
+			target     TEXT NOT NULL DEFAULT '',
+			detail     TEXT NOT NULL DEFAULT '',
+			ip         TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX idx_audit_at ON audit_log (at)`,
+		`CREATE INDEX idx_audit_actor ON audit_log (actor_id)`,
+	},
+}
+
 // migrate applies schema.sql once. The schema is versioned through SQLite's
 // user_version so that a later release can add steps without a separate
 // migrations table.
@@ -109,7 +209,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	if err := d.write.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version >= 2 {
+	if version >= schemaVersion {
 		return nil
 	}
 
@@ -123,16 +223,18 @@ func (d *DB) migrate(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 			return fmt.Errorf("apply schema: %w", err)
 		}
-	} else if version == 1 {
-		if _, err := tx.ExecContext(ctx, `ALTER TABLE upload_jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'webui'`); err != nil {
-			return fmt.Errorf("add source column: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE upload_jobs SET source = 'remote' WHERE source_url <> ''`); err != nil {
-			return fmt.Errorf("migrate existing sources: %w", err)
+	} else {
+		for from := version; from < schemaVersion; from++ {
+			for _, stmt := range upgradeSteps[from] {
+				if _, err := tx.ExecContext(ctx, stmt); err != nil {
+					return fmt.Errorf("migrate schema v%d to v%d: %w", from, from+1, err)
+				}
+			}
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+	// PRAGMA does not accept a bound parameter, and the value is a constant.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("set schema version: %w", err)
 	}
 	return tx.Commit()
@@ -215,3 +317,20 @@ func Translate(err error) error {
 // nowMS is the single source of stored timestamps: Unix milliseconds, which
 // sort correctly as INTEGER and survive a JSON round trip to the browser.
 func nowMS() int64 { return time.Now().UnixMilli() }
+
+// boolInt is SQLite's idea of a boolean.
+func boolInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// truncate bounds a display-only string before it is stored. User agents in
+// particular are attacker-controlled and unbounded.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}

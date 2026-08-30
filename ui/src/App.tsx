@@ -5,7 +5,7 @@ import { Spinner, ToastHost } from './components/primitives'
 import { Files } from './routes/Files'
 import { Login } from './routes/Login'
 import { Setup } from './routes/Setup'
-import { Settings } from './routes/Settings'
+import { Settings } from './routes/settings'
 import { Transfers } from './routes/Transfers'
 
 export default function App() {

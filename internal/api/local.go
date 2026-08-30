@@ -54,13 +54,15 @@ func (s *Server) handleLocalUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "sourcePath is required")
 		return
 	}
-	if req.Path == "" {
-		req.Path = drive.Root
+	dest, err := s.realPath(r, req.Path)
+	if err != nil {
+		s.fail(w, err, "local upload")
+		return
 	}
 
 	job, err := s.drive.StartLocal(r.Context(), drive.LocalRequest{
 		SourcePath: req.SourcePath,
-		DirPath:    req.Path,
+		DirPath:    dest,
 		Name:       req.Name,
 		UserID:     currentUser(r).ID,
 		Overwrite:  req.Overwrite,

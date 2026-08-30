@@ -6,13 +6,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/dibin/tdrive/internal/auth"
 	"github.com/dibin/tdrive/internal/database"
+	"github.com/dibin/tdrive/internal/drive"
 )
 
 // requireFileAccess guards the byte-serving route. It accepts the usual
@@ -34,9 +37,14 @@ func (s *Server) requireFileAccess(next http.Handler) http.Handler {
 }
 
 // handleMediaLink issues a short-lived URL for playback or download.
+//
+// This is the in-session link: it is bound to one file, expires in hours and
+// exists because a <video> element cannot send an Authorization header. The
+// durable, pasteable link an external downloader wants is a share link, minted
+// through /files/{id}/share.
 func (s *Server) handleMediaLink(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	file, err := s.db.FileByID(r.Context(), id)
+	file, err := s.fileForUser(r, id)
 	if err != nil {
 		s.fail(w, err, "media link")
 		return
@@ -48,19 +56,121 @@ func (s *Server) handleMediaLink(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRaw serves a file's bytes with full range support.
+// byteWindow is the slice of a logical file a request is about to serve.
 //
-// Ranges are parsed here rather than delegated to http.ServeContent because the
-// reader wants to know how much was asked for: ServeContent seeks and then
-// copies a bounded amount, leaving the reader to guess how far to prefetch. A
-// browser scrubbing a video sends a range per seek, and reading the range
-// explicitly is what keeps each of those cheap.
+// Whole-file and per-segment downloads differ only in this window, so they
+// share every line of range parsing, header setting and copying below. That
+// matters because the two have to agree exactly — a client downloading the
+// segments separately and joining them must end up with the same bytes as one
+// that took the whole file in a single request.
+type byteWindow struct {
+	file database.File
+	// offset and length locate the window inside the logical file.
+	offset int64
+	length int64
+	// name is what the browser should save the download as.
+	name string
+	// etag pins these particular bytes.
+	etag string
+	// sessionKey groups the parallel range requests of one logical download
+	// so they share a single task slot.
+	sessionKey string
+	// attachment forces a download rather than letting the browser render the
+	// bytes inline.
+	attachment bool
+}
+
+func wholeFileWindow(file database.File, sessionKey string) byteWindow {
+	return byteWindow{
+		file:       file,
+		offset:     0,
+		length:     file.Size,
+		name:       file.Name,
+		etag:       fmt.Sprintf(`"%s-%d"`, file.ID, file.Size),
+		sessionKey: sessionKey,
+	}
+}
+
+// segmentWindow describes one stored segment as a standalone download.
+func segmentWindow(file database.File, index int, sessionKey string) (byteWindow, error) {
+	if index < 1 || index > file.SegmentCount {
+		return byteWindow{}, fmt.Errorf("%w: segment %d of %d",
+			database.ErrNotFound, index, file.SegmentCount)
+	}
+	length := drive.SegmentSize(file.Size, file.SegmentSize, index)
+	return byteWindow{
+		file:   file,
+		offset: int64(index-1) * file.SegmentSize,
+		length: length,
+		// The .partNNN suffix matches the name the segment carries inside the
+		// Telegram channel, so a person joining the pieces by hand sees the
+		// same ordering in both places.
+		name:       fmt.Sprintf("%s.part%03d", file.Name, index),
+		etag:       fmt.Sprintf(`"%s-%d-%d"`, file.ID, index, length),
+		sessionKey: sessionKey,
+	}, nil
+}
+
+// handleRaw serves a whole file's bytes.
 func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	file, err := s.db.FileByID(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		s.fail(w, err, "read file")
 		return
 	}
+	// A media token authorises one file id and nothing else, so scope and
+	// permission checks only apply to the credentialed path.
+	if r.URL.Query().Get("t") == "" {
+		if err := s.checkFileAccess(r, file); err != nil {
+			s.fail(w, err, "read file")
+			return
+		}
+	}
+	s.serveBytes(w, r, wholeFileWindow(file, s.downloadSessionKey(r, file.ID, "")))
+}
+
+// handleSegmentRaw serves one stored segment as its own file.
+//
+// This is what makes the split-download mode possible: each segment is an
+// independent, resumable, parallel-downloadable object, and the client joins
+// them locally. For a many-segment file that is strictly more robust than one
+// stream stitched across a dozen Telegram documents, because a failure costs
+// one part rather than the whole transfer.
+func (s *Server) handleSegmentRaw(w http.ResponseWriter, r *http.Request) {
+	file, err := s.db.FileByID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		s.fail(w, err, "read segment")
+		return
+	}
+	if r.URL.Query().Get("t") == "" {
+		if err := s.checkFileAccess(r, file); err != nil {
+			s.fail(w, err, "read segment")
+			return
+		}
+	}
+
+	index, err := strconv.Atoi(chi.URLParam(r, "index"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "segment index must be a positive integer")
+		return
+	}
+	window, err := segmentWindow(file, index, s.downloadSessionKey(r, file.ID, ""))
+	if err != nil {
+		s.fail(w, err, "read segment")
+		return
+	}
+	s.serveBytes(w, r, window)
+}
+
+// serveBytes answers a byte request with full range support.
+//
+// Ranges are parsed here rather than delegated to http.ServeContent because
+// the reader wants to know how much was asked for: ServeContent seeks and then
+// copies a bounded amount, leaving the reader to guess how far to prefetch. A
+// browser scrubbing a video sends a range per seek, and reading the range
+// explicitly is what keeps each of those cheap.
+func (s *Server) serveBytes(w http.ResponseWriter, r *http.Request, window byteWindow) {
+	file := window.file
 	if file.Status == database.StatusPending {
 		writeError(w, http.StatusConflict, "this file is still uploading")
 		return
@@ -71,21 +181,21 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Last-Modified", file.UpdatedAt.UTC().Format(http.TimeFormat))
 	// The id and size together pin a specific stored file; a rename does not
 	// change the bytes, so it must not change the tag.
-	w.Header().Set("ETag", fmt.Sprintf(`"%s-%d"`, file.ID, file.Size))
-	setDisposition(w, r, file.Name)
+	w.Header().Set("ETag", window.etag)
+	setDisposition(w, r, window.name, window.attachment)
 
-	start, end, ok := parseRange(r.Header.Get("Range"), file.Size)
+	start, end, ok := parseRange(r.Header.Get("Range"), window.length)
 	if !ok {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", file.Size))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", window.length))
 		writeError(w, http.StatusRequestedRangeNotSatisfiable, "the requested range is not satisfiable")
 		return
 	}
 
-	full := file.Size == 0 || (start == 0 && end == file.Size-1)
+	full := window.length == 0 || (start == 0 && end == window.length-1)
 	if full {
-		w.Header().Set("Content-Length", strconv.FormatInt(file.Size, 10))
+		w.Header().Set("Content-Length", strconv.FormatInt(window.length, 10))
 	} else {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, file.Size))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, window.length))
 		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	}
 
@@ -95,19 +205,30 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if file.Size == 0 {
+	if window.length == 0 {
 		return
 	}
 
-	// One raw response is one download task. The lease is held until the
-	// response copy ends, so a WebUI download, preview, or another client
-	// cannot bypass the configured whole-file limit.
-	release, err := s.drive.AcquireDownloadTask(r.Context())
+	// Every range request belonging to one logical download shares a task
+	// slot, so a parallel downloader counts as one transfer against the
+	// configured limit rather than as one per connection. The lease is held
+	// until this response's copy ends.
+	release, err := s.drive.AcquireDownloadSession(r.Context(), window.sessionKey)
 	if err != nil {
 		s.fail(w, err, "open file")
 		return
 	}
 	defer release()
+
+	// A staged copy on local disk is preferred over pulling the same bytes out
+	// of Telegram again. It is checked after the lease so that a client cannot
+	// dodge the queue by racing to a copy that is still being written.
+	if path, ok := s.stagedCopy(r, file); ok {
+		if s.serveStagedRange(w, r, path, window, start, end, full) {
+			return
+		}
+	}
+
 	if !full {
 		w.WriteHeader(http.StatusPartialContent)
 	}
@@ -119,8 +240,8 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	defer reader.Close()
 
-	if start > 0 {
-		if _, err := reader.Seek(start, io.SeekStart); err != nil {
+	if seekTo := window.offset + start; seekTo > 0 {
+		if _, err := reader.Seek(seekTo, io.SeekStart); err != nil {
 			s.fail(w, err, "seek file")
 			return
 		}
@@ -137,12 +258,90 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// setDisposition asks the browser to download rather than render, unless the
-// caller explicitly wants inline playback.
-func setDisposition(w http.ResponseWriter, r *http.Request, name string) {
+// stagedCopy reports a ready staged copy of a file, if one exists. Serving
+// from it is transparent to the client and is the fastest path available.
+func (s *Server) stagedCopy(r *http.Request, file database.File) (string, bool) {
+	job, err := s.db.StagedDownloadFor(r.Context(), file.ID, nowMillis())
+	if err != nil || job.CachePath == "" {
+		return "", false
+	}
+	if _, err := os.Stat(job.CachePath); err != nil {
+		return "", false
+	}
+	_ = s.db.TouchDownload(r.Context(), job.ID)
+	return job.CachePath, true
+}
+
+// serveStagedRange copies the requested range out of a local staged file. It
+// reports false if the copy turns out to be unusable, so the caller can fall
+// back to Telegram without having written anything to the response.
+func (s *Server) serveStagedRange(
+	w http.ResponseWriter,
+	r *http.Request,
+	path string,
+	window byteWindow,
+	start, end int64,
+	full bool,
+) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || info.Size() < window.offset+end+1 {
+		// A short staged file means the copy is stale or was truncated;
+		// Telegram remains the source of truth.
+		return false
+	}
+	if _, err := f.Seek(window.offset+start, io.SeekStart); err != nil {
+		return false
+	}
+
+	if !full {
+		w.WriteHeader(http.StatusPartialContent)
+	}
+	if _, err := io.CopyN(w, f, end-start+1); err != nil && !isClientGone(err) {
+		s.log.Warn("staged stream ended early",
+			zap.String("file", window.file.ID), zap.Error(err))
+	}
+	return true
+}
+
+// downloadSessionKey groups the requests that belong to one logical download.
+//
+// Getting this grouping right is what lets the whole-file concurrency limit
+// and multi-connection downloading coexist: eight parallel ranges of one file
+// must count as one transfer, while two different files must count as two.
+// shareID takes precedence because a share link is a transfer in its own
+// right and may not have a session behind it at all.
+func (s *Server) downloadSessionKey(r *http.Request, fileID, shareID string) string {
+	if shareID != "" {
+		return "share:" + shareID
+	}
+	if user, ok := auth.FromContext(r.Context()); ok && user.ID != "" {
+		return "user:" + user.ID + ":" + fileID
+	}
+	// A media token carries no account, so the client address is the only
+	// grouping available. Two viewers behind one NAT sharing a slot is a far
+	// better failure than one viewer's player consuming eight.
+	return "media:" + fileID + ":" + auth.ClientFrom(r).IP
+}
+
+// setDisposition asks the browser to download rather than render.
+//
+// A share link defaults to attachment: it exists to be handed to a download
+// manager or clicked on a phone, and having the browser try to render a 5 GB
+// MKV instead of saving it is never what was wanted. The in-session media link
+// defaults the other way, because that one feeds a <video> element.
+func setDisposition(w http.ResponseWriter, r *http.Request, name string, attachment bool) {
 	kind := "inline"
-	if r.URL.Query().Get("download") == "1" {
+	if attachment || r.URL.Query().Get("download") == "1" {
 		kind = "attachment"
+	}
+	if r.URL.Query().Get("inline") == "1" {
+		kind = "inline"
 	}
 	// Both forms are emitted: filename for older clients, filename* with the
 	// RFC 5987 encoding so non-ASCII names survive.

@@ -54,6 +54,27 @@ const (
 	// DownloadChunkSize is the largest upload.getFile response Telegram will
 	// return, and the unit the parallel reader prefetches in.
 	DownloadChunkSize int64 = 1024 * 1024
+
+	// DefaultCacheLimit bounds the disk held by staged downloads. Staging is
+	// what makes a many-segment file safe to pull with a parallel downloader,
+	// but it is the one feature here that can fill a VPS, so it is capped by
+	// default rather than opt-in.
+	DefaultCacheLimit int64 = 20 << 30
+	// DefaultCacheTTL is how long a staged copy survives once it is ready.
+	DefaultCacheTTL = 24 * time.Hour
+	// DefaultMaxDownloadConns is how many parallel range requests one logical
+	// download may hold. Parallelism is the point of a reusable link; without
+	// a cap, one client could open enough sockets to starve everyone else.
+	DefaultMaxDownloadConns = 8
+	// DefaultDownloadGrace is how long a download session keeps its task slot
+	// after its last request finishes. A multi-threaded downloader routinely
+	// has a moment with nothing in flight between ranges, and losing the slot
+	// there would send it to the back of the queue mid-file.
+	DefaultDownloadGrace = 15 * time.Second
+	// DefaultShareTTL is how long a share link lasts unless the caller says
+	// otherwise. Zero would mean "forever", which is not a good default for a
+	// bearer capability.
+	DefaultShareTTL = 7 * 24 * time.Hour
 )
 
 // Config is the fully resolved configuration. Load validates it before
@@ -142,6 +163,15 @@ type Storage struct {
 	SpoolDir string
 	// DatabaseFile is derived from DataDir.
 	DatabaseFile string
+	// CacheDir is the default location for staged downloads. The effective
+	// value lives in RuntimeSettings so an administrator can move it onto a
+	// bigger volume without restarting.
+	CacheDir string
+	// CacheLimit bounds the disk staged downloads may hold; 0 turns staging
+	// off, which is the right answer on a host with no spare space.
+	CacheLimit int64
+	// CacheTTL is how long a staged copy survives after it is ready.
+	CacheTTL time.Duration
 }
 
 type Stream struct {
@@ -166,6 +196,14 @@ type Stream struct {
 type Transfer struct {
 	UploadConcurrency   int
 	DownloadConcurrency int
+	// MaxDownloadConns caps the parallel range requests belonging to one
+	// logical download.
+	MaxDownloadConns int
+	// DownloadGrace is how long a download session holds its task slot after
+	// its last in-flight request finishes.
+	DownloadGrace time.Duration
+	// ShareTTL is the default lifetime of a share link.
+	ShareTTL time.Duration
 }
 
 type WebDAV struct {
@@ -226,6 +264,9 @@ func Load() (*Config, error) {
 			SegmentConcurrency: envInt("TDRIVE_SEGMENT_CONCURRENCY", 2),
 			SpoolDir:           filepath.Join(dataDir, "spool"),
 			DatabaseFile:       filepath.Join(dataDir, "tdrive.db"),
+			CacheDir:           envStr("TDRIVE_CACHE_DIR", filepath.Join(dataDir, "cache")),
+			CacheLimit:         envSize("TDRIVE_CACHE_LIMIT", DefaultCacheLimit),
+			CacheTTL:           envDur("TDRIVE_CACHE_TTL", DefaultCacheTTL),
 		},
 		Stream: Stream{
 			Concurrency:  envInt("TDRIVE_STREAM_CONCURRENCY", 6),
@@ -236,6 +277,9 @@ func Load() (*Config, error) {
 		Transfer: Transfer{
 			UploadConcurrency:   envInt("TDRIVE_UPLOAD_CONCURRENCY", DefaultUploadConcurrency),
 			DownloadConcurrency: envInt("TDRIVE_DOWNLOAD_CONCURRENCY", DefaultDownloadConcurrency),
+			MaxDownloadConns:    envInt("TDRIVE_MAX_DOWNLOAD_CONNS", DefaultMaxDownloadConns),
+			DownloadGrace:       envDur("TDRIVE_DOWNLOAD_GRACE", DefaultDownloadGrace),
+			ShareTTL:            envDur("TDRIVE_SHARE_TTL", DefaultShareTTL),
 		},
 		WebDAV: WebDAV{
 			Enabled: envBool("TDRIVE_WEBDAV_ENABLED", true),

@@ -3,7 +3,9 @@ package drive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"time"
 )
 
 // ErrUploadTaskClosed is returned when a browser segment arrives after its
@@ -154,11 +156,173 @@ func (s *Service) acquireUploadTask(ctx context.Context) (func(), error) {
 	return s.uploadLimiter.acquire(ctx)
 }
 
-// AcquireDownloadTask reserves one whole-file download slot. The caller must
-// invoke the returned function after the response/reader is closed.
+// AcquireDownloadTask reserves one whole-file download slot for a caller that
+// owns the whole transfer on its own — a staged download assembling a file on
+// disk, for instance. Callers serving a client over HTTP want
+// AcquireDownloadSession instead, so that the several range requests making up
+// one logical download share a slot.
 func (s *Service) AcquireDownloadTask(ctx context.Context) (func(), error) {
 	s.syncTransferConcurrency()
 	return s.downloadLimiter.acquire(ctx)
+}
+
+// ErrTooManyConnections is returned when one logical download opens more
+// parallel range requests than the configured limit allows.
+var ErrTooManyConnections = errors.New("drive: too many parallel connections for one download")
+
+// downloadSession is the download-side counterpart of uploadJobLease: every
+// range request belonging to one logical download shares a single task slot.
+//
+// A parallel downloader is the whole point of a reusable link, and counting
+// each of its eight connections as a separate task would mean a deployment
+// with the default limit of two could never serve one. Grouping them also
+// makes the limit mean what an operator expects it to mean — "two files at a
+// time", not "two sockets at a time".
+//
+// The slot is not returned the instant the last request finishes. A parallel
+// downloader routinely has a moment with nothing in flight while it decides
+// which range to ask for next, and handing its slot to a queued transfer in
+// that gap would strand it mid-file behind someone else's upload.
+type downloadSession struct {
+	key string
+
+	ready  chan struct{}
+	cancel context.CancelFunc
+
+	gateRelease func()
+	acquireErr  error
+	active      int
+	// idle is the grace timer armed when active reaches zero.
+	idle *time.Timer
+}
+
+// AcquireDownloadSession reserves (or joins) the task slot for one logical
+// download. The returned function must be called when the request finishes.
+func (s *Service) AcquireDownloadSession(ctx context.Context, key string) (func(), error) {
+	if key == "" {
+		return s.AcquireDownloadTask(ctx)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	s.syncTransferConcurrency()
+	maxConns := s.cfg.RuntimeSettings().MaxDownloadConns
+
+	s.downloadSessionsMu.Lock()
+	if session, ok := s.downloadSessions[key]; ok {
+		// Joining a session that is being torn down would take a slot the
+		// grace timer is about to return, so cancel the teardown first.
+		if session.idle != nil {
+			session.idle.Stop()
+			session.idle = nil
+		}
+		ready := session.ready
+		s.downloadSessionsMu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ready:
+		}
+
+		s.downloadSessionsMu.Lock()
+		if session.acquireErr != nil {
+			err := session.acquireErr
+			s.downloadSessionsMu.Unlock()
+			return nil, err
+		}
+		// A session that already released its slot is gone; the caller has to
+		// start a fresh one rather than resurrect this record.
+		if s.downloadSessions[key] != session {
+			s.downloadSessionsMu.Unlock()
+			return s.AcquireDownloadSession(ctx, key)
+		}
+		if session.active >= maxConns {
+			s.downloadSessionsMu.Unlock()
+			return nil, fmt.Errorf("%w: limit is %d", ErrTooManyConnections, maxConns)
+		}
+		session.active++
+		s.downloadSessionsMu.Unlock()
+		return s.downloadRequestRelease(session), nil
+	}
+
+	taskCtx, cancel := context.WithCancel(context.Background())
+	session := &downloadSession{key: key, ready: make(chan struct{}), cancel: cancel}
+	s.downloadSessions[key] = session
+	s.downloadSessionsMu.Unlock()
+
+	// A client that disconnects while queued must not leave the session
+	// waiting forever on a slot nobody will use.
+	stopCancel := context.AfterFunc(ctx, cancel)
+	gateRelease, acquireErr := s.downloadLimiter.acquire(taskCtx)
+	stopCancel()
+
+	s.downloadSessionsMu.Lock()
+	session.acquireErr = acquireErr
+	if acquireErr == nil {
+		session.gateRelease = gateRelease
+		session.active = 1
+	} else if s.downloadSessions[key] == session {
+		delete(s.downloadSessions, key)
+	}
+	close(session.ready)
+	s.downloadSessionsMu.Unlock()
+
+	if acquireErr != nil {
+		return nil, acquireErr
+	}
+	return s.downloadRequestRelease(session), nil
+}
+
+func (s *Service) downloadRequestRelease(session *downloadSession) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			grace := s.cfg.RuntimeSettings().DownloadGrace
+
+			s.downloadSessionsMu.Lock()
+			if session.active > 0 {
+				session.active--
+			}
+			if session.active > 0 || session.idle != nil {
+				s.downloadSessionsMu.Unlock()
+				return
+			}
+			if grace <= 0 {
+				s.finishDownloadSessionLocked(session)
+				s.downloadSessionsMu.Unlock()
+				return
+			}
+			session.idle = time.AfterFunc(grace, func() {
+				s.downloadSessionsMu.Lock()
+				defer s.downloadSessionsMu.Unlock()
+				// A request that arrived during the grace period stops this
+				// timer, but it may already have fired and be waiting on the
+				// mutex, so the count is re-checked here.
+				if session.active > 0 {
+					session.idle = nil
+					return
+				}
+				s.finishDownloadSessionLocked(session)
+			})
+			s.downloadSessionsMu.Unlock()
+		})
+	}
+}
+
+// finishDownloadSessionLocked returns the slot and forgets the session. The
+// caller must hold downloadSessionsMu.
+func (s *Service) finishDownloadSessionLocked(session *downloadSession) {
+	if s.downloadSessions[session.key] == session {
+		delete(s.downloadSessions, session.key)
+	}
+	session.idle = nil
+	session.cancel()
+	if session.gateRelease != nil {
+		session.gateRelease()
+		session.gateRelease = nil
+	}
 }
 
 // AcquireUploadJob reserves (or joins) the task slot for one browser upload.

@@ -53,8 +53,14 @@ func (s *Server) handleBeginUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dest, err := s.realPath(r, req.Path)
+	if err != nil {
+		s.fail(w, err, "begin upload")
+		return
+	}
+
 	job, file, err := s.drive.Begin(r.Context(), drive.UploadRequest{
-		DirPath:   req.Path,
+		DirPath:   dest,
 		Name:      req.Name,
 		Size:      req.Size,
 		MIME:      req.MIME,
@@ -299,9 +305,15 @@ func (s *Server) handleRemoteUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dest, err := s.realPath(r, req.Path)
+	if err != nil {
+		s.fail(w, err, "remote upload")
+		return
+	}
+
 	job, err := s.drive.StartRemote(r.Context(), drive.RemoteRequest{
 		URL:       req.URL,
-		DirPath:   req.Path,
+		DirPath:   dest,
 		Name:      req.Name,
 		UserID:    currentUser(r).ID,
 		Overwrite: req.Overwrite,

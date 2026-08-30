@@ -57,6 +57,25 @@ func (s *Service) RequireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// RequirePerm guards an endpoint on a single fine-grained permission. It runs
+// after RequireAuth, which is what put the account in the context.
+func (s *Service) RequirePerm(perm database.Perm) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, ok := FromContext(r.Context())
+			if !ok {
+				writeUnauthorized(w, false)
+				return
+			}
+			if !user.Can(perm) {
+				writeJSONError(w, http.StatusForbidden, ErrForbidden.Error())
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // RequireBasic guards WebDAV.
 //
 // The challenge has to be Basic: WebDAV clients built into Windows Explorer,
@@ -74,6 +93,14 @@ func (s *Service) RequireBasic(next http.Handler) http.Handler {
 			writeUnauthorized(w, true)
 			return
 		}
+		// WebDAV is a separate door into the same drive, so it gets its own
+		// permission. Answering 403 rather than re-challenging matters: a
+		// client that is told to authenticate again will loop asking the user
+		// for a password that was never the problem.
+		if !user.Can(database.PermWebDAV) {
+			writeJSONError(w, http.StatusForbidden, "this account is not allowed to use WebDAV")
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
 	})
 }
@@ -88,10 +115,10 @@ func (s *Service) authenticate(r *http.Request) (database.User, bool) {
 			return database.User{}, false
 		}
 		// The token is self-contained, but the account is re-read so that a
-		// deleted user's outstanding token stops working immediately rather
-		// than at expiry.
+		// deleted or disabled user's outstanding token stops working
+		// immediately rather than at expiry.
 		user, err := s.db.UserByID(r.Context(), claims.Subject)
-		if err != nil {
+		if err != nil || !user.Enabled {
 			return database.User{}, false
 		}
 		return user, true

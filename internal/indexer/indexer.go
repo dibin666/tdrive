@@ -469,6 +469,12 @@ func (ix *Indexer) buildFiles(
 			SegmentCount: f.rec.SegCount,
 			Status:       status,
 			ChannelID:    channel.ID,
+			// Ownership travels in the caption, so a rebuild restores who
+			// uploaded what and quota accounting survives. Captions written
+			// before ownership existed simply carry no owner, and the column
+			// stays NULL — which is honest, rather than attributing files to
+			// whoever happens to run the rebuild.
+			OwnerID: f.rec.OwnerID,
 		})
 
 		for idx, seg := range f.segments {

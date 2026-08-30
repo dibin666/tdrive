@@ -20,19 +20,19 @@ func nullable(s string) any {
 
 func text(ns sql.NullString) string { return ns.String }
 
-const dirCols = `id, parent_id, name, path, channel_id, tg_msg_id, created_at, updated_at`
+const dirCols = `id, parent_id, name, path, channel_id, tg_msg_id, created_at, updated_at, owner_id`
 
 func scanDir(row interface{ Scan(...any) error }) (Dir, error) {
 	var (
-		d                Dir
-		parent, channel  sql.NullString
-		created, updated int64
+		d                      Dir
+		parent, channel, owner sql.NullString
+		created, updated       int64
 	)
-	err := row.Scan(&d.ID, &parent, &d.Name, &d.Path, &channel, &d.TGMsgID, &created, &updated)
+	err := row.Scan(&d.ID, &parent, &d.Name, &d.Path, &channel, &d.TGMsgID, &created, &updated, &owner)
 	if err != nil {
 		return Dir{}, Translate(err)
 	}
-	d.ParentID, d.ChannelID = text(parent), text(channel)
+	d.ParentID, d.ChannelID, d.OwnerID = text(parent), text(channel), text(owner)
 	d.CreatedAt, d.UpdatedAt = msToTime(created), msToTime(updated)
 	return d, nil
 }
@@ -43,9 +43,9 @@ func scanDir(row interface{ Scan(...any) error }) (Dir, error) {
 func (d *DB) InsertDir(ctx context.Context, dir Dir) error {
 	now := nowMS()
 	_, err := d.write.ExecContext(ctx,
-		`INSERT INTO dirs (`+dirCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO dirs (`+dirCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		dir.ID, nullable(dir.ParentID), dir.Name, dir.Path, nullable(dir.ChannelID),
-		dir.TGMsgID, now, now)
+		dir.TGMsgID, now, now, nullable(dir.OwnerID))
 	if err != nil {
 		return fmt.Errorf("insert dir %q: %w", dir.Path, Translate(err))
 	}
@@ -168,20 +168,20 @@ func (d *DB) DeleteDir(ctx context.Context, id string) error {
 	return affectedOne(res, err, "delete dir")
 }
 
-const fileCols = `id, dir_id, name, size, mime, segment_size, segment_count, status, channel_id, created_at, updated_at`
+const fileCols = `id, dir_id, name, size, mime, segment_size, segment_count, status, channel_id, created_at, updated_at, owner_id`
 
 func scanFile(row interface{ Scan(...any) error }) (File, error) {
 	var (
-		f                File
-		dir, channel     sql.NullString
-		created, updated int64
+		f                   File
+		dir, channel, owner sql.NullString
+		created, updated    int64
 	)
 	err := row.Scan(&f.ID, &dir, &f.Name, &f.Size, &f.MIME, &f.SegmentSize,
-		&f.SegmentCount, &f.Status, &channel, &created, &updated)
+		&f.SegmentCount, &f.Status, &channel, &created, &updated, &owner)
 	if err != nil {
 		return File{}, Translate(err)
 	}
-	f.DirID, f.ChannelID = text(dir), text(channel)
+	f.DirID, f.ChannelID, f.OwnerID = text(dir), text(channel), text(owner)
 	f.CreatedAt, f.UpdatedAt = msToTime(created), msToTime(updated)
 	return f, nil
 }
@@ -192,9 +192,9 @@ func scanFile(row interface{ Scan(...any) error }) (File, error) {
 func (d *DB) InsertFile(ctx context.Context, f File) error {
 	now := nowMS()
 	_, err := d.write.ExecContext(ctx,
-		`INSERT INTO files (`+fileCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO files (`+fileCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID, nullable(f.DirID), f.Name, f.Size, f.MIME, f.SegmentSize,
-		f.SegmentCount, string(f.Status), nullable(f.ChannelID), now, now)
+		f.SegmentCount, string(f.Status), nullable(f.ChannelID), now, now, nullable(f.OwnerID))
 	if err != nil {
 		return fmt.Errorf("insert file %q: %w", f.Name, Translate(err))
 	}
@@ -413,6 +413,21 @@ func (d *DB) FileMessages(ctx context.Context, fileID string) ([]TGMessage, erro
 // dirs must be ordered parents-first for the self-referencing foreign key on
 // dirs.parent_id to hold at every step.
 func (d *DB) ReplaceIndex(ctx context.Context, dirs []Dir, files []File, segments []Segment) error {
+	// Owner ids come out of Telegram captions, so they can name an account
+	// that has since been deleted. The foreign key would reject the whole
+	// rebuild over it, which would be a spectacularly bad trade: the file is
+	// real, the owner is only bookkeeping. Unknown owners become NULL.
+	known, err := d.knownUserIDs(ctx)
+	if err != nil {
+		return err
+	}
+	ownerOf := func(id string) any {
+		if id == "" || !known[id] {
+			return nil
+		}
+		return id
+	}
+
 	return d.Tx(ctx, func(tx txExec) error {
 		// Deleting dirs cascades to files and segments, but the root-level
 		// files have no directory to cascade from, so they go explicitly.
@@ -429,18 +444,19 @@ func (d *DB) ReplaceIndex(ctx context.Context, dirs []Dir, files []File, segment
 		now := nowMS()
 		for _, dir := range dirs {
 			_, err := tx.ExecContext(ctx,
-				`INSERT INTO dirs (`+dirCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO dirs (`+dirCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				dir.ID, nullable(dir.ParentID), dir.Name, dir.Path,
-				nullable(dir.ChannelID), dir.TGMsgID, now, now)
+				nullable(dir.ChannelID), dir.TGMsgID, now, now, ownerOf(dir.OwnerID))
 			if err != nil {
 				return fmt.Errorf("rebuild dir %q: %w", dir.Path, Translate(err))
 			}
 		}
 		for _, f := range files {
 			_, err := tx.ExecContext(ctx,
-				`INSERT INTO files (`+fileCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO files (`+fileCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				f.ID, nullable(f.DirID), f.Name, f.Size, f.MIME, f.SegmentSize,
-				f.SegmentCount, string(f.Status), nullable(f.ChannelID), now, now)
+				f.SegmentCount, string(f.Status), nullable(f.ChannelID), now, now,
+				ownerOf(f.OwnerID))
 			if err != nil {
 				return fmt.Errorf("rebuild file %q: %w", f.Name, Translate(err))
 			}
@@ -479,6 +495,26 @@ func (d *DB) Stats(ctx context.Context) (Stats, error) {
 		       (SELECT count(*) FROM files WHERE status = 'pending')`)
 	err := row.Scan(&s.Dirs, &s.Files, &s.Segments, &s.TotalBytes, &s.BrokenFiles, &s.PendingFiles)
 	return s, Translate(err)
+}
+
+// knownUserIDs is the set of accounts that currently exist, used to keep a
+// rebuild from tripping the owner foreign key on an account that is gone.
+func (d *DB) knownUserIDs(ctx context.Context) (map[string]bool, error) {
+	rows, err := d.read.QueryContext(ctx, `SELECT id FROM users`)
+	if err != nil {
+		return nil, Translate(err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, Translate(err)
+		}
+		out[id] = true
+	}
+	return out, Translate(rows.Err())
 }
 
 // escapeLike neutralises the wildcards in a stored path so that a directory

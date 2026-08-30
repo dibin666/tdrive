@@ -50,7 +50,11 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, localfs.ErrUnavailable):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
-	case errors.Is(err, drive.ErrNotFound), errors.Is(err, database.ErrNotFound):
+	case errors.Is(err, drive.ErrNotFound), errors.Is(err, database.ErrNotFound),
+		errors.Is(err, drive.ErrOutOfScope):
+		// Out-of-scope is deliberately indistinguishable from missing: telling
+		// a caller that a path exists but is not theirs describes a part of the
+		// drive they were not meant to know about.
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, drive.ErrExists), errors.Is(err, database.ErrConflict):
 		writeError(w, http.StatusConflict, err.Error())
@@ -60,8 +64,24 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, auth.ErrBadCredentials):
 		writeError(w, http.StatusUnauthorized, err.Error())
+	case errors.Is(err, auth.ErrAccountDisabled):
+		writeJSON(w, http.StatusForbidden, errorBody{Error: err.Error(), Code: "account_disabled"})
+	case errors.Is(err, auth.ErrForbidden):
+		writeJSON(w, http.StatusForbidden, errorBody{Error: err.Error(), Code: "forbidden"})
 	case errors.Is(err, auth.ErrWeakPassword):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, drive.ErrQuotaExceeded):
+		// 507 rather than 403: the request was allowed, there is simply no
+		// room, which is exactly what Insufficient Storage means.
+		writeJSON(w, http.StatusInsufficientStorage, errorBody{Error: err.Error(), Code: "quota_exceeded"})
+	case errors.Is(err, drive.ErrCacheFull):
+		writeJSON(w, http.StatusInsufficientStorage, errorBody{Error: err.Error(), Code: "cache_full"})
+	case errors.Is(err, drive.ErrStagingDisabled):
+		writeJSON(w, http.StatusPreconditionRequired, errorBody{Error: err.Error(), Code: "staging_disabled"})
+	case errors.Is(err, drive.ErrTooManyConnections):
+		// A downloader that opens too many sockets should back off and retry,
+		// which is what 429 tells every client that understands it.
+		writeJSON(w, http.StatusTooManyRequests, errorBody{Error: err.Error(), Code: "too_many_connections"})
 	case errors.Is(err, drive.ErrNoChannel):
 		writeJSON(w, http.StatusPreconditionRequired, errorBody{
 			Error: err.Error(), Code: "no_channel",

@@ -74,7 +74,7 @@ func run() error {
 	log.Info("tdrive starting", zap.String("version", version))
 	log.Info("index opened", zap.String("path", db.Path()))
 
-	authSvc, err := auth.New(ctx, cfg, db)
+	authSvc, err := auth.New(ctx, cfg, db, log.Named("auth"))
 	if err != nil {
 		return err
 	}
@@ -105,10 +105,18 @@ func run() error {
 
 	if tgm.Ready() {
 		driveSvc.ResumeRemotes(ctx)
+		// Staged downloads interrupted by a restart can be finished without a
+		// client reconnecting: the server has everything it needs.
+		driveSvc.ResumeStaged(ctx)
 	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", apiServer.Routes()))
+	// Share links live outside /api on purpose: the token in the path is the
+	// credential, and the URL has to look like an ordinary file to aria2, IDM
+	// and every other downloader that will be pointed at it.
+	shareHandler := http.StripPrefix(api.SharePrefix, apiServer.ShareRoutes())
+	mux.Handle(api.SharePrefix+"/", shareHandler)
 	davHandler := dav.Handler(cfg, db, driveSvc, authSvc, log.Named("webdav"))
 	davHandler = enabledHandler(cfg, davHandler)
 	mux.Handle(cfg.WebDAV.Prefix+"/", davHandler)
@@ -131,7 +139,7 @@ func run() error {
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
-	go startMaintenance(ctx, db, log)
+	go startMaintenance(ctx, db, driveSvc, log)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -156,7 +164,7 @@ func run() error {
 }
 
 // startMaintenance trims the rows that would otherwise grow without bound.
-func startMaintenance(ctx context.Context, db *database.DB, log *zap.Logger) {
+func startMaintenance(ctx context.Context, db *database.DB, driveSvc *drive.Service, log *zap.Logger) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 
@@ -172,6 +180,18 @@ func startMaintenance(ctx context.Context, db *database.DB, log *zap.Logger) {
 		if _, err := db.PurgeFinishedJobs(ctx, cutoff); err != nil {
 			log.Warn("could not purge old transfers", zap.Error(err))
 		}
+		if _, err := db.PurgeShares(ctx, cutoff); err != nil {
+			log.Warn("could not purge expired share links", zap.Error(err))
+		}
+		// The audit log is kept far longer than transfer history: it is the
+		// only record here that cannot be reconstructed from Telegram.
+		auditCutoff := time.Now().Add(-180 * 24 * time.Hour).UnixMilli()
+		if _, err := db.PurgeAudit(ctx, auditCutoff); err != nil {
+			log.Warn("could not purge the audit log", zap.Error(err))
+		}
+		// Staged downloads hold real disk, so their sweep is the one that
+		// actually frees something.
+		driveSvc.SweepCache(ctx)
 	}
 
 	sweep()

@@ -57,8 +57,10 @@ func Handler() http.Handler {
 		}
 
 		// Vite fingerprints everything under /assets, so those are safe to
-		// cache indefinitely. Nothing else is.
-		if strings.HasPrefix(name, "assets/") {
+		// cache indefinitely. The libav build under /libav carries its version
+		// in the filename, which amounts to the same guarantee. Nothing else
+		// is safe to cache.
+		if strings.HasPrefix(name, "assets/") || strings.HasPrefix(name, "libav/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			w.Header().Set("Cache-Control", "no-cache")

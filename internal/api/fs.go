@@ -1,15 +1,22 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/dibin/tdrive/internal/auth"
 	"github.com/dibin/tdrive/internal/database"
 	"github.com/dibin/tdrive/internal/drive"
 	"github.com/dibin/tdrive/internal/events"
 )
+
+// Every handler here converts the client's paths into real drive paths on the
+// way in and back on the way out. An unscoped account — which is every account
+// by default, and every administrator always — pays nothing for this: the
+// conversion is the identity function and the drive sees exactly what it saw
+// before.
 
 type listBody struct {
 	Path    string        `json:"path"`
@@ -24,28 +31,36 @@ type crumb struct {
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		path = drive.Root
+	visible := r.URL.Query().Get("path")
+	if visible == "" {
+		visible = drive.Root
 	}
-	clean, err := drive.CleanPath(path)
+	real, err := s.realPath(r, visible)
 	if err != nil {
 		s.fail(w, err, "list")
 		return
 	}
 
-	entries, err := s.drive.List(r.Context(), clean)
+	entries, err := s.drive.List(r.Context(), real)
 	if err != nil {
 		s.fail(w, err, "list")
 		return
 	}
+	scope := s.scopeOf(r)
+	entries = scope.ApplyAll(entries)
 	if entries == nil {
 		entries = []drive.Entry{}
 	}
+
+	shown, ok := scope.ToVisible(real)
+	if !ok {
+		s.fail(w, fmt.Errorf("%w: %s", drive.ErrOutOfScope, visible), "list")
+		return
+	}
 	writeJSON(w, http.StatusOK, listBody{
-		Path:        clean,
+		Path:        shown,
 		Entries:     entries,
-		Breadcrumbs: breadcrumbs(clean),
+		Breadcrumbs: breadcrumbs(shown),
 	})
 }
 
@@ -60,12 +75,22 @@ func breadcrumbs(p string) []crumb {
 }
 
 func (s *Server) handleStat(w http.ResponseWriter, r *http.Request) {
-	entry, err := s.drive.Stat(r.Context(), r.URL.Query().Get("path"))
+	real, err := s.realPath(r, r.URL.Query().Get("path"))
 	if err != nil {
 		s.fail(w, err, "stat")
 		return
 	}
-	writeJSON(w, http.StatusOK, entry)
+	entry, err := s.drive.Stat(r.Context(), real)
+	if err != nil {
+		s.fail(w, err, "stat")
+		return
+	}
+	scoped, ok := s.scopeOf(r).Apply(entry)
+	if !ok {
+		s.fail(w, fmt.Errorf("%w: %s", drive.ErrOutOfScope, entry.Path), "stat")
+		return
+	}
+	writeJSON(w, http.StatusOK, scoped)
 }
 
 type pathRequest struct {
@@ -77,13 +102,22 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	dir, err := s.drive.Mkdir(r.Context(), req.Path)
+	real, err := s.realPath(r, req.Path)
+	if err != nil {
+		s.fail(w, err, "mkdir")
+		return
+	}
+	dir, err := s.drive.Mkdir(r.Context(), real)
 	if err != nil {
 		s.fail(w, err, "mkdir")
 		return
 	}
 	parent, _ := drive.Parent(dir.Path)
 	s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: parent}})
+
+	if visible, err := s.visiblePath(r, dir.Path); err == nil {
+		dir.Path = visible
+	}
 	writeJSON(w, http.StatusCreated, dir)
 }
 
@@ -97,14 +131,181 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	entry, err := s.drive.Rename(r.Context(), req.Path, req.Name)
+	real, err := s.realPath(r, req.Path)
+	if err != nil {
+		s.fail(w, err, "rename")
+		return
+	}
+	entry, err := s.drive.Rename(r.Context(), real, req.Name)
 	if err != nil {
 		s.fail(w, err, "rename")
 		return
 	}
 	parent, _ := drive.Parent(entry.Path)
 	s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: parent}})
-	writeJSON(w, http.StatusOK, entry)
+
+	scoped, _ := s.scopeOf(r).Apply(entry)
+	writeJSON(w, http.StatusOK, scoped)
+}
+
+// batchRenameRequest renames several entries in one call.
+//
+// A loop of single renames in the browser cannot do this correctly: swapping
+// two names, or shifting a numbered series down by one, transiently collides
+// with a name that is about to move out of the way. Doing it server-side means
+// the whole set can be validated first and the collisions broken with
+// temporary names, so either every rename lands or none of them do.
+type batchRenameRequest struct {
+	Items []batchRenameItem `json:"items"`
+}
+
+type batchRenameItem struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+type batchRenameResult struct {
+	Path string `json:"path"`
+	Name string `json:"name"`
+	OK   bool   `json:"ok"`
+	// NewPath is the entry's path after the rename, so the client can update
+	// its selection without reloading.
+	NewPath string `json:"newPath,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// MaxBatchRename bounds one request. A rename edits every Telegram caption
+// backing an entry, so a thousand-item batch is thousands of RPCs; the limit
+// keeps one request from monopolising the rate budget.
+const MaxBatchRename = 500
+
+func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
+	var req batchRenameRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Items) == 0 {
+		writeError(w, http.StatusBadRequest, "没有要重命名的项目")
+		return
+	}
+	if len(req.Items) > MaxBatchRename {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("一次最多重命名 %d 项", MaxBatchRename))
+		return
+	}
+
+	type plan struct {
+		realPath string
+		parent   string
+		oldName  string
+		newName  string
+	}
+
+	// Phase one: validate everything before touching anything. A batch that is
+	// going to fail on item forty should fail before item one has been
+	// rewritten in Telegram.
+	plans := make([]plan, 0, len(req.Items))
+	seen := make(map[string]bool, len(req.Items))
+	targets := make(map[string]bool, len(req.Items))
+
+	for _, item := range req.Items {
+		real, err := s.realPath(r, item.Path)
+		if err != nil {
+			s.fail(w, err, "batch rename")
+			return
+		}
+		if real == drive.Root {
+			writeError(w, http.StatusBadRequest, "不能重命名根目录")
+			return
+		}
+		name := strings.TrimSpace(item.Name)
+		if err := drive.ValidateName(name); err != nil {
+			s.fail(w, err, "batch rename")
+			return
+		}
+		if seen[real] {
+			writeError(w, http.StatusBadRequest, "同一项在一次批量重命名里出现了两次")
+			return
+		}
+		seen[real] = true
+
+		parent, oldName := drive.Parent(real)
+		target := drive.Join(parent, name)
+		if targets[target] {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("重命名后会有两项都叫 %q", name))
+			return
+		}
+		targets[target] = true
+
+		plans = append(plans, plan{realPath: real, parent: parent, oldName: oldName, newName: name})
+	}
+
+	// Phase two: break cycles. Any target name that is currently occupied by
+	// another item in this batch is renamed to a temporary name first, so the
+	// real rename never meets a name that is about to be vacated.
+	//
+	// A swap of A and B is the smallest case, but a rotation of any length
+	// behaves the same way, and detecting the cycle shape precisely buys
+	// nothing over parking every conflicting entry.
+	sources := make(map[string]bool, len(plans))
+	for _, p := range plans {
+		sources[p.realPath] = true
+	}
+
+	parked := make(map[int]string)
+	for i, p := range plans {
+		target := drive.Join(p.parent, p.newName)
+		if target == p.realPath || !sources[target] {
+			continue
+		}
+		temp := fmt.Sprintf(".tdrive-rename-%s", database.NewID())
+		if _, err := s.drive.Rename(r.Context(), p.realPath, temp); err != nil {
+			s.fail(w, err, "batch rename")
+			return
+		}
+		parked[i] = drive.Join(p.parent, temp)
+	}
+
+	results := make([]batchRenameResult, 0, len(plans))
+	touched := map[string]bool{}
+	var failed int
+
+	for i, p := range plans {
+		from := p.realPath
+		if temp, ok := parked[i]; ok {
+			from = temp
+		}
+		visibleOld, _ := s.scopeOf(r).ToVisible(p.realPath)
+
+		entry, err := s.drive.Rename(r.Context(), from, p.newName)
+		if err != nil {
+			failed++
+			results = append(results, batchRenameResult{
+				Path: visibleOld, Name: p.newName, Error: err.Error(),
+			})
+			continue
+		}
+		touched[p.parent] = true
+		visibleNew, _ := s.scopeOf(r).ToVisible(entry.Path)
+		results = append(results, batchRenameResult{
+			Path: visibleOld, Name: p.newName, OK: true, NewPath: visibleNew,
+		})
+	}
+
+	// One event for the whole batch rather than one per item: the client
+	// reloads the listing once either way.
+	for p := range touched {
+		s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: p}})
+	}
+	s.audit(r, database.AuditFileBatchRename, "",
+		fmt.Sprintf("items=%d failed=%d", len(plans), failed))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": results,
+		"renamed": len(plans) - failed,
+		"failed":  failed,
+	})
 }
 
 type moveRequest struct {
@@ -117,15 +318,28 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	from, _ := drive.Parent(req.Path)
-	entry, err := s.drive.Move(r.Context(), req.Path, req.To)
+	source, err := s.realPath(r, req.Path)
+	if err != nil {
+		s.fail(w, err, "move")
+		return
+	}
+	destination, err := s.realPath(r, req.To)
+	if err != nil {
+		s.fail(w, err, "move")
+		return
+	}
+
+	from, _ := drive.Parent(source)
+	entry, err := s.drive.Move(r.Context(), source, destination)
 	if err != nil {
 		s.fail(w, err, "move")
 		return
 	}
 	s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: from}})
-	s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: req.To}})
-	writeJSON(w, http.StatusOK, entry)
+	s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: destination}})
+
+	scoped, _ := s.scopeOf(r).Apply(entry)
+	writeJSON(w, http.StatusOK, scoped)
 }
 
 type deleteRequest struct {
@@ -146,16 +360,22 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	touched := map[string]bool{}
 	for _, p := range req.Paths {
-		if err := s.drive.Delete(r.Context(), p); err != nil {
+		real, err := s.realPath(r, p)
+		if err != nil {
 			s.fail(w, err, "delete")
 			return
 		}
-		parent, _ := drive.Parent(p)
+		if err := s.drive.Delete(r.Context(), real); err != nil {
+			s.fail(w, err, "delete")
+			return
+		}
+		parent, _ := drive.Parent(real)
 		touched[parent] = true
 	}
 	for p := range touched {
 		s.events.Publish(events.Event{Type: events.TypeTree, Data: events.TreeChanged{Path: p}})
 	}
+	s.audit(r, database.AuditFileDelete, strings.Join(req.Paths, ", "), "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -170,7 +390,7 @@ type segmentInfo struct {
 }
 
 func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
-	file, err := s.db.FileByID(r.Context(), chi.URLParam(r, "id"))
+	file, err := s.fileForUser(r, chi.URLParam(r, "id"))
 	if err != nil {
 		s.fail(w, err, "segments")
 		return
@@ -189,154 +409,4 @@ func (s *Server) handleSegments(w http.ResponseWriter, r *http.Request) {
 		"file":     file,
 		"segments": out,
 	})
-}
-
-func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := s.db.ListUsers(r.Context())
-	if err != nil {
-		s.fail(w, err, "list users")
-		return
-	}
-	writeJSON(w, http.StatusOK, users)
-}
-
-type createUserRequest struct {
-	Username string        `json:"username"`
-	Password string        `json:"password"`
-	Role     database.Role `json:"role"`
-}
-
-func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	var req createUserRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Role != database.RoleAdmin && req.Role != database.RoleUser {
-		req.Role = database.RoleUser
-	}
-	user, err := s.auth.CreateUser(r.Context(), req.Username, req.Password, req.Role)
-	if err != nil {
-		s.fail(w, err, "create user")
-		return
-	}
-	writeJSON(w, http.StatusCreated, user)
-}
-
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if id == currentUser(r).ID {
-		writeError(w, http.StatusBadRequest, "you cannot delete your own account")
-		return
-	}
-
-	target, err := s.db.UserByID(r.Context(), id)
-	if err != nil {
-		s.fail(w, err, "delete user")
-		return
-	}
-	// Removing the last administrator would lock everyone out of the
-	// Telegram settings with no way back in.
-	if target.Role == database.RoleAdmin {
-		admins, err := s.db.CountAdmins(r.Context())
-		if err != nil {
-			s.fail(w, err, "delete user")
-			return
-		}
-		if admins <= 1 {
-			writeError(w, http.StatusBadRequest, "the last administrator cannot be removed")
-			return
-		}
-	}
-
-	if err := s.db.DeleteUser(r.Context(), id); err != nil {
-		s.fail(w, err, "delete user")
-		return
-	}
-	s.auth.InvalidateUser(target.Username)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-type passwordRequest struct {
-	Password string `json:"password"`
-}
-
-func (s *Server) handleSetUserPassword(w http.ResponseWriter, r *http.Request) {
-	var req passwordRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if err := s.auth.ChangePassword(r.Context(), chi.URLParam(r, "id"), req.Password); err != nil {
-		s.fail(w, err, "set password")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-type changeOwnPasswordRequest struct {
-	Current string `json:"current"`
-	New     string `json:"new"`
-}
-
-func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request) {
-	var req changeOwnPasswordRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	user := currentUser(r)
-	// Proving knowledge of the current password stops a stolen access token
-	// from being upgraded into permanent control of the account.
-	if err := auth.VerifyPassword(user.PasswordHash, req.Current); err != nil {
-		writeError(w, http.StatusUnauthorized, "the current password is not correct")
-		return
-	}
-	if err := s.auth.ChangePassword(r.Context(), user.ID, req.New); err != nil {
-		s.fail(w, err, "change password")
-		return
-	}
-	auth.ClearRefreshCookie(w, s.secureCookies(r))
-	w.WriteHeader(http.StatusNoContent)
-}
-
-type roleRequest struct {
-	Role database.Role `json:"role"`
-}
-
-func (s *Server) handleSetUserRole(w http.ResponseWriter, r *http.Request) {
-	var req roleRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if req.Role != database.RoleAdmin && req.Role != database.RoleUser {
-		writeError(w, http.StatusBadRequest, "role must be admin or user")
-		return
-	}
-
-	id := chi.URLParam(r, "id")
-	if req.Role == database.RoleUser {
-		target, err := s.db.UserByID(r.Context(), id)
-		if err != nil {
-			s.fail(w, err, "set role")
-			return
-		}
-		if target.Role == database.RoleAdmin {
-			admins, err := s.db.CountAdmins(r.Context())
-			if err != nil {
-				s.fail(w, err, "set role")
-				return
-			}
-			if admins <= 1 {
-				writeError(w, http.StatusBadRequest, "the last administrator cannot be demoted")
-				return
-			}
-		}
-	}
-
-	if err := s.db.SetUserRole(r.Context(), id, req.Role); err != nil {
-		s.fail(w, err, "set role")
-		return
-	}
-	if target, err := s.db.UserByID(r.Context(), id); err == nil {
-		s.auth.InvalidateUser(target.Username)
-	}
-	w.WriteHeader(http.StatusNoContent)
 }

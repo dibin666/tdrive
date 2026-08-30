@@ -50,6 +50,31 @@ type User struct {
 	Role         Role      `json:"role"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
+
+	Enabled bool `json:"enabled"`
+	// Perms is the raw stored mask. Zero means "follow the role", so callers
+	// must go through Effective or Can rather than testing it directly. The
+	// JSON form is the name list, which is what the API and WebUI speak.
+	Perms Perm `json:"-"`
+	// ScopePath confines the account to one subtree; empty is the whole drive.
+	ScopePath string `json:"scopePath"`
+	// QuotaBytes caps the total size of files this account owns; 0 disables.
+	QuotaBytes  int64     `json:"quotaBytes"`
+	Note        string    `json:"note"`
+	LastLoginAt time.Time `json:"-"`
+	LastLoginIP string    `json:"lastLoginIp,omitempty"`
+}
+
+// Session is one live refresh token, described well enough for a person to
+// recognise which of their devices it is.
+type Session struct {
+	ID         string    `json:"id"`
+	UserID     string    `json:"-"`
+	UserAgent  string    `json:"userAgent"`
+	IP         string    `json:"ip"`
+	CreatedAt  time.Time `json:"createdAt"`
+	LastUsedAt time.Time `json:"lastUsedAt"`
+	ExpiresAt  time.Time `json:"expiresAt"`
 }
 
 // Channel is a Telegram channel used as a storage backend. The default channel
@@ -75,6 +100,7 @@ type Dir struct {
 	TGMsgID   int       `json:"-"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	OwnerID   string    `json:"ownerId,omitempty"`
 }
 
 // File is one logical file. Size is the whole file, not one segment; callers
@@ -92,6 +118,10 @@ type File struct {
 	ChannelID    string     `json:"-"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	UpdatedAt    time.Time  `json:"updatedAt"`
+	// OwnerID is who uploaded the file. It is also written into the Telegram
+	// caption, so a rebuilt index restores it rather than zeroing everyone's
+	// quota usage.
+	OwnerID string `json:"ownerId,omitempty"`
 }
 
 // Segment is one Telegram document backing part of a file. Index is 1-based to
@@ -131,6 +161,97 @@ type UploadJob struct {
 	SourceURL     string    `json:"sourceUrl,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+	// StartedAt and FinishedAt bracket the time bytes were actually moving,
+	// which is what an average speed has to be divided by. A job that waited
+	// in the concurrency queue must not have that wait counted against it.
+	StartedAt  time.Time `json:"-"`
+	FinishedAt time.Time `json:"-"`
+}
+
+// DownloadMode is how a download's bytes reach the client.
+type DownloadMode string
+
+const (
+	// DownloadDirect streams straight through the server from Telegram.
+	DownloadDirect DownloadMode = "direct"
+	// DownloadStaged assembles the whole file on the server's disk first, then
+	// serves it locally. It is the only mode that makes a many-segment file
+	// safe to pull with a parallel downloader.
+	DownloadStaged DownloadMode = "staged"
+	// DownloadSegments hands the client one link per stored segment and lets
+	// it join them locally.
+	DownloadSegments DownloadMode = "segments"
+)
+
+// DownloadStatus is the lifecycle of a download job. Staged jobs stop at
+// ready — the bytes are on disk and waiting — and only reach complete once the
+// client has actually taken them.
+type DownloadStatus string
+
+const (
+	DownloadPending   DownloadStatus = "pending"
+	DownloadRunning   DownloadStatus = "running"
+	DownloadReady     DownloadStatus = "ready"
+	DownloadComplete  DownloadStatus = "complete"
+	DownloadFailed    DownloadStatus = "failed"
+	DownloadCancelled DownloadStatus = "cancelled"
+	DownloadExpired   DownloadStatus = "expired"
+)
+
+// DownloadJob mirrors UploadJob for the other direction.
+type DownloadJob struct {
+	ID              string         `json:"id"`
+	UserID          string         `json:"-"`
+	FileID          string         `json:"fileId,omitempty"`
+	Name            string         `json:"name"`
+	TotalSize       int64          `json:"totalSize"`
+	DownloadedBytes int64          `json:"downloadedBytes"`
+	Mode            DownloadMode   `json:"mode"`
+	Status          DownloadStatus `json:"status"`
+	Error           string         `json:"error,omitempty"`
+	CachePath       string         `json:"-"`
+	CreatedAt       time.Time      `json:"createdAt"`
+	UpdatedAt       time.Time      `json:"updatedAt"`
+	StartedAt       time.Time      `json:"-"`
+	FinishedAt      time.Time      `json:"-"`
+	ExpiresAt       time.Time      `json:"-"`
+	LastUsedAt      time.Time      `json:"-"`
+}
+
+// ShareKind distinguishes a link to a whole file from a link to one stored
+// segment of it.
+type ShareKind string
+
+const (
+	ShareFile    ShareKind = "file"
+	ShareSegment ShareKind = "segment"
+)
+
+// ShareLink is a durable, revocable capability to read one file's bytes.
+// Token is only populated at creation time; afterwards only the hash exists.
+type ShareLink struct {
+	ID         string    `json:"id"`
+	UserID     string    `json:"-"`
+	FileID     string    `json:"fileId"`
+	Kind       ShareKind `json:"kind"`
+	Label      string    `json:"label,omitempty"`
+	ExpiresAt  time.Time `json:"-"`
+	Revoked    bool      `json:"revoked"`
+	Hits       int64     `json:"hits"`
+	CreatedAt  time.Time `json:"createdAt"`
+	LastUsedAt time.Time `json:"-"`
+}
+
+// AuditEntry is one recorded administrative action.
+type AuditEntry struct {
+	ID        string    `json:"id"`
+	At        time.Time `json:"at"`
+	ActorID   string    `json:"actorId,omitempty"`
+	ActorName string    `json:"actorName"`
+	Action    string    `json:"action"`
+	Target    string    `json:"target,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
+	IP        string    `json:"ip,omitempty"`
 }
 
 // PendingSegments lists the 1-based segment indices that still need uploading.

@@ -27,6 +27,10 @@ type readHandle struct {
 	file database.File
 	info fileInfo
 
+	// sessionKey groups this handle's reads with the other requests belonging
+	// to the same logical download.
+	sessionKey string
+
 	mu      sync.Mutex
 	stream  *reader.File
 	release func()
@@ -37,7 +41,7 @@ func (h *readHandle) ensure() error {
 	if h.stream != nil {
 		return nil
 	}
-	release, err := h.fs.drive.AcquireDownloadTask(h.ctx)
+	release, err := h.fs.drive.AcquireDownloadSession(h.ctx, h.sessionKey)
 	if err != nil {
 		return translate(err)
 	}

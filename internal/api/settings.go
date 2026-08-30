@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap/zapcore"
 
 	"github.com/dibin/tdrive/internal/config"
+	"github.com/dibin/tdrive/internal/database"
 )
 
 // settingsBody is intentionally limited to values that are safe to change
@@ -30,6 +31,12 @@ type settingsBody struct {
 	DownloadConcurrency int    `json:"downloadConcurrency"`
 	WebDAVEnabled       bool   `json:"webdavEnabled"`
 	LogLevel            string `json:"logLevel"`
+	CacheDir            string `json:"cacheDir"`
+	CacheLimit          int64  `json:"cacheLimit"`
+	CacheTTLHours       int64  `json:"cacheTtlHours"`
+	MaxDownloadConns    int    `json:"maxDownloadConns"`
+	DownloadGraceMs     int64  `json:"downloadGraceMs"`
+	ShareTTLHours       int64  `json:"shareTtlHours"`
 }
 
 type settingsUpdateRequest struct {
@@ -46,6 +53,12 @@ type settingsUpdateRequest struct {
 	DownloadConcurrency *int    `json:"downloadConcurrency"`
 	WebDAVEnabled       *bool   `json:"webdavEnabled"`
 	LogLevel            *string `json:"logLevel"`
+	CacheDir            *string `json:"cacheDir"`
+	CacheLimit          *int64  `json:"cacheLimit"`
+	CacheTTLHours       *int64  `json:"cacheTtlHours"`
+	MaxDownloadConns    *int    `json:"maxDownloadConns"`
+	DownloadGraceMs     *int64  `json:"downloadGraceMs"`
+	ShareTTLHours       *int64  `json:"shareTtlHours"`
 }
 
 func toSettingsBody(s config.RuntimeSettings) settingsBody {
@@ -63,6 +76,12 @@ func toSettingsBody(s config.RuntimeSettings) settingsBody {
 		DownloadConcurrency: s.DownloadConcurrency,
 		WebDAVEnabled:       s.WebDAVEnabled,
 		LogLevel:            s.LogLevel,
+		CacheDir:            s.CacheDir,
+		CacheLimit:          s.CacheLimit,
+		CacheTTLHours:       int64(s.CacheTTL / time.Hour),
+		MaxDownloadConns:    s.MaxDownloadConns,
+		DownloadGraceMs:     s.DownloadGrace.Milliseconds(),
+		ShareTTLHours:       int64(s.ShareTTL / time.Hour),
 	}
 }
 
@@ -131,6 +150,39 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if req.LogLevel != nil {
 		next.LogLevel = strings.ToLower(strings.TrimSpace(*req.LogLevel))
 	}
+	if req.CacheDir != nil {
+		// The cache directory follows the same normalisation as the VPS upload
+		// root: an absolute path, or empty to fall back to the data directory.
+		cacheDir, err := config.NormalizeLocalRoot(*req.CacheDir)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		next.CacheDir = cacheDir
+	}
+	if req.CacheLimit != nil {
+		next.CacheLimit = *req.CacheLimit
+	}
+	if req.CacheTTLHours != nil {
+		if *req.CacheTTLHours < 1 || *req.CacheTTLHours > 24*365 {
+			writeError(w, http.StatusBadRequest, "\u6682\u5b58\u4fdd\u7559\u65f6\u957f\u5fc5\u987b\u5728 1 \u5c0f\u65f6\u5230 1 \u5e74\u4e4b\u95f4")
+			return
+		}
+		next.CacheTTL = time.Duration(*req.CacheTTLHours) * time.Hour
+	}
+	if req.MaxDownloadConns != nil {
+		next.MaxDownloadConns = *req.MaxDownloadConns
+	}
+	if req.DownloadGraceMs != nil {
+		next.DownloadGrace = time.Duration(*req.DownloadGraceMs) * time.Millisecond
+	}
+	if req.ShareTTLHours != nil {
+		if *req.ShareTTLHours < 0 {
+			writeError(w, http.StatusBadRequest, "\u5206\u4eab\u94fe\u63a5\u6709\u6548\u671f\u4e0d\u80fd\u662f\u8d1f\u6570")
+			return
+		}
+		next.ShareTTL = time.Duration(*req.ShareTTLHours) * time.Hour
+	}
 
 	if err := next.Validate(); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -161,6 +213,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		config.SettingDownloadConcurrency: strconv.Itoa(next.DownloadConcurrency),
 		config.SettingWebDAVEnabled:       strconv.FormatBool(next.WebDAVEnabled),
 		config.SettingLogLevel:            next.LogLevel,
+		config.SettingCacheDir:            next.CacheDir,
+		config.SettingCacheLimit:          strconv.FormatInt(next.CacheLimit, 10),
+		config.SettingCacheTTL:            next.CacheTTL.String(),
+		config.SettingMaxDownloadConns:    strconv.Itoa(next.MaxDownloadConns),
+		config.SettingDownloadGrace:       next.DownloadGrace.String(),
+		config.SettingShareTTL:            next.ShareTTL.String(),
 	}
 	if err := s.db.SetSettings(r.Context(), values); err != nil {
 		s.fail(w, err, "save settings")
@@ -192,5 +250,6 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.audit(r, database.AuditSettingsUpdate, "", "runtime settings")
 	writeJSON(w, http.StatusOK, toSettingsBody(next))
 }

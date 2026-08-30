@@ -61,6 +61,12 @@ func (s *Service) Begin(ctx context.Context, req UploadRequest) (database.Upload
 		return database.UploadJob{}, database.File{}, errors.New("upload size must be known before starting")
 	}
 
+	// The quota is checked before anything is created, so a rejected upload
+	// leaves no pending file row and no Telegram message behind.
+	if err := s.CheckQuota(ctx, req.UserID, req.Size); err != nil {
+		return database.UploadJob{}, database.File{}, err
+	}
+
 	channel, err := s.storageChannel(ctx)
 	if err != nil {
 		return database.UploadJob{}, database.File{}, err
@@ -90,6 +96,7 @@ func (s *Service) Begin(ctx context.Context, req UploadRequest) (database.Upload
 		SegmentCount: segCount,
 		Status:       database.StatusPending,
 		ChannelID:    channel.ID,
+		OwnerID:      req.UserID,
 	}
 	if err := s.db.InsertFile(ctx, file); err != nil {
 		if errors.Is(err, database.ErrConflict) {
@@ -266,6 +273,7 @@ func (s *Service) fileCaption(ctx context.Context, file database.File, index int
 		SegCount:    file.SegmentCount,
 		TotalSize:   file.Size,
 		SegmentSize: file.SegmentSize,
+		OwnerID:     file.OwnerID,
 		HumanTags:   AncestorNames(dirPath),
 	})
 }

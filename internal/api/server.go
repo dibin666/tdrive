@@ -55,6 +55,7 @@ func New(
 		progress: newLiveUploadProgress(),
 	}
 	wireRemoteProgress(driveSvc, broker, server.progress)
+	wireDownloadProgress(driveSvc, broker)
 	return server
 }
 
@@ -84,6 +85,10 @@ func (s *Server) Routes() http.Handler {
 		r.Use(s.requireFileAccess)
 		r.Get("/files/{id}/raw", s.handleRaw)
 		r.Head("/files/{id}/raw", s.handleRaw)
+		// One segment as a standalone object, which is what the split
+		// download mode fetches.
+		r.Get("/files/{id}/segments/{index}/raw", s.handleSegmentRaw)
+		r.Head("/files/{id}/segments/{index}/raw", s.handleSegmentRaw)
 	})
 
 	r.Group(func(r chi.Router) {
@@ -91,31 +96,63 @@ func (s *Server) Routes() http.Handler {
 
 		r.Get("/me", s.handleMe)
 		r.Post("/me/password", s.handleChangeOwnPassword)
+		r.Get("/me/sessions", s.handleMySessions)
+		r.Delete("/me/sessions/{sid}", s.handleRevokeMySession)
 		r.Get("/events", s.handleEvents)
 		r.Get("/stats", s.handleStats)
-		r.Get("/local/list", s.handleLocalList)
 
+		r.With(s.auth.RequirePerm(database.PermUploadLocal)).
+			Get("/local/list", s.handleLocalList)
+
+		// The filesystem routes carry a permission each. Listing needs only
+		// read; everything that changes the tree needs its own bit, so an
+		// account can be given a read-only or an append-only view without
+		// inventing a second role for it.
 		r.Route("/fs", func(r chi.Router) {
-			r.Get("/list", s.handleList)
-			r.Get("/stat", s.handleStat)
-			r.Post("/mkdir", s.handleMkdir)
-			r.Post("/rename", s.handleRename)
-			r.Post("/move", s.handleMove)
-			r.Post("/delete", s.handleDelete)
+			r.With(s.auth.RequirePerm(database.PermRead)).Get("/list", s.handleList)
+			r.With(s.auth.RequirePerm(database.PermRead)).Get("/stat", s.handleStat)
+			r.With(s.auth.RequirePerm(database.PermMkdir)).Post("/mkdir", s.handleMkdir)
+			r.With(s.auth.RequirePerm(database.PermRename)).Post("/rename", s.handleRename)
+			r.With(s.auth.RequirePerm(database.PermRename)).Post("/batch-rename", s.handleBatchRename)
+			r.With(s.auth.RequirePerm(database.PermMove)).Post("/move", s.handleMove)
+			r.With(s.auth.RequirePerm(database.PermDelete)).Post("/delete", s.handleDelete)
 		})
 
 		r.Route("/files/{id}", func(r chi.Router) {
 			r.Get("/segments", s.handleSegments)
-			r.Get("/link", s.handleMediaLink)
+			r.With(s.auth.RequirePerm(database.PermDownload)).Get("/link", s.handleMediaLink)
+			r.With(s.auth.RequirePerm(database.PermDownload)).
+				Get("/download-options", s.handleDownloadOptions)
+			r.With(s.auth.RequirePerm(database.PermShare)).Post("/share", s.handleCreateShare)
 		})
+
+		r.Get("/shares", s.handleListShares)
+		r.Delete("/shares/{id}", s.handleRevokeShare)
+
+		r.Route("/downloads", func(r chi.Router) {
+			r.Use(s.auth.RequirePerm(database.PermDownload))
+			r.Post("/", s.handleStartDownload)
+			r.Get("/{id}", s.handleDownloadJob)
+			r.Post("/{id}/progress", s.handleDownloadProgress)
+			r.Get("/{id}/file", s.handleStagedFile)
+			r.Head("/{id}/file", s.handleStagedFile)
+			r.Delete("/{id}", s.handleCancelDownload)
+		})
+
+		// The merged transfer history. Uploads and downloads are listed,
+		// filtered and deleted together because that is how they are read.
+		r.Get("/transfers", s.handleListTransfers)
+		r.Delete("/transfers", s.handleDeleteTransfers)
+		r.Delete("/transfers/{kind}/{id}", s.handleDeleteTransfer)
 
 		r.Route("/uploads", func(r chi.Router) {
 			r.Get("/", s.handleListJobs)
-			r.Post("/", s.handleBeginUpload)
-			r.Post("/local", s.handleLocalUpload)
-			r.Post("/remote", s.handleRemoteUpload)
+			r.With(s.auth.RequirePerm(database.PermUpload)).Post("/", s.handleBeginUpload)
+			r.With(s.auth.RequirePerm(database.PermUploadLocal)).Post("/local", s.handleLocalUpload)
+			r.With(s.auth.RequirePerm(database.PermRemoteFetch)).Post("/remote", s.handleRemoteUpload)
 			r.Get("/{id}", s.handleJob)
-			r.Put("/{id}/segments/{index}", s.handlePutSegment)
+			r.With(s.auth.RequirePerm(database.PermUpload)).
+				Put("/{id}/segments/{index}", s.handlePutSegment)
 			r.Post("/{id}/complete", s.handleCompleteUpload)
 			r.Delete("/{id}", s.handleCancelUpload)
 		})
@@ -141,11 +178,22 @@ func (s *Server) Routes() http.Handler {
 			r.Use(s.auth.RequireAdmin)
 			r.Get("/settings", s.handleSettings)
 			r.Put("/settings", s.handleUpdateSettings)
+
 			r.Get("/users", s.handleListUsers)
 			r.Post("/users", s.handleCreateUser)
+			r.Get("/users/permissions", s.handlePermissionCatalog)
+			r.Patch("/users/{id}", s.handleUpdateUser)
 			r.Delete("/users/{id}", s.handleDeleteUser)
 			r.Post("/users/{id}/password", s.handleSetUserPassword)
 			r.Post("/users/{id}/role", s.handleSetUserRole)
+			r.Get("/users/{id}/sessions", s.handleUserSessions)
+			r.Delete("/users/{id}/sessions/{sid}", s.handleRevokeUserSession)
+			r.Post("/users/{id}/sessions/revoke-all", s.handleRevokeUserSessions)
+
+			r.Get("/audit", s.handleAudit)
+			r.Get("/cache", s.handleCacheStatus)
+			r.Post("/cache/purge", s.handlePurgeCache)
+
 			r.Post("/index/rebuild", s.handleRebuildIndex)
 			r.Get("/index/status", s.handleIndexStatus)
 		})
@@ -234,7 +282,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokens, _, err := s.auth.Login(r.Context(), req.Username, req.Password)
+	tokens, _, err := s.auth.Login(r.Context(), req.Username, req.Password, auth.ClientFrom(r))
 	if err != nil {
 		s.fail(w, err, "setup login")
 		return
@@ -258,7 +306,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	tokens, user, err := s.auth.Login(r.Context(), req.Username, req.Password)
+	tokens, user, err := s.auth.Login(r.Context(), req.Username, req.Password, auth.ClientFrom(r))
 	if err != nil {
 		s.fail(w, err, "login")
 		return
@@ -273,7 +321,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "no session cookie")
 		return
 	}
-	tokens, user, err := s.auth.Refresh(r.Context(), cookie.Value)
+	tokens, user, err := s.auth.Refresh(r.Context(), cookie.Value, auth.ClientFrom(r))
 	if err != nil {
 		auth.ClearRefreshCookie(w, s.secureCookies(r))
 		s.fail(w, err, "refresh")
@@ -289,10 +337,6 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.ClearRefreshCookie(w, s.secureCookies(r))
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, currentUser(r))
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

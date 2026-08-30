@@ -4,25 +4,35 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 const jobCols = `id, user_id, file_id, dir_id, name, total_size, segment_size, segment_count,
-	done_mask, uploaded_bytes, status, error, source, source_url, created_at, updated_at`
+	done_mask, uploaded_bytes, status, error, source, source_url, created_at, updated_at,
+	started_at, finished_at`
 
 func scanJob(row interface{ Scan(...any) error }) (UploadJob, error) {
 	var (
 		j                     UploadJob
 		userID, fileID, dirID sql.NullString
 		created, updated      int64
+		started, finished     int64
 	)
 	err := row.Scan(&j.ID, &userID, &fileID, &dirID, &j.Name, &j.TotalSize,
 		&j.SegmentSize, &j.SegmentCount, &j.DoneMask, &j.UploadedBytes,
-		&j.Status, &j.Error, &j.Source, &j.SourceURL, &created, &updated)
+		&j.Status, &j.Error, &j.Source, &j.SourceURL, &created, &updated,
+		&started, &finished)
 	if err != nil {
 		return UploadJob{}, Translate(err)
 	}
 	j.UserID, j.FileID, j.DirID = text(userID), text(fileID), text(dirID)
 	j.CreatedAt, j.UpdatedAt = msToTime(created), msToTime(updated)
+	if started > 0 {
+		j.StartedAt = msToTime(started)
+	}
+	if finished > 0 {
+		j.FinishedAt = msToTime(finished)
+	}
 	return j, nil
 }
 
@@ -36,7 +46,7 @@ func (d *DB) InsertJob(ctx context.Context, j UploadJob) error {
 		}
 	}
 	_, err := d.write.ExecContext(ctx,
-		`INSERT INTO upload_jobs (`+jobCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO upload_jobs (`+jobCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)`,
 		j.ID, nullable(j.UserID), nullable(j.FileID), nullable(j.DirID), j.Name, j.TotalSize,
 		j.SegmentSize, j.SegmentCount, j.DoneMask, j.UploadedBytes,
 		string(j.Status), j.Error, j.Source, j.SourceURL, now, now)
@@ -133,9 +143,16 @@ func (d *DB) MarkSegmentDone(ctx context.Context, jobID string, idx int, bytes i
 			status = JobComplete
 		}
 
+		now := nowMS()
+		finished := int64(0)
+		if done {
+			finished = now
+		}
 		_, err = tx.ExecContext(ctx,
-			`UPDATE upload_jobs SET done_mask = ?, uploaded_bytes = ?, status = ?, updated_at = ?
-			 WHERE id = ?`, mask, uploaded, string(status), nowMS(), jobID)
+			`UPDATE upload_jobs SET done_mask = ?, uploaded_bytes = ?, status = ?, updated_at = ?,
+			   started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END,
+			   finished_at = CASE WHEN ? > 0 THEN ? ELSE finished_at END
+			 WHERE id = ?`, mask, uploaded, string(status), now, now, finished, finished, jobID)
 		if err != nil {
 			return Translate(err)
 		}
@@ -145,10 +162,31 @@ func (d *DB) MarkSegmentDone(ctx context.Context, jobID string, idx int, bytes i
 	return job, err
 }
 
+// SetJobStatus moves a job's lifecycle forward and maintains the timing
+// brackets on the way.
+//
+// started_at is only written on the first transition to running, because this
+// is called on every segment (internal/api/upload.go) and a resumed upload
+// must not keep resetting its own clock. finished_at is written on any
+// terminal status, so an average speed can be computed without counting the
+// time the job spent queued behind the concurrency limit.
 func (d *DB) SetJobStatus(ctx context.Context, id string, status JobStatus, errMsg string) error {
+	now := nowMS()
+	sets := []string{"status = ?", "error = ?", "updated_at = ?"}
+	args := []any{string(status), errMsg, now}
+
+	switch status {
+	case JobRunning:
+		sets = append(sets, "started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END")
+		args = append(args, now)
+	case JobComplete, JobFailed, JobCancelled:
+		sets = append(sets, "finished_at = ?")
+		args = append(args, now)
+	}
+
+	args = append(args, id)
 	res, err := d.write.ExecContext(ctx,
-		`UPDATE upload_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?`,
-		string(status), errMsg, nowMS(), id)
+		`UPDATE upload_jobs SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
 	return affectedOne(res, err, "set job status")
 }
 

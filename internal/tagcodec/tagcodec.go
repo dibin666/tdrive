@@ -100,6 +100,13 @@ type Record struct {
 	TotalSize   int64
 	SegmentSize int64
 
+	// OwnerID is the account that uploaded the file, written as #own_ so that
+	// rebuilding the index from the channel restores ownership — and with it
+	// per-account quota accounting — rather than silently zeroing it. It is
+	// optional: records written before ownership existed simply lack the tag,
+	// and a drive with one account never needs to look at it.
+	OwnerID string
+
 	// HumanTags are the sanitized ancestor folder names, nearest first. They
 	// exist so that searching a Telegram client for "#电影" surfaces the
 	// folder's files; nothing in tdrive reads them back.
@@ -168,6 +175,12 @@ func EncodeFile(r Record) (string, error) {
 		fmt.Sprintf("#sz_%d", r.TotalSize),
 		fmt.Sprintf("#ss_%d", r.SegmentSize),
 	}
+	if r.OwnerID != "" {
+		if err := validateID(r.OwnerID); err != nil {
+			return "", fmt.Errorf("owner: %w", err)
+		}
+		tags = append(tags, "#own_"+r.OwnerID)
+	}
 
 	human := make([]string, 0, MaxHumanTags)
 	seen := map[string]bool{}
@@ -225,6 +238,11 @@ func Decode(caption string) (Record, error) {
 			}
 		case strings.HasPrefix(tok, "n_"):
 			encName = strings.TrimPrefix(tok, "n_")
+		case strings.HasPrefix(tok, "own_"):
+			// Matched explicitly rather than left to the default branch: an
+			// unrecognised token becomes a human tag, and an owner id is not
+			// something anyone wants shown as a folder hashtag.
+			rec.OwnerID = strings.TrimPrefix(tok, "own_")
 		case strings.HasPrefix(tok, "seg_"):
 			i, n, err := parseSeg(strings.TrimPrefix(tok, "seg_"))
 			if err != nil {
@@ -264,6 +282,12 @@ func Decode(caption string) (Record, error) {
 		if err := validateID(rec.ParentID); err != nil {
 			return rec, fmt.Errorf("parent: %w", err)
 		}
+	}
+	// A corrupt owner tag is dropped rather than failing the record: ownership
+	// is an accounting detail, and refusing to decode a file over it would
+	// lose the file itself during a rebuild.
+	if rec.OwnerID != "" && validateID(rec.OwnerID) != nil {
+		rec.OwnerID = ""
 	}
 
 	// #n_ is authoritative, but a caption hand-edited in a Telegram client can

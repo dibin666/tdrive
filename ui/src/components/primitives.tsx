@@ -7,6 +7,7 @@ import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
+  type SelectHTMLAttributes,
 } from 'react'
 
 type Variant = 'primary' | 'outline' | 'ghost' | 'danger'
@@ -56,6 +57,315 @@ export function IconButton({
 
 export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={clsx('input', className)} {...rest} />
+}
+
+/** Select wraps a native <select>, which is the right control on a phone and
+ *  needs no keyboard handling of its own. */
+export function Select({
+  className,
+  children,
+  ...rest
+}: SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select className={clsx('input cursor-pointer', className)} {...rest}>
+      {children}
+    </select>
+  )
+}
+
+/**
+ * Switch is the on/off control used everywhere a checkbox would be, because a
+ * settings page full of native checkboxes reads as a form to fill in rather
+ * than as a set of things that are currently true.
+ */
+export function Switch({
+  checked,
+  onChange,
+  disabled,
+  label,
+  hint,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled?: boolean
+  label?: ReactNode
+  hint?: ReactNode
+}) {
+  return (
+    <label
+      className={clsx(
+        'flex items-start gap-3',
+        disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
+      )}
+    >
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        disabled={disabled}
+        onClick={() => !disabled && onChange(!checked)}
+        className={clsx(
+          'relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors',
+          checked ? 'bg-[var(--color-clay)]' : 'bg-[var(--line-strong)]',
+        )}
+      >
+        <span
+          className={clsx(
+            'absolute top-0.5 size-4 rounded-full bg-white shadow-sm transition-transform',
+            checked ? 'translate-x-[1.125rem]' : 'translate-x-0.5',
+          )}
+        />
+      </button>
+      {(label || hint) && (
+        <span className="min-w-0">
+          {label && <span className="block text-sm">{label}</span>}
+          {hint && <span className="mt-0.5 block text-xs text-[var(--muted)]">{hint}</span>}
+        </span>
+      )}
+    </label>
+  )
+}
+
+/**
+ * Slider pairs a range input with a number box.
+ *
+ * Both exist because they answer different questions: the track shows where a
+ * value sits between its limits, which is what makes a tuning parameter
+ * comprehensible, while the box is the only way to type an exact number.
+ */
+export function Slider({
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+  disabled,
+  suffix,
+  format,
+}: {
+  value: number
+  min: number
+  max: number
+  step?: number
+  onChange: (next: number) => void
+  disabled?: boolean
+  suffix?: string
+  /** Renders the derived explanation under the track. */
+  format?: (value: number) => ReactNode
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-3">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="h-1.5 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-[var(--sunk)] accent-[var(--color-clay)] disabled:cursor-not-allowed"
+        />
+        <div className="flex shrink-0 items-center gap-1.5">
+          <input
+            type="number"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            disabled={disabled}
+            onChange={(e) => {
+              const next = Number(e.target.value)
+              if (Number.isFinite(next)) onChange(next)
+            }}
+            className="input w-24 !py-1.5 text-right tabular-nums"
+          />
+          {suffix && <span className="text-xs text-[var(--faint)]">{suffix}</span>}
+        </div>
+      </div>
+      {format && <p className="text-xs text-[var(--muted)]">{format(value)}</p>}
+    </div>
+  )
+}
+
+/** Segmented is a small tab strip for mutually exclusive filters. */
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  className,
+}: {
+  value: T
+  options: { value: T; label: ReactNode; count?: number }[]
+  onChange: (next: T) => void
+  className?: string
+}) {
+  return (
+    <div
+      className={clsx(
+        'inline-flex shrink-0 items-center rounded-[var(--radius-control)] border border-[var(--line)] p-0.5',
+        className,
+      )}
+      role="tablist"
+    >
+      {options.map((option) => (
+        <button
+          key={option.value}
+          role="tab"
+          aria-selected={value === option.value}
+          onClick={() => onChange(option.value)}
+          className={clsx(
+            'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+            value === option.value
+              ? 'bg-[var(--sunk)] text-[var(--ink)]'
+              : 'text-[var(--muted)] hover:text-[var(--ink)]',
+          )}
+        >
+          {option.label}
+          {option.count !== undefined && (
+            <span className="tabular-nums text-[10px] text-[var(--faint)]">{option.count}</span>
+          )}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Chip is a toggleable filter tag. */
+export function Chip({
+  active,
+  onClick,
+  children,
+  tone,
+}: {
+  active?: boolean
+  onClick?: () => void
+  children: ReactNode
+  tone?: 'clay' | 'blue' | 'green' | 'purple' | 'neutral'
+}) {
+  const tones: Record<string, string> = {
+    clay: 'data-[on=true]:!bg-[var(--clay-soft)] data-[on=true]:!text-[var(--color-clay)]',
+    blue: 'data-[on=true]:!bg-blue-500/12 data-[on=true]:!text-blue-600 dark:data-[on=true]:!text-blue-400',
+    green: 'data-[on=true]:!bg-green-500/12 data-[on=true]:!text-green-700 dark:data-[on=true]:!text-green-400',
+    purple: 'data-[on=true]:!bg-purple-500/12 data-[on=true]:!text-purple-600 dark:data-[on=true]:!text-purple-400',
+    neutral: 'data-[on=true]:!bg-[var(--sunk)] data-[on=true]:!text-[var(--ink)]',
+  }
+  return (
+    <button
+      type="button"
+      data-on={active ? 'true' : 'false'}
+      onClick={onClick}
+      className={clsx(
+        'chip cursor-pointer transition-colors hover:text-[var(--ink)]',
+        'data-[on=true]:!border-transparent',
+        tones[tone ?? 'clay'],
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+/**
+ * Drawer slides in from the right on desktop and up from the bottom on a
+ * phone, which is where a side panel stops having room to exist.
+ */
+export function Drawer({
+  open,
+  onClose,
+  title,
+  description,
+  children,
+  footer,
+  width = 'sm:max-w-lg',
+}: {
+  open: boolean
+  onClose: () => void
+  title: ReactNode
+  description?: ReactNode
+  children?: ReactNode
+  footer?: ReactNode
+  width?: string
+}) {
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-end sm:items-stretch" role="dialog" aria-modal="true">
+      <div className="absolute inset-0 bg-black/25 backdrop-blur-[2px] fade-in" onClick={onClose} aria-hidden />
+      <div
+        className={clsx(
+          'relative flex w-full flex-col bg-[var(--surface)] shadow-xl',
+          'max-h-[92vh] rounded-t-[var(--radius-panel)] sheet-in',
+          'sm:h-full sm:max-h-none sm:rounded-none sm:border-l sm:border-[var(--line)] sm:slide-in-right',
+          width,
+        )}
+      >
+        <header className="flex items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
+          <div className="min-w-0">
+            <h2 className="display truncate text-base">{title}</h2>
+            {description && <p className="mt-0.5 text-xs text-[var(--muted)]">{description}</p>}
+          </div>
+          <IconButton label="关闭" onClick={onClose}>
+            <X size={16} />
+          </IconButton>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        {footer && (
+          <footer className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3 pb-safe">
+            {footer}
+          </footer>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Meter is a labelled usage bar, used for quotas and the download cache. */
+export function Meter({
+  value,
+  max,
+  label,
+  caption,
+  tone = 'clay',
+}: {
+  value: number
+  max: number
+  label?: ReactNode
+  caption?: ReactNode
+  tone?: 'clay' | 'danger'
+}) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0
+  // Past 90% the bar turns red on its own: a quota that is nearly full is the
+  // one fact the user needs before they start a large upload.
+  const critical = tone === 'danger' || pct >= 90
+  return (
+    <div className="space-y-1">
+      {(label || caption) && (
+        <div className="flex items-baseline justify-between gap-2 text-xs">
+          {label && <span className="text-[var(--muted)]">{label}</span>}
+          {caption && <span className="tabular-nums text-[var(--faint)]">{caption}</span>}
+        </div>
+      )}
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--sunk)]">
+        <div
+          className={clsx(
+            'h-full rounded-full transition-[width] duration-300',
+            critical ? 'bg-[var(--color-danger)]' : 'bg-[var(--color-clay)]',
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  )
 }
 
 export function Field({

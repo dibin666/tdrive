@@ -41,10 +41,11 @@ type Service struct {
 
 	refs *refCache
 
-	// OnRemoteProgress is set by the API layer so a detached server-side
-	// fetch can still push progress to the browser. It is optional: the
-	// drive works without anyone listening.
-	OnRemoteProgress RemoteProgress
+	// OnRemoteProgress and OnDownloadProgress are set by the API layer so a
+	// detached server-side transfer can still push progress to the browser.
+	// Both are optional: the drive works without anyone listening.
+	OnRemoteProgress   RemoteProgress
+	OnDownloadProgress DownloadProgress
 
 	// mkdirMu serialises directory creation. Two clients racing to create the
 	// same folder would otherwise both send a Telegram message and one would
@@ -52,24 +53,36 @@ type Service struct {
 	mkdirMu sync.Mutex
 
 	// Task limiters count whole logical file transfers. The upload job leases
-	// below let concurrent browser segment requests share one upload slot.
+	// and download sessions below let concurrent requests belonging to one
+	// transfer share a single slot.
 	uploadLimiter   *taskLimiter
 	downloadLimiter *taskLimiter
 	uploadJobsMu    sync.Mutex
 	uploadJobs      map[string]*uploadJobLease
+
+	downloadSessionsMu sync.Mutex
+	downloadSessions   map[string]*downloadSession
+
+	// stageMu serialises the decide-then-insert of a staged download, so two
+	// requests for the same file cannot both conclude they are the first one.
+	stageMu       sync.Mutex
+	stageCancelMu sync.Mutex
+	stageCancels  map[string]context.CancelFunc
 }
 
 func New(cfg *config.Config, db *database.DB, backend Backend, log *zap.Logger) *Service {
 	settings := cfg.RuntimeSettings()
 	return &Service{
-		cfg:             cfg,
-		db:              db,
-		tg:              backend,
-		log:             log,
-		refs:            newRefCache(cfg.Stream.LocationTTL),
-		uploadLimiter:   newTaskLimiter(settings.UploadConcurrency),
-		downloadLimiter: newTaskLimiter(settings.DownloadConcurrency),
-		uploadJobs:      make(map[string]*uploadJobLease),
+		cfg:              cfg,
+		db:               db,
+		tg:               backend,
+		log:              log,
+		refs:             newRefCache(cfg.Stream.LocationTTL),
+		uploadLimiter:    newTaskLimiter(settings.UploadConcurrency),
+		downloadLimiter:  newTaskLimiter(settings.DownloadConcurrency),
+		uploadJobs:       make(map[string]*uploadJobLease),
+		downloadSessions: make(map[string]*downloadSession),
+		stageCancels:     make(map[string]context.CancelFunc),
 	}
 }
 

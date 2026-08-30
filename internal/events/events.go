@@ -19,6 +19,10 @@ type Type string
 const (
 	// TypeUpload carries an upload job's progress.
 	TypeUpload Type = "upload"
+	// TypeDownload carries a download job's progress. Downloads are separate
+	// from uploads on the wire because the browser drives some of them itself
+	// and only reports in, while the server drives the staged ones end to end.
+	TypeDownload Type = "download"
 	// TypeIndex carries index rebuild progress.
 	TypeIndex Type = "index"
 	// TypeTelegram carries connection state changes, so the setup wizard
@@ -116,6 +120,18 @@ type UploadProgress struct {
 	Error        string `json:"error,omitempty"`
 	Source       string `json:"source,omitempty"`
 	SourceURL    string `json:"sourceUrl,omitempty"`
+}
+
+// DownloadProgress is the payload of a TypeDownload event.
+type DownloadProgress struct {
+	JobID      string `json:"jobId"`
+	FileID     string `json:"fileId,omitempty"`
+	Name       string `json:"name"`
+	Downloaded int64  `json:"downloaded"`
+	Total      int64  `json:"total"`
+	Mode       string `json:"mode,omitempty"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
 }
 
 // IndexProgress is the payload of a TypeIndex event.

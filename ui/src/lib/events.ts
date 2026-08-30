@@ -7,7 +7,7 @@
 
 import { currentToken, api } from './api'
 
-export type EventType = 'upload' | 'index' | 'telegram' | 'tree'
+export type EventType = 'upload' | 'download' | 'index' | 'telegram' | 'tree'
 
 export interface ServerEvent {
   type: EventType

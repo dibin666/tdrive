@@ -3,16 +3,28 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "node scripts/copy-libav.mjs && vite",
+    "build": "node scripts/copy-libav.mjs && tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "copy-libav": "node scripts/copy-libav.mjs"
   },
   "dependencies": {
+    "@libav.js/variant-webcodecs": "^6.10.9",
+    "@vidstack/react": "^0.6.15",
+    "@zip.js/zip.js": "^2.8.61",
     "clsx": "^2.1.1",
+    "dompurify": "^3.4.14",
+    "libavjs-webcodecs-polyfill": "^0.5.5",
     "lucide-react": "^1.35.0",
+    "mammoth": "^1.12.2",
+    "marked": "^18.0.11",
+    "mediabunny": "^1.55.3",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "shiki": "^4.4.3",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
