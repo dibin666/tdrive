@@ -63,6 +63,14 @@ type Service struct {
 	downloadSessionsMu sync.Mutex
 	downloadSessions   map[string]*downloadSession
 
+	// clientDownloads are the transfers a mounted client pulls for itself,
+	// keyed by the same session key as downloadSessions; clientJobs indexes the
+	// same records by job id so a cancellation from the transfer panel can find
+	// one. The mutex guards the maps and every field of the records inside.
+	clientDownloadsMu sync.Mutex
+	clientDownloads   map[string]*clientDownload
+	clientJobs        map[string]*clientDownload
+
 	// jobRunMu guards jobRuns, the set of upload jobs a goroutine is already
 	// working on. ResumeRemotes runs whenever Telegram becomes ready rather
 	// than only at startup, so a job that is still running must not pick up a
@@ -91,6 +99,8 @@ func New(cfg *config.Config, db *database.DB, backend Backend, log *zap.Logger) 
 		downloadLimiter:  newTaskLimiter(settings.DownloadConcurrency),
 		uploadJobs:       make(map[string]*uploadJobLease),
 		downloadSessions: make(map[string]*downloadSession),
+		clientDownloads:  make(map[string]*clientDownload),
+		clientJobs:       make(map[string]*clientDownload),
 		jobRuns:          make(map[string]struct{}),
 		stageRuns:        make(map[string]struct{}),
 		stageCancels:     make(map[string]context.CancelFunc),
@@ -218,6 +228,14 @@ func (s *Service) List(ctx context.Context, p string) ([]Entry, error) {
 		return nil, err
 	}
 
+	// A folder with no size is a dash in every column that matters, so the
+	// listing carries the weight of each subtree. It is one extra query for the
+	// whole directory rather than one per row.
+	sizes, err := s.db.SubtreeSizes(ctx, dir.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	base := dir.Path
 	if base == "" {
 		base = Root
@@ -225,7 +243,9 @@ func (s *Service) List(ctx context.Context, p string) ([]Entry, error) {
 
 	out := make([]Entry, 0, len(dirs)+len(files))
 	for _, d := range dirs {
-		out = append(out, dirEntry(d))
+		entry := dirEntry(d)
+		entry.Size = sizes[d.ID]
+		out = append(out, entry)
 	}
 	for _, f := range files {
 		out = append(out, fileEntry(f, Join(base, f.Name)))

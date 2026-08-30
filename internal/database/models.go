@@ -181,6 +181,11 @@ const (
 	// DownloadSegments hands the client one link per stored segment and lets
 	// it join them locally.
 	DownloadSegments DownloadMode = "segments"
+	// DownloadWebDAV is a mounted client reading a file. Nothing on the server
+	// asked for it and nothing reports when it is done, so the row is opened
+	// and settled by the read session itself; it exists so that a 40 GB pull
+	// through /dav is visible in the transfer panel like any other transfer.
+	DownloadWebDAV DownloadMode = "webdav"
 )
 
 // DownloadStatus is the lifecycle of a download job. Staged jobs stop at

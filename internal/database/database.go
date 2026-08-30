@@ -103,7 +103,7 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 
 // schemaVersion is what schema.sql describes. Anything older is brought up to
 // it by the steps in migrate.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // upgradeSteps are the statements that take an existing database from the
 // version keyed here to the next one. A fresh database skips all of them,
@@ -198,6 +198,44 @@ var upgradeSteps = map[int][]string{
 		)`,
 		`CREATE INDEX idx_audit_at ON audit_log (at)`,
 		`CREATE INDEX idx_audit_actor ON audit_log (actor_id)`,
+	},
+	3: {
+		// A WebDAV read is now recorded as a download so it shows up in the
+		// transfer panel, and 'webdav' is a mode the old CHECK constraint would
+		// reject. SQLite cannot alter a constraint in place, so the table is
+		// rebuilt — which also means its indexes have to be recreated, since
+		// they go with the dropped table.
+		`CREATE TABLE download_jobs_v4 (
+			id               TEXT PRIMARY KEY,
+			user_id          TEXT REFERENCES users (id) ON DELETE CASCADE,
+			file_id          TEXT REFERENCES files (id) ON DELETE SET NULL,
+			name             TEXT NOT NULL,
+			total_size       INTEGER NOT NULL,
+			downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+			mode             TEXT NOT NULL DEFAULT 'direct'
+			                 CHECK (mode IN ('direct', 'staged', 'segments', 'webdav')),
+			status           TEXT NOT NULL
+			                 CHECK (status IN ('pending', 'running', 'ready', 'complete', 'failed', 'cancelled', 'expired')),
+			error            TEXT NOT NULL DEFAULT '',
+			cache_path       TEXT NOT NULL DEFAULT '',
+			created_at       INTEGER NOT NULL,
+			updated_at       INTEGER NOT NULL,
+			started_at       INTEGER NOT NULL DEFAULT 0,
+			finished_at      INTEGER NOT NULL DEFAULT 0,
+			expires_at       INTEGER NOT NULL DEFAULT 0,
+			last_used_at     INTEGER NOT NULL DEFAULT 0
+		)`,
+		`INSERT INTO download_jobs_v4
+		 SELECT id, user_id, file_id, name, total_size, downloaded_bytes, mode, status,
+		        error, cache_path, created_at, updated_at, started_at, finished_at,
+		        expires_at, last_used_at
+		 FROM download_jobs`,
+		`DROP TABLE download_jobs`,
+		`ALTER TABLE download_jobs_v4 RENAME TO download_jobs`,
+		`CREATE INDEX idx_downloads_user ON download_jobs (user_id)`,
+		`CREATE INDEX idx_downloads_status ON download_jobs (status)`,
+		`CREATE INDEX idx_downloads_created ON download_jobs (created_at)`,
+		`CREATE INDEX idx_downloads_used ON download_jobs (last_used_at)`,
 	},
 }
 

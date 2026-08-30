@@ -257,7 +257,6 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
             name: entry.name,
             size: entry.size,
             mode: 'direct',
-            connections: 1,
           })
           return
         } catch (err) {
@@ -1062,8 +1061,11 @@ function FileRow({
           <SegmentBadge entry={entry} />
           <BrokenBadge entry={entry} />
         </div>
-        <span className="hidden text-right text-xs tabular-nums text-[var(--muted)] sm:block">
-          {entry.isDir ? '—' : formatBytes(entry.size)}
+        <span
+          className="hidden text-right text-xs tabular-nums text-[var(--muted)] sm:block"
+          title={entry.isDir ? '文件夹内所有文件的总大小' : undefined}
+        >
+          {formatBytes(entry.size)}
         </span>
         <span className="hidden text-xs text-[var(--muted)] sm:block">
           {formatDate(entry.modifiedAt)}
@@ -1082,7 +1084,8 @@ function FileRow({
           )}
         </div>
         <span className="text-xs text-[var(--faint)] sm:hidden">
-          {entry.isDir ? '文件夹' : formatBytes(entry.size)} · {formatDate(entry.modifiedAt)}
+          {entry.isDir ? `文件夹 · ${formatBytes(entry.size)}` : formatBytes(entry.size)} ·{' '}
+          {formatDate(entry.modifiedAt)}
         </span>
       </div>
 
@@ -1158,7 +1161,7 @@ function GridTile({
       <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} size={22} />
       <span className="line-clamp-2 w-full break-all text-sm leading-snug">{entry.name}</span>
       <span className="flex items-center gap-1.5 text-[11px] text-[var(--faint)]">
-        {entry.isDir ? '文件夹' : formatBytes(entry.size)}
+        {entry.isDir ? `文件夹 · ${formatBytes(entry.size)}` : formatBytes(entry.size)}
         <SegmentBadge entry={entry} />
       </span>
     </button>

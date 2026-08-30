@@ -1,23 +1,22 @@
 // Browser-side downloading.
 //
 // The server can already serve any byte range of any file, so the interesting
-// work here is deciding how to ask for those ranges and where to put them.
+// work here is deciding who asks for those ranges.
 //
-// Three shapes, matching the three modes the server describes:
+// Two of the three modes do not ask at all. Direct and staged hand a tokenised
+// URL to the browser's own downloader, which streams to the downloads folder,
+// resumes, and shows up in the browser's download list — all of which this code
+// used to reimplement with parallel range requests, and none of which it did as
+// well. The parallelism also had to buffer out-of-order bytes somewhere, which
+// on a browser without the File System Access API meant a copy of the file in
+// the tab's memory. Handing over the URL removes that whole class of problem;
+// anyone who genuinely wants eight connections has the reusable direct link and
+// a real download manager to point at it.
 //
-//   direct    N parallel range requests against the whole logical file
-//   staged    ask the server to assemble the file on its disk first, then pull
-//             that with the same N parallel requests — much safer for a file
-//             spread across a dozen Telegram objects
-//   segments  N parallel requests, but each one is a whole stored segment, and
-//             the pieces are joined locally
-//
-// Parallelism needs somewhere to write out-of-order bytes. With the File
-// System Access API that is a real file on disk and a 40 GB download costs a
-// few megabytes of memory. Without it — Firefox, Safari — the only option is
-// to assemble in memory, so those browsers get a single-connection stream
-// straight to the downloads folder instead, and a many-segment file is offered
-// as separate parts plus a join script.
+// Segments is the exception, because there is nothing to hand over: a split
+// file exists in Telegram as several objects and only becomes one file once
+// something joins them. That join happens here, against a real file on disk;
+// browsers without disk access get the parts separately plus a merge script.
 
 import { api, currentToken, segmentRawUrl, type DownloadMode, type SegmentBound } from './api'
 
@@ -42,8 +41,6 @@ export interface LocalDownload {
   error?: string
   /** Server-side job id, for staged downloads and for progress reporting. */
   jobId?: string
-  /** How many connections this transfer is using right now. */
-  connections: number
   startedAt: number
   finishedAt?: number
   /** Set when the browser could not write to disk and fell back to parts. */
@@ -52,10 +49,10 @@ export interface LocalDownload {
 
 type Listener = (downloads: LocalDownload[]) => void
 
-/** One range request asks for this much. Small enough that a failure costs
- *  little and progress moves visibly; large enough that the per-request
- *  overhead stays irrelevant. */
-const CHUNK_SIZE = 8 * 1024 * 1024
+/** How many stored segments are fetched at once while a split file is joined
+ *  locally. Segments are large, so a handful of requests saturates a link
+ *  without becoming a burst the server has to throttle. */
+const SEGMENT_CONCURRENCY = 4
 
 /** A chunk is retried a few times before the transfer gives up, since the
  *  usual cause is a transient network blip or a Telegram hiccup the server
@@ -121,11 +118,10 @@ export interface StartOptions {
   name: string
   size: number
   mode: DownloadMode
-  /** Parallel connections, bounded by the server's own limit. */
-  connections: number
   segmentBounds?: SegmentBound[]
-  /** Pre-opened save target. It has to be created inside the click handler
-   *  that started the download, because the picker requires user activation. */
+  /** Pre-opened save target, needed only by segments mode. It has to be
+   *  created inside the click handler that started the download, because the
+   *  picker requires user activation. */
   saveHandle?: FileSystemFileHandle | null
   /** Called once the download finishes successfully. */
   onDone?: () => void
@@ -220,7 +216,6 @@ class DownloadManager {
       speed: 0,
       state: 'preparing',
       mode: options.mode,
-      connections: 0,
       startedAt: Date.now(),
     }
     this.downloads.set(id, entry)
@@ -247,44 +242,25 @@ class DownloadManager {
         throw new DOMException('aborted', 'AbortError')
       }
 
-      let sourceUrl = `/api/files/${options.fileId}/raw?download=1`
-      let sourceSize = options.size
-
       if (options.mode === 'staged') {
-        const ready = await this.awaitStaged(id, job.id, controller.signal)
-        sourceUrl = ready.url ?? `/api/downloads/${job.id}/file`
-        sourceSize = ready.totalSize || options.size
+        // Staging is worth waiting for: the server joins a dozen Telegram
+        // objects into one file on its own disk, and only then is there a
+        // single URL worth handing to the browser.
+        await this.awaitStaged(id, job.id, controller.signal)
       }
 
       this.update(id, { state: 'downloading' })
 
-      if (!options.saveHandle && options.connections <= 1 &&
-        (options.mode === 'direct' || options.mode === 'staged')) {
-        // A native browser download streams to the downloads folder without
-        // buffering the file in JavaScript. The media token also works with the
-        // raw endpoint's staged-copy preference, so staged mode still uses the
-        // assembled file when it is ready.
-        const link = await api.mediaLink(options.fileId)
-        if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError')
-        simpleDownload(link.download, options.name)
-        this.update(id, {
-          state: 'complete',
-          received: options.size,
-          speed: 0,
-          finishedAt: Date.now(),
-          connections: 0,
-        })
-        void api
-          .reportDownload(job.id, { downloaded: options.size, status: 'complete' })
-          .catch(() => {})
-        options.onDone?.()
-        return
-      }
-
       if (options.mode === 'segments' && options.segmentBounds?.length) {
         await this.runSegments(id, options, controller.signal)
       } else {
-        await this.runRanges(id, options, sourceUrl, sourceSize, controller.signal)
+        // Direct and staged both end the same way: give the browser a URL it
+        // can authenticate with and let it do the downloading.
+        const link = await api.mediaLink(options.fileId)
+        if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError')
+        // The media token also works with the raw endpoint's staged-copy
+        // preference, so staged mode still serves the assembled file.
+        simpleDownload(link.download, options.name)
       }
 
       this.update(id, {
@@ -292,7 +268,6 @@ class DownloadManager {
         received: options.size,
         speed: 0,
         finishedAt: Date.now(),
-        connections: 0,
       })
       if (this.downloads.get(id)?.jobId) {
         void api
@@ -302,7 +277,7 @@ class DownloadManager {
       options.onDone?.()
     } catch (err) {
       if (controller.signal.aborted) {
-        this.update(id, { state: 'cancelled', speed: 0, connections: 0 })
+        this.update(id, { state: 'cancelled', speed: 0 })
         // A cancelled transfer must not resolve like a finished one. Callers
         // that reported success on resolution were announcing "下载完成" for a
         // download the user had just stopped.
@@ -311,7 +286,7 @@ class DownloadManager {
           : new DOMException('download cancelled', 'AbortError')
       }
       const message = err instanceof Error ? err.message : String(err)
-      this.update(id, { state: 'failed', error: message, speed: 0, connections: 0 })
+      this.update(id, { state: 'failed', error: message, speed: 0 })
       const jobId = this.downloads.get(id)?.jobId
       if (jobId) {
         void api.reportDownload(jobId, { status: 'failed', error: message }).catch(() => {})
@@ -339,44 +314,9 @@ class DownloadManager {
 
       // While staging, the meaningful number is how much the server has
       // fetched, so it is shown in place of local progress.
-      this.update(id, {
-        state: 'preparing',
-        received: job.downloadedBytes,
-        connections: 1,
-      })
+      this.update(id, { state: 'preparing', received: job.downloadedBytes })
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
-  }
-
-  /** runRanges downloads one contiguous object with N parallel connections. */
-  private async runRanges(
-    id: string,
-    options: StartOptions,
-    url: string,
-    size: number,
-    signal: AbortSignal,
-  ) {
-    const sink = await this.openSink(id, options, size)
-
-    const chunks: { start: number; end: number }[] = []
-    for (let offset = 0; offset < size; offset += CHUNK_SIZE) {
-      chunks.push({ start: offset, end: Math.min(offset + CHUNK_SIZE, size) - 1 })
-    }
-    // A zero-byte file still has to produce a file on disk.
-    if (chunks.length === 0) {
-      await sink.close()
-      return
-    }
-
-    const workers = Math.max(1, Math.min(options.connections, chunks.length))
-    await this.pump(id, chunks.length, workers, signal, sink, async (index) => {
-      const chunk = chunks[index]
-      const body = await this.fetchRange(url, chunk.start, chunk.end, signal)
-      await sink.write(chunk.start, body)
-      return body.byteLength
-    })
-
-    await sink.close()
   }
 
   /** runSegments downloads each stored segment and joins them locally. */
@@ -391,7 +331,7 @@ class DownloadManager {
     }
 
     const sink = await this.openSink(id, options, options.size)
-    const workers = Math.max(1, Math.min(options.connections, bounds.length))
+    const workers = Math.max(1, Math.min(SEGMENT_CONCURRENCY, bounds.length))
 
     await this.pump(id, bounds.length, workers, signal, sink, async (index) => {
       const bound = bounds[index]
@@ -418,10 +358,7 @@ class DownloadManager {
     bounds: SegmentBound[],
     signal: AbortSignal,
   ) {
-    this.update(id, {
-      note: '浏览器不支持直接写入磁盘，已改为逐卷下载并附带合并脚本',
-      connections: 1,
-    })
+    this.update(id, { note: '浏览器不支持直接写入磁盘，已改为逐卷下载并附带合并脚本' })
     const media = await api.mediaLink(options.fileId)
     const token = new URL(media.download, window.location.origin).searchParams.get('t')
     if (!token) throw new Error('无法生成分卷下载凭证')
@@ -462,8 +399,6 @@ class DownloadManager {
     let lastBytes = 0
     let speed = 0
 
-    this.update(id, { connections: workers })
-
     const report = () => {
       const now = performance.now()
       const dt = (now - lastTime) / 1000
@@ -502,7 +437,7 @@ class DownloadManager {
     }
     if (size > MEMORY_LIMIT) {
       throw new Error(
-        '这个浏览器不支持直接写入磁盘，而文件太大无法在内存中拼接。请改用单线程下载，或换用 Chrome / Edge。',
+        '这个浏览器不支持直接写入磁盘，而文件太大无法在内存中拼接。请改用直接下载或先暂存到服务器，或换用 Chrome / Edge。',
       )
     }
     this.update(id, { note: '浏览器不支持写入磁盘，正在内存中拼接' })

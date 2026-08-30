@@ -108,6 +108,11 @@ func (b *Broker) Publish(ev Event) {
 }
 
 // UploadProgress is the payload of a TypeUpload event.
+//
+// It carries enough to redraw a transfer row on its own. The transfer panel
+// used to answer an event by refetching the whole list, which meant the numbers
+// only moved as fast as that round trip; now the event is the update and the
+// refetch is just housekeeping.
 type UploadProgress struct {
 	JobID        string `json:"jobId"`
 	FileID       string `json:"fileId,omitempty"`
@@ -120,18 +125,23 @@ type UploadProgress struct {
 	Error        string `json:"error,omitempty"`
 	Source       string `json:"source,omitempty"`
 	SourceURL    string `json:"sourceUrl,omitempty"`
+	// Speed is bytes per second right now. Only the server can measure it for
+	// the transfers it drives itself, which is every WebDAV write, VPS-local
+	// upload and remote fetch.
+	Speed float64 `json:"speed,omitempty"`
 }
 
 // DownloadProgress is the payload of a TypeDownload event.
 type DownloadProgress struct {
-	JobID      string `json:"jobId"`
-	FileID     string `json:"fileId,omitempty"`
-	Name       string `json:"name"`
-	Downloaded int64  `json:"downloaded"`
-	Total      int64  `json:"total"`
-	Mode       string `json:"mode,omitempty"`
-	Status     string `json:"status"`
-	Error      string `json:"error,omitempty"`
+	JobID      string  `json:"jobId"`
+	FileID     string  `json:"fileId,omitempty"`
+	Name       string  `json:"name"`
+	Downloaded int64   `json:"downloaded"`
+	Total      int64   `json:"total"`
+	Mode       string  `json:"mode,omitempty"`
+	Status     string  `json:"status"`
+	Error      string  `json:"error,omitempty"`
+	Speed      float64 `json:"speed,omitempty"`
 }
 
 // IndexProgress is the payload of a TypeIndex event.

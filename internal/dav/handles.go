@@ -22,10 +22,11 @@ import (
 // and a PROPFIND-heavy client would otherwise open a Telegram connection for
 // every entry it looks at.
 type readHandle struct {
-	fs   *FileSystem
-	ctx  context.Context
-	file database.File
-	info fileInfo
+	fs     *FileSystem
+	ctx    context.Context
+	file   database.File
+	info   fileInfo
+	userID string
 
 	// sessionKey groups this handle's reads with the other requests belonging
 	// to the same logical download.
@@ -34,7 +35,11 @@ type readHandle struct {
 	mu      sync.Mutex
 	stream  *reader.File
 	release func()
-	pos     int64
+	// track is the transfer-panel record for this download. It is shared with
+	// every other request in the same session and settled once they have all
+	// finished.
+	track *drive.ClientRead
+	pos   int64
 }
 
 func (h *readHandle) ensure() error {
@@ -57,8 +62,22 @@ func (h *readHandle) ensure() error {
 			return err
 		}
 	}
+
+	// Tracking starts here rather than in OpenFile because webdav.Handler opens
+	// and stats a file for reasons that never read a byte — PROPFIND, and
+	// ServeContent measuring the length — and a transfer row for each of those
+	// would be noise, not history. A failure to record is not a reason to
+	// refuse the download.
+	track, err := h.fs.drive.TrackClientDownload(
+		h.ctx, h.sessionKey, h.userID, h.file, database.DownloadWebDAV)
+	if err != nil {
+		h.fs.log.Warn("could not record a webdav download",
+			zap.String("file", h.file.ID), zap.Error(err))
+	}
+
 	h.stream = stream
 	h.release = release
+	h.track = track
 	return nil
 }
 
@@ -74,6 +93,11 @@ func (h *readHandle) Read(p []byte) (int, error) {
 	}
 	n, err := h.stream.Read(p)
 	h.pos += int64(n)
+	// A cancellation from the transfer panel arrives as an error here, because
+	// refusing to serve more bytes is the only way to stop a mounted client.
+	if trackErr := h.track.Add(int64(n)); trackErr != nil && err == nil {
+		return n, trackErr
+	}
 	return n, err
 }
 
@@ -107,16 +131,20 @@ func (h *readHandle) Seek(offset int64, whence int) (int64, error) {
 
 func (h *readHandle) Close() error {
 	h.mu.Lock()
-	var release func()
+	var (
+		release func()
+		track   *drive.ClientRead
+	)
 	if h.stream != nil {
 		err := h.stream.Close()
 		h.stream = nil
-		release = h.release
-		h.release = nil
+		release, track = h.release, h.track
+		h.release, h.track = nil, nil
 		h.mu.Unlock()
 		if release != nil {
 			release()
 		}
+		track.Close()
 		return err
 	}
 	h.mu.Unlock()

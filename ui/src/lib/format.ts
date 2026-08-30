@@ -133,9 +133,13 @@ export function kindOf(name: string, mime?: string): FileKind {
 
 /** previewable reports whether the preview modal has anything to show, so a
  *  double-click on an opaque binary opens the details rather than a spinner
- *  followed by a shrug. */
+ *  followed by a shrug.
+ *
+ *  Video counts as not previewable: playback in the browser was removed, and
+ *  offering a preview that can only say "download this instead" is worse than
+ *  going straight to the file's details. */
 export function isPreviewable(kind: FileKind): boolean {
-  return kind !== 'other' && kind !== 'font'
+  return kind !== 'other' && kind !== 'font' && kind !== 'video'
 }
 
 /** Files above this size are not previewed inline as text, because the whole

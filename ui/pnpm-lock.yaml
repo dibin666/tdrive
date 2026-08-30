@@ -8,12 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@libav.js/variant-webcodecs':
-        specifier: ^6.10.9
-        version: 6.10.9
-      '@vidstack/react':
-        specifier: ^0.6.15
-        version: 0.6.15(@types/react@19.2.18)(maverick.js@0.37.0)(react@19.2.8)(vidstack@0.6.15)
       '@zip.js/zip.js':
         specifier: ^2.8.61
         version: 2.8.61
@@ -23,9 +17,6 @@ importers:
       dompurify:
         specifier: ^3.4.14
         version: 3.4.14
-      libavjs-webcodecs-polyfill:
-        specifier: ^0.5.5
-        version: 0.5.5
       lucide-react:
         specifier: ^1.35.0
         version: 1.35.0(react@19.2.8)
@@ -93,15 +84,6 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
-
-  '@libav.js/types@6.10.9':
-    resolution: {integrity: sha512-AdngxD/VO8OI6/w7wlJC77kuFcsSvCUuo2RuC6gGeSW2DEvbzgBo2JtFLV6UWZp/tRNZhKm6jS0Tv8gwCKBHLg==}
-
-  '@libav.js/variant-webcodecs@6.10.9':
-    resolution: {integrity: sha512-3BYPHizGbUIXU07sDKIgTxJkLlmsXb8KYWfpHy2wrAVvv8scrOMcNcXMQX2d4Cd3X5AMVw5QXszPK5Svv2FjwA==}
-
-  '@maverick-js/signals@5.11.5':
-    resolution: {integrity: sha512-/GO94awrwN9ROYZDMTeByordjvbhcm3CMvB/2aL/sEUy9Va8nM/2GmNgOOe+rrooTGnz8/DzO73xomuBRrnYWw==}
 
   '@napi-rs/canvas-android-arm64@1.0.8':
     resolution: {integrity: sha512-5+nkh8i3gt6lqS/d2jTZ1xAn6tdgtB4Lf1mW6T0Qm5/rXNwBuV1sAEyLEWan5o9gJPU/GuvHR3rvSeZ+FaGrbw==}
@@ -551,20 +533,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@ungap/global-this@0.4.4':
-    resolution: {integrity: sha512-mHkm6FvepJECMNthFuIgpAEFmPOk71UyXuIxYfjytvFTnSDBIz7jmViO+LfHI/AjrazWije0PnSP3+/NlwzqtA==}
-
   '@ungap/structured-clone@1.4.0':
     resolution: {integrity: sha512-1mEZtMKPM09vDmQt5y7YvmN2+DFTP7Tg0EWXdic8/C6VRnpb33e4ghisCIE3WZjsE2N8mf+QV1Zqh7ZFYLWInQ==}
-
-  '@vidstack/react@0.6.15':
-    resolution: {integrity: sha512-S8KkYCte84Pqwb8Zd9vuOCe2YuaXqRdtYQ22zSvDUPlS7m8ilYs6ypfHwZzmgSVZdayVU1C703aFMSdcLfpxpg==}
-    engines: {node: '>=16'}
-    peerDependencies:
-      '@types/react': ^18.0.0
-      maverick.js: 0.37.0
-      react: ^18.0.0
-      vidstack: 0.6.15
 
   '@vitejs/plugin-react@6.1.1':
     resolution: {integrity: sha512-yxLaQV9gkhS8ezJqCM6+ndU7mDY6gqAg75NQ+0IjwEI8IYOmQCgkRwHKVSfWXW076DsqMo0Dk+0FK1U+M5RgFw==}
@@ -707,9 +677,6 @@ packages:
 
   jszip@3.10.1:
     resolution: {integrity: sha512-xXDvecyTpGLrqFrvkrUSoxxfJI5AH7U8zxxtVclpsUtMCq4JQ290LY8AW5c7Ggnr/Y/oK+bQMbqK2qmtk3pN4g==}
-
-  libavjs-webcodecs-polyfill@0.5.5:
-    resolution: {integrity: sha512-1RhFwKgYg/dsn0Ej4kf0z35t6G3/JZnStKqPHArOqALlvwG654NZes0AFXaJGzRLBknwLXiKw9qlemct97YE7w==}
 
   lie@3.3.0:
     resolution: {integrity: sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==}
@@ -883,16 +850,8 @@ packages:
     engines: {node: '>= 20'}
     hasBin: true
 
-  maverick.js@0.37.0:
-    resolution: {integrity: sha512-1Dk/9rienLiihlktVvH04ADC2UJTMflC1fOMVQCCaQAaz7hgzDI5i0p/arFbDM52hFFiIcq4RdXtYz47SgsLgw==}
-    engines: {node: '>=16'}
-
   mdast-util-to-hast@13.2.1:
     resolution: {integrity: sha512-cctsq2wp5vTsLIcaymblUriiTcZd0CwWtCbLvrOzYCDZoWyMNV8sZ7krj09FSnsiJi3WVsHLM4k6Dq/yaPyCXA==}
-
-  media-captions@0.0.18:
-    resolution: {integrity: sha512-JW18P6FuHdyLSGwC4TQ0kF3WdNj/+wMw2cKOb8BnmY6vSJGtnwJ+vkYj+IjHOV34j3XMc70HDeB/QYKR7E7fuQ==}
-    engines: {node: '>=16'}
 
   mediabunny@1.55.3:
     resolution: {integrity: sha512-kpBhMiJHGmerizzObAT1XLZDyImO4ZEKXaxjjfxGVkycQ0U5of/xlLepm1Izp3P+3jlaedFSRI5fJnv3Q5xV6A==}
@@ -1027,10 +986,6 @@ packages:
   trim-lines@3.0.1:
     resolution: {integrity: sha512-kRj8B+YHZCc9kQYdWfJB2/oUl9rA99qbowYYBtr4ui4mZyAQ2JpvVBd/6U2YloATfqBhBTSMhTpgBHtU0Mf3Rg==}
 
-  type-fest@3.13.1:
-    resolution: {integrity: sha512-tLq3bSNx+xSpwvAJnzrK0Ep5CLNWjvFTOp71URMaAEWBfRb9nnJiBoUe0tF8bI4ZFO3omgBR6NvnbzVUT3Ly4g==}
-    engines: {node: '>=14.16'}
-
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
@@ -1062,10 +1017,6 @@ packages:
 
   vfile@6.0.3:
     resolution: {integrity: sha512-KzIbH/9tXat2u30jf+smMwFCsno4wHVdNmzFyL+T/L3UGqqk6JKfVqOFOZEpZSHADH1k40ab6NUIXZq422ov3Q==}
-
-  vidstack@0.6.15:
-    resolution: {integrity: sha512-pI2aixBuOpu/LSnRgNJ40tU/KFW+x1X+O2bW1hz946ZZShDM5oqRXF9pavDOuckHAHPgUN9HYUr9vUNTBUPF1Q==}
-    engines: {node: '>=16'}
 
   vite@8.2.2:
     resolution: {integrity: sha512-cFKLV/PRgAUlIRm5WjMjJ86jrftzpqcgH+Us+DS8mI3CDNiH30Whrz8uHL3+MOLPAgqbMBAqWdAHAphOAM+z/Q==}
@@ -1150,12 +1101,6 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
-
-  '@libav.js/types@6.10.9': {}
-
-  '@libav.js/variant-webcodecs@6.10.9': {}
-
-  '@maverick-js/signals@5.11.5': {}
 
   '@napi-rs/canvas-android-arm64@1.0.8':
     optional: true
@@ -1449,16 +1394,7 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@ungap/global-this@0.4.4': {}
-
   '@ungap/structured-clone@1.4.0': {}
-
-  '@vidstack/react@0.6.15(@types/react@19.2.18)(maverick.js@0.37.0)(react@19.2.8)(vidstack@0.6.15)':
-    dependencies:
-      '@types/react': 19.2.18
-      maverick.js: 0.37.0
-      react: 19.2.8
-      vidstack: 0.6.15
 
   '@vitejs/plugin-react@6.1.1(vite@8.2.2(jiti@2.7.0))':
     dependencies:
@@ -1570,11 +1506,6 @@ snapshots:
       pako: 1.0.11
       readable-stream: 2.3.8
       setimmediate: 1.0.5
-
-  libavjs-webcodecs-polyfill@0.5.5:
-    dependencies:
-      '@libav.js/types': 6.10.9
-      '@ungap/global-this': 0.4.4
 
   lie@3.3.0:
     dependencies:
@@ -1707,11 +1638,6 @@ snapshots:
 
   marked@18.0.11: {}
 
-  maverick.js@0.37.0:
-    dependencies:
-      '@maverick-js/signals': 5.11.5
-      type-fest: 3.13.1
-
   mdast-util-to-hast@13.2.1:
     dependencies:
       '@types/hast': 3.0.5
@@ -1723,8 +1649,6 @@ snapshots:
       unist-util-position: 5.0.0
       unist-util-visit: 5.1.0
       vfile: 6.0.3
-
-  media-captions@0.0.18: {}
 
   mediabunny@1.55.3:
     dependencies:
@@ -1877,8 +1801,6 @@ snapshots:
 
   trim-lines@3.0.1: {}
 
-  type-fest@3.13.1: {}
-
   typescript@7.0.2:
     optionalDependencies:
       '@typescript/typescript-aix-ppc64': 7.0.2
@@ -1938,12 +1860,6 @@ snapshots:
     dependencies:
       '@types/unist': 3.0.3
       vfile-message: 4.0.3
-
-  vidstack@0.6.15:
-    dependencies:
-      maverick.js: 0.37.0
-      media-captions: 0.0.18
-      type-fest: 3.13.1
 
   vite@8.2.2(jiti@2.7.0):
     dependencies:

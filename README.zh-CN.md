@@ -7,10 +7,9 @@
 ## 功能特性
 
 - **Web 文件管理器** — 内置现代化 Web UI，右键菜单、Ctrl / Shift 多选、框选、键盘快捷键、批量重命名；移动端支持长按、左滑操作和下拉刷新
-- **多格式在线预览** — 视频、图片（缩放平移）、音频、PDF（pdf.js 分页渲染）、代码高亮、Markdown、Excel、Word 和 zip 目录浏览
-- **H.265 / MKV 播放** — 三级回退：浏览器原生 → WebCodecs 硬件解码 + 画布渲染 → WebAssembly 软件解码，MKV 容器和 HEVC 编码都能直接在线看
+- **多格式在线预览** — 图片（缩放平移）、音频、PDF（pdf.js 分页渲染）、代码高亮、Markdown、Excel、Word 和 zip 目录浏览。视频不在浏览器里播放：直接下载，或者把下载直链丢给本地播放器
 - **可复用下载直链** — 生成带独立令牌的完整 URL，可粘贴到 aria2、IDM、迅雷或另一台设备，支持多线程和断点续传，可随时撤销
-- **多种下载方式** — 直接下载 / 服务器暂存后下载 / 分卷分别下载再本地合并；分卷大文件默认推荐先暂存，最稳妥
+- **多种下载方式** — 直接下载 / 服务器暂存后下载 / 分卷分别下载再本地合并；直接下载和暂存下载都是把带令牌的直链交给浏览器自己下，和平时下载网页文件一样支持续传；分卷大文件默认推荐先暂存，最稳妥
 - **WebDAV** — 作为网络硬盘挂载，兼容 rclone、macOS Finder、Windows Explorer 等客户端；与 WebUI 共用同一套并发限制和权限
 - **大文件分片** — 自动将文件按 ~1.9 GB 分片存储到 Telegram，突破单文件 2 GB 上限；跨分片的 HTTP Range 请求对客户端完全透明
 - **浏览器分片上传** — 前端按服务器的分片边界切割文件并逐片上传，断点只丢一个分片而非整个文件，支持并发和续传
@@ -19,7 +18,7 @@
 - **并行下载** — 多连接并发预取 1 MiB 块，替代单连接顺序读取，下载速度显著提升
 - **索引重建** — 数据库只是缓存；丢失或损坏后可从 Telegram 频道完整重建目录树、文件元数据和归属关系
 - **多用户** — JWT 认证、角色管理、12 项细粒度权限、按用户限定目录范围、存储配额、账号启停、登录会话管理和操作审计日志
-- **传输中心** — 上传和下载合并为一个可筛选的列表：按类型 / 状态 / 来源 / 日期区间筛选，显示平均速度和用时，可删除历史记录
+- **传输中心** — 上传和下载合并为一个可筛选的列表：按类型 / 状态 / 来源 / 日期区间筛选，显示实时速度、平均速度和用时，可删除历史记录。服务器自己驱动的传输（WebDAV 上传下载、VPS 本地上传、离线下载、服务器暂存）由服务端计时，进度走 SSE 推送，不用手动刷新
 - **轻量部署** — 单二进制 + 一个 SQLite 文件，纯 Go 编译无需 CGO；提供 amd64 / arm64 多架构 Docker 镜像
 
 ## 快速开始
@@ -164,7 +163,7 @@ rclone ls tdrive:
 ## 技术栈
 
 - **后端** — Go, [gotd/td](https://github.com/gotd/td) (MTProto), [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite）
-- **前端** — React 19, Vite, Tailwind CSS 4, TypeScript；预览用 mediabunny / libav.js / pdf.js / shiki / SheetJS 等，全部按需懒加载
+- **前端** — React 19, Vite, Tailwind CSS 4, TypeScript；预览用 mediabunny / pdf.js / shiki / SheetJS 等，全部按需懒加载
 - **容器** — 多阶段 Dockerfile, distroless 基础镜像, GitHub Actions CI/CD
 
 ## 构建

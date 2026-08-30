@@ -31,11 +31,15 @@ export interface PreviewLink {
 }
 
 /** Each renderer is loaded only when a file of its kind is opened. Between
- *  pdf.js, shiki, SheetJS and the WASM decoder there is far too much here to
- *  put in the initial bundle. */
+ *  pdf.js, shiki and SheetJS there is far too much here to put in the initial
+ *  bundle.
+ *
+ *  Video is deliberately absent. Browsers cannot play the containers a
+ *  Telegram drive fills up with, and the demux-and-decode player that tried to
+ *  work around that never played reliably enough to be worth its weight, so a
+ *  video file offers the download instead of a player that fails. */
 const VIEWERS: Partial<Record<FileKind, ReturnType<typeof lazy>>> = {
   image: lazy(() => import('./ImageView')),
-  video: lazy(() => import('./VideoView')),
   audio: lazy(() => import('./AudioView')),
   pdf: lazy(() => import('./PdfView')),
   text: lazy(() => import('./CodeView')),

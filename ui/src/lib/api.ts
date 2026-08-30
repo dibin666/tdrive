@@ -174,9 +174,18 @@ export interface UploadJob {
   finishedAt?: number
   /** Bytes per second across the window the transfer was actually moving. */
   avgSpeed?: number
+  /** Current bytes per second, set only for transfers the server drives
+   *  itself — WebDAV writes, VPS-local uploads and remote fetches. A browser
+   *  upload reports its own rate and leaves this absent. */
+  speed?: number
 }
 
+/** The modes a client can ask the server for. */
 export type DownloadMode = 'direct' | 'staged' | 'segments'
+
+/** The modes a recorded download can have. A WebDAV read is recorded but never
+ *  requested — the mount is what starts it — so it exists here and not above. */
+export type DownloadKind = DownloadMode | 'webdav'
 export type DownloadStatus =
   | 'pending'
   | 'running'
@@ -193,7 +202,7 @@ export interface DownloadJob {
   name: string
   totalSize: number
   downloadedBytes: number
-  mode: DownloadMode
+  mode: DownloadKind
   status: DownloadStatus
   error?: string
   createdAt: number
@@ -202,6 +211,8 @@ export interface DownloadJob {
   finishedAt?: number
   expiresAt?: number
   avgSpeed?: number
+  /** Current bytes per second of a staged download, which the server copies. */
+  speed?: number
   url?: string
 }
 

@@ -109,9 +109,15 @@ export function Switch({
           checked ? 'bg-[var(--color-clay)]' : 'bg-[var(--line-strong)]',
         )}
       >
+        {/* left-0 is not optional. Without a horizontal offset the knob falls
+            back to its static position, and inside a <button> that is the
+            centre of the element's own anonymous content box — which put the
+            knob past the right edge of the track, where a white circle on a
+            white page is simply invisible. The switch then had no visible
+            state at all. */}
         <span
           className={clsx(
-            'absolute top-0.5 size-4 rounded-full bg-white shadow-sm transition-transform',
+            'absolute top-0.5 left-0 size-4 rounded-full bg-white shadow-sm transition-transform',
             checked ? 'translate-x-[1.125rem]' : 'translate-x-0.5',
           )}
         />

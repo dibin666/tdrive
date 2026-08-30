@@ -32,6 +32,9 @@ type Server struct {
 	setLogLevel func(string) error
 	settingsMu  sync.Mutex
 	progress    *liveUploadProgress
+	// downloadRates times the staged downloads this process is copying, which
+	// is the only place their speed can be measured.
+	downloadRates *liveRates
 }
 
 func New(
@@ -52,10 +55,11 @@ func New(
 	server := &Server{
 		cfg: cfg, db: db, auth: authSvc, drive: driveSvc,
 		tg: tgm, index: idx, events: broker, log: log, setLogLevel: applyLogLevel,
-		progress: newLiveUploadProgress(),
+		progress:      newLiveUploadProgress(),
+		downloadRates: newLiveRates(),
 	}
 	wireRemoteProgress(driveSvc, broker, server.progress)
-	wireDownloadProgress(driveSvc, broker)
+	wireDownloadProgress(driveSvc, broker, server.downloadRates)
 	return server
 }
 

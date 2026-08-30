@@ -7,10 +7,9 @@ Turn your Telegram account into a network drive with unlimited storage.
 ## Features
 
 - **Web file manager** — right-click menus, Ctrl/Shift multi-select, rubber-band selection, keyboard shortcuts and batch rename; long-press, swipe actions and pull-to-refresh on touch devices
-- **Rich preview** — video, images (zoom and pan), audio, PDF (paged pdf.js rendering), syntax-highlighted code, Markdown, spreadsheets, Word documents and zip contents
-- **H.265 and MKV playback** — three tiers: native playback, then WebCodecs hardware decoding onto a canvas, then a WebAssembly software decoder. MKV containers and HEVC streams play in the browser without server-side transcoding
+- **Rich preview** — images (zoom and pan), audio, PDF (paged pdf.js rendering), syntax-highlighted code, Markdown, spreadsheets, Word documents and zip contents. Video is not previewed in the browser: download it, or point a player at the reusable download link
 - **Reusable download links** — a full URL with its own token that can be pasted into aria2, IDM or another device, supports parallel connections and resume, and can be revoked at any time
-- **Download modes** — direct, server-staged, or per-segment with a local join. A multi-segment file defaults to staging, which is by far the most reliable
+- **Download modes** — direct, server-staged, or per-segment with a local join. Direct and staged both hand a tokenised URL to the browser's own downloader, so it streams to disk and resumes like any other download; a multi-segment file defaults to staging, which is by far the most reliable
 - **WebDAV** — mount as a network drive; compatible with rclone, macOS Finder, Windows Explorer, and other clients, sharing the same concurrency limits and permissions as the Web UI
 - **Segmented storage** — files are automatically split into ~1.9 GB segments to overcome Telegram's 2 GB per-object limit; cross-segment HTTP Range requests are fully transparent to clients
 - **Browser segmented upload** — the frontend slices files on the server's segment boundaries and uploads each slice; a dropped connection costs one segment instead of everything, with concurrency and resume support
@@ -19,7 +18,7 @@ Turn your Telegram account into a network drive with unlimited storage.
 - **Parallel download** — multiple concurrent 1 MiB chunk prefetches replace single-connection sequential reads, significantly improving download speed
 - **Index rebuild** — the database is just a cache; the directory tree, file metadata and ownership can all be reconstructed from the Telegram channel
 - **Multi-user** — JWT authentication, roles, twelve fine-grained permissions, per-account directory scoping, storage quotas, account enable/disable, session management and an audit log
-- **Transfer centre** — uploads and downloads in one filterable list: by kind, status, source and date range, with average speed and elapsed time, and deletable history
+- **Transfer centre** — uploads and downloads in one filterable list: by kind, status, source and date range, with live speed, average speed and elapsed time, and deletable history. Transfers the server drives itself — WebDAV reads and writes, VPS-local uploads, remote fetches, staged downloads — are timed server-side and stream their progress over SSE, so the list moves without being refreshed
 - **Lightweight deployment** — single binary + one SQLite file, pure Go with no CGO; multi-arch Docker images for amd64 / arm64
 
 ## Quick Start
@@ -169,7 +168,7 @@ rclone ls tdrive:
 ## Tech Stack
 
 - **Backend** — Go, [gotd/td](https://github.com/gotd/td) (MTProto), [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) (pure Go SQLite)
-- **Frontend** — React 19, Vite, Tailwind CSS 4, TypeScript; previews use mediabunny, libav.js, pdf.js, shiki and SheetJS, all lazily loaded
+- **Frontend** — React 19, Vite, Tailwind CSS 4, TypeScript; previews use mediabunny, pdf.js, shiki and SheetJS, all lazily loaded
 - **Container** — multi-stage Dockerfile, distroless base image, GitHub Actions CI/CD
 
 ## Build

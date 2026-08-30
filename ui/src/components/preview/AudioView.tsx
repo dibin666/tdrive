@@ -25,7 +25,7 @@ export default function AudioView({ entry, link }: ViewerProps) {
     }
   }, [link.url])
 
-  const unsupported = info?.strategy === 'software' || info?.strategy === 'unsupported'
+  const unsupported = info?.strategy === 'unsupported'
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-6 p-8">

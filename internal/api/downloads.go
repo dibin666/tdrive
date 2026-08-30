@@ -171,6 +171,9 @@ type downloadJobBody struct {
 	// AvgSpeed is bytes per second over the time the transfer was actually
 	// moving, so time spent queued behind the concurrency limit is excluded.
 	AvgSpeed float64 `json:"avgSpeed,omitempty"`
+	// Speed is the current rate of a staged download, which the server moves
+	// itself and therefore is the only thing able to time.
+	Speed float64 `json:"speed,omitempty"`
 	// URL is where the finished bytes can be fetched from.
 	URL string `json:"url,omitempty"`
 }
@@ -188,7 +191,9 @@ func (s *Server) downloadBody(job database.DownloadJob) downloadJobBody {
 		Error:           job.Error,
 		CreatedAt:       job.CreatedAt.UnixMilli(),
 		UpdatedAt:       job.UpdatedAt.UnixMilli(),
-		AvgSpeed:        averageSpeed(job.DownloadedBytes, job.StartedAt, job.FinishedAt),
+		AvgSpeed: averageSpeed(job.DownloadedBytes, job.StartedAt,
+			measuredUntil(job.FinishedAt, job.Status == database.DownloadPending || job.Status == database.DownloadRunning)),
+		Speed: s.downloadRates.speed(job.ID),
 	}
 	if !job.StartedAt.IsZero() {
 		body.StartedAt = job.StartedAt.UnixMilli()
@@ -395,6 +400,9 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		// A WebDAV read is served by this process, so it can genuinely be
+		// stopped: the next read refuses and the client's request ends.
+		s.drive.CancelClientDownload(job.ID)
 		// Direct and segmented downloads run entirely in the browser, so there
 		// is no worker to interrupt — but the row still has to leave the running
 		// state. Refusing to cancel it, which is what only handling staged jobs
@@ -455,6 +463,20 @@ func (s *Server) downloadForUser(r *http.Request, id string) (database.DownloadJ
 	return job, nil
 }
 
+// measuredUntil closes the window a transfer is measured over.
+//
+// A transfer still moving has no finish time, and reporting nothing until it
+// ends is why the details panel showed a dash for its whole run. Measuring a
+// running transfer against now is the honest answer. A transfer that ended
+// without recording a finish time keeps its zero: extending its window forever
+// would make its average speed fall towards zero long after it stopped.
+func measuredUntil(finished time.Time, running bool) time.Time {
+	if finished.IsZero() && running {
+		return time.Now()
+	}
+	return finished
+}
+
 // averageSpeed is bytes per second across a transfer's active window. It
 // returns zero rather than a wild number when the window is too short to
 // measure, which is the honest answer for a transfer that finished instantly.
@@ -471,8 +493,16 @@ func averageSpeed(bytes int64, started, finished time.Time) float64 {
 
 // wireDownloadProgress connects staged downloads to the event stream, mirroring
 // wireRemoteProgress on the upload side.
-func wireDownloadProgress(driveSvc *drive.Service, broker *events.Broker) {
+func wireDownloadProgress(driveSvc *drive.Service, broker *events.Broker, rates *liveRates) {
 	driveSvc.OnDownloadProgress = func(job database.DownloadJob, downloaded, total int64, err error) {
+		running := err == nil &&
+			(job.Status == database.DownloadPending || job.Status == database.DownloadRunning)
+		if running {
+			rates.observe(job.ID, downloaded)
+		} else {
+			rates.forget(job.ID)
+		}
+
 		payload := events.DownloadProgress{
 			JobID:      job.ID,
 			FileID:     job.FileID,
@@ -481,6 +511,7 @@ func wireDownloadProgress(driveSvc *drive.Service, broker *events.Broker) {
 			Total:      total,
 			Mode:       string(job.Mode),
 			Status:     string(job.Status),
+			Speed:      rates.speed(job.ID),
 		}
 		if err != nil {
 			payload.Status = string(database.DownloadFailed)

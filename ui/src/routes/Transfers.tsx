@@ -21,7 +21,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, type TransferRow } from '../lib/api'
-import { events } from '../lib/events'
+import { events, type ServerEvent } from '../lib/events'
 import { formatBytes, formatDate, formatDateTime, formatDuration, formatSpeed } from '../lib/format'
 import { uploads, type Transfer } from '../lib/uploads'
 import { downloads, type LocalDownload } from '../lib/downloads'
@@ -88,10 +88,60 @@ const STATUS_LABEL: Record<string, string> = {
   expired: '已过期',
 }
 
+/**
+ * What the event stream last said about a server-driven transfer.
+ *
+ * The transfer list is a snapshot, and refetching it is the slow way to learn
+ * that four more megabytes landed. Progress events already carry the byte
+ * count and the rate, so they are applied straight to the row and the refetch
+ * is left to catch the things an event does not carry — a row appearing, a
+ * status settling, a record being deleted.
+ */
+interface LiveSnapshot {
+  done: number
+  total: number
+  speed: number
+  /** When the event arrived, so a stalled transfer stops claiming a speed. */
+  at: number
+}
+
+/** How long an event's speed is still a description of what is happening. */
+const LIVE_SPEED_TTL = 5000
+/** Refetch at most this often while events are streaming in. */
+const RELOAD_INTERVAL = 1200
+/** And poll this often while anything is moving, in case the stream is not. */
+const ACTIVE_POLL_INTERVAL = 2000
+
+function liveFromEvent(event: ServerEvent): { key: string; value: LiveSnapshot } | null {
+  if (event.type === 'upload') {
+    const data = event.data as { jobId?: string; uploaded?: number; total?: number; speed?: number }
+    if (!data?.jobId) return null
+    return {
+      key: `upload:${data.jobId}`,
+      value: { done: data.uploaded ?? 0, total: data.total ?? 0, speed: data.speed ?? 0, at: Date.now() },
+    }
+  }
+  if (event.type === 'download') {
+    const data = event.data as { jobId?: string; downloaded?: number; total?: number; speed?: number }
+    if (!data?.jobId) return null
+    return {
+      key: `download:${data.jobId}`,
+      value: { done: data.downloaded ?? 0, total: data.total ?? 0, speed: data.speed ?? 0, at: Date.now() },
+    }
+  }
+  return null
+}
+
+function liveSpeed(snapshot?: LiveSnapshot): number {
+  if (!snapshot) return 0
+  return Date.now() - snapshot.at < LIVE_SPEED_TTL ? snapshot.speed : 0
+}
+
 export function Transfers() {
   const [local, setLocal] = useState<Transfer[]>([])
   const [localDownloads, setLocalDownloads] = useState<LocalDownload[]>([])
   const [remote, setRemote] = useState<TransferRow[]>([])
+  const [live, setLive] = useState<Map<string, LiveSnapshot>>(() => new Map())
   const [loading, setLoading] = useState(true)
 
   const [kind, setKind] = useState<KindFilter>('all')
@@ -124,6 +174,14 @@ export function Transfers() {
         limit: 400,
       })
       setRemote(result.transfers)
+      // Drop the event-stream overlay for anything the list no longer has, so
+      // the map does not accumulate a snapshot per transfer for the session.
+      setLive((prev) => {
+        if (prev.size === 0) return prev
+        const alive = new Set(result.transfers.map((row) => `${row.kind}:${row.id}`))
+        const next = new Map([...prev].filter(([key]) => alive.has(key)))
+        return next.size === prev.size ? prev : next
+      })
     } catch {
       /* a failed refresh leaves the previous list rather than blanking it */
     } finally {
@@ -135,17 +193,48 @@ export function Transfers() {
     void reload()
   }, [reload])
 
-  // Progress arrives over SSE far more often than a list refresh could poll
-  // for it, so the stream drives a debounced reload rather than the list
-  // being rebuilt per event.
-  const reloadTimer = useRef<number | undefined>(undefined)
+  // The subscription below must not be torn down and rebuilt every time a
+  // filter changes, so it reaches the current reload through a ref.
+  const reloadRef = useRef(reload)
+  reloadRef.current = reload
+
   useEffect(() => {
-    return events.subscribe((event) => {
-      if (event.type !== 'upload' && event.type !== 'download') return
-      window.clearTimeout(reloadTimer.current)
-      reloadTimer.current = window.setTimeout(() => void reload(), 600)
+    // Coalesce the refetch; do not debounce it. Progress events arrive several
+    // times a second for as long as a transfer runs, so a debounce cancelled
+    // itself on every event and the list only refreshed once everything had
+    // stopped — which is why this page appeared frozen until it was refreshed
+    // by hand. The first event schedules the refetch and the rest ride along.
+    let timer: number | undefined
+    const scheduleReload = () => {
+      if (timer !== undefined) return
+      timer = window.setTimeout(() => {
+        timer = undefined
+        void reloadRef.current()
+      }, RELOAD_INTERVAL)
+    }
+
+    const unsubscribe = events.subscribe((event) => {
+      const update = liveFromEvent(event)
+      if (!update) return
+      setLive((prev) => {
+        const next = new Map(prev)
+        const previous = next.get(update.key)
+        next.set(update.key, {
+          ...update.value,
+          // Upload callbacks for parts in flight can arrive out of order, and
+          // a byte count that goes backwards reads as a stall.
+          done: Math.max(update.value.done, previous?.done ?? 0),
+        })
+        return next
+      })
+      scheduleReload()
     })
-  }, [reload])
+
+    return () => {
+      unsubscribe()
+      window.clearTimeout(timer)
+    }
+  }, [])
 
   const setDensityMode = (next: Density) => {
     setDensity(next)
@@ -153,9 +242,21 @@ export function Transfers() {
   }
 
   const rows = useMemo(
-    () => mergeRows(local, localDownloads, remote),
-    [local, localDownloads, remote],
+    () => mergeRows(local, localDownloads, remote, live),
+    [local, localDownloads, remote, live],
   )
+
+  const hasActive = rows.some((row) => row.active)
+
+  // A poll on top of the stream. Events are one long-lived HTTP response, and
+  // a proxy that buffers it or a machine that slept leaves the page silently
+  // stale; two seconds of polling while something is moving costs nothing and
+  // means "in progress" is never a lie for long.
+  useEffect(() => {
+    if (!hasActive) return
+    const timer = window.setInterval(() => void reloadRef.current(), ACTIVE_POLL_INTERVAL)
+    return () => window.clearInterval(timer)
+  }, [hasActive])
 
   // The server already applied the filters to its own rows; the live local
   // ones have to be filtered here so the two halves agree.
@@ -672,14 +773,7 @@ function TransferRowView({
               <Detail label="来源" value={source.label} />
               <Detail label="状态" value={STATUS_LABEL[normalizeStatus(row.status)] ?? row.status} />
               <Detail label="开始" value={row.startedAt ? formatDateTime(row.startedAt) : '—'} />
-              <Detail
-                label="用时"
-                value={
-                  row.startedAt && row.finishedAt
-                    ? formatDuration((row.finishedAt - row.startedAt) / 1000) || '不到 1 秒'
-                    : '—'
-                }
-              />
+              <Detail label="用时" value={elapsedLabel(row)} />
               <Detail label="平均速度" value={row.avgSpeed > 0 ? formatSpeed(row.avgSpeed) : '—'} />
               <Detail label="创建" value={formatDateTime(row.createdAt)} />
             </dl>
@@ -697,6 +791,16 @@ function Detail({ label, value }: { label: string; value: string }) {
       <dd className="truncate">{value}</dd>
     </div>
   )
+}
+
+/** How long a transfer has been going, counted to now while it is still
+ *  running. Waiting for a finish time meant a transfer showed a dash for its
+ *  entire run, which is precisely when the number is worth reading. */
+function elapsedLabel(row: Row): string {
+  if (!row.startedAt) return '—'
+  const until = row.finishedAt ?? (row.active ? Date.now() : undefined)
+  if (!until || until <= row.startedAt) return '—'
+  return formatDuration((until - row.startedAt) / 1000) || '不到 1 秒'
 }
 
 function StateIcon({ row }: { row: Row }) {
@@ -727,7 +831,9 @@ function StateIcon({ row }: { row: Row }) {
     row.kind === 'download'
       ? row.mode === 'staged'
         ? Server
-        : Download
+        : row.mode === 'webdav'
+          ? Link2
+          : Download
       : row.source === 'remote'
         ? CloudDownload
         : row.source === 'local'
@@ -765,31 +871,38 @@ function normalizeStatus(status: string): string {
 }
 
 /**
- * mergeRows folds the three sources into one list.
+ * mergeRows folds the sources into one list.
  *
  * A transfer this browser is driving appears in both the live map and the
  * server's list, and the live one is authoritative: the server only learns of
  * progress at segment boundaries, so its number lags by up to a whole segment.
+ *
+ * For a transfer the server drives — a WebDAV write, a VPS-local upload, a
+ * remote fetch, a staged download — there is no browser to ask, so the event
+ * stream plays that role and its snapshot is laid over the fetched row.
  */
 function mergeRows(
   localUploads: Transfer[],
   localDownloads: LocalDownload[],
   remote: TransferRow[],
+  live: Map<string, LiveSnapshot>,
 ): Row[] {
   const rows = new Map<string, Row>()
 
   for (const row of remote) {
     if (row.upload) {
       const job = row.upload
-      rows.set(`upload:${row.id}`, {
+      const key = `upload:${row.id}`
+      const snapshot = live.get(key)
+      rows.set(key, {
         id: row.id,
         kind: 'upload',
         name: job.name,
         status: job.status,
         active: job.status === 'running' || job.status === 'pending',
-        total: job.totalSize,
-        done: job.uploadedBytes,
-        speed: 0,
+        total: Math.max(job.totalSize, snapshot?.total ?? 0),
+        done: Math.max(job.uploadedBytes, snapshot?.done ?? 0),
+        speed: liveSpeed(snapshot) || job.speed || 0,
         avgSpeed: job.avgSpeed ?? 0,
         createdAt: typeof job.createdAt === 'number' ? job.createdAt : Date.parse(String(job.createdAt)),
         startedAt: job.startedAt,
@@ -801,15 +914,17 @@ function mergeRows(
       })
     } else if (row.download) {
       const job = row.download
-      rows.set(`download:${row.id}`, {
+      const key = `download:${row.id}`
+      const snapshot = live.get(key)
+      rows.set(key, {
         id: row.id,
         kind: 'download',
         name: job.name,
         status: job.status,
         active: job.status === 'running' || job.status === 'pending',
-        total: job.totalSize,
-        done: job.downloadedBytes,
-        speed: 0,
+        total: Math.max(job.totalSize, snapshot?.total ?? 0),
+        done: Math.max(job.downloadedBytes, snapshot?.done ?? 0),
+        speed: liveSpeed(snapshot) || job.speed || 0,
         avgSpeed: job.avgSpeed ?? 0,
         createdAt: job.createdAt,
         startedAt: job.startedAt,
@@ -836,7 +951,7 @@ function mergeRows(
       // The live counter can only move forward; a stale server snapshot must
       // not drag it back.
       done: Math.max(transfer.uploaded, existing?.done ?? 0),
-      speed: transfer.speed ?? 0,
+      speed: transfer.speed ?? existing?.speed ?? 0,
       avgSpeed: existing?.avgSpeed ?? 0,
       createdAt: existing?.createdAt ?? Date.now(),
       startedAt: existing?.startedAt,
@@ -862,7 +977,7 @@ function mergeRows(
       active: ['queued', 'preparing', 'downloading', 'merging'].includes(download.state),
       total: download.size,
       done: Math.max(download.received, existing?.done ?? 0),
-      speed: download.speed,
+      speed: download.speed || existing?.speed || 0,
       avgSpeed:
         download.finishedAt && download.startedAt && download.finishedAt > download.startedAt
           ? (download.size / (download.finishedAt - download.startedAt)) * 1000

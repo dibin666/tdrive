@@ -200,6 +200,7 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 				Uploaded: base + uploaded, Total: file.Size,
 				Segment: index, SegmentCount: file.SegmentCount,
 				Status: string(database.JobRunning),
+				Speed:  s.progress.speed(job.ID),
 			},
 		})
 	})

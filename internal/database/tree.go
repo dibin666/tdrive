@@ -87,6 +87,47 @@ func (d *DB) ListDirs(ctx context.Context, parentID string) ([]Dir, error) {
 	return out, Translate(rows.Err())
 }
 
+// SubtreeSizes totals the stored bytes under each child directory of parentID,
+// keyed by directory id.
+//
+// A folder's size is everything below it, not just the files sitting directly
+// inside, which is what a file manager shows and what the listing previously
+// had no way to report at all. One recursive walk answers for every child at
+// once: a query per row would turn a forty-folder listing into forty round
+// trips. Pending files are excluded for the same reason ListFiles excludes
+// them — their bytes are not in the drive yet.
+func (d *DB) SubtreeSizes(ctx context.Context, parentID string) (map[string]int64, error) {
+	const q = `
+		WITH RECURSIVE subtree(root, id) AS (
+		    SELECT id, id FROM dirs WHERE ifnull(parent_id, '') = ?
+		    UNION ALL
+		    SELECT subtree.root, d.id FROM dirs d JOIN subtree ON d.parent_id = subtree.id
+		)
+		SELECT subtree.root, ifnull(sum(f.size), 0)
+		FROM subtree
+		LEFT JOIN files f ON f.dir_id = subtree.id AND f.status <> 'pending'
+		GROUP BY subtree.root`
+
+	rows, err := d.read.QueryContext(ctx, q, parentID)
+	if err != nil {
+		return nil, Translate(err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]int64)
+	for rows.Next() {
+		var (
+			id   string
+			size int64
+		)
+		if err := rows.Scan(&id, &size); err != nil {
+			return nil, Translate(err)
+		}
+		out[id] = size
+	}
+	return out, Translate(rows.Err())
+}
+
 // AllDirs returns the whole tree, used by the sidebar and by the indexer when
 // it rebuilds paths.
 func (d *DB) AllDirs(ctx context.Context) ([]Dir, error) {

@@ -42,6 +42,11 @@ type uploadJobBody struct {
 	// moving. It is computed here rather than in the browser because only the
 	// server knows when the job left the queue and started sending.
 	AvgSpeed float64 `json:"avgSpeed,omitempty"`
+	// Speed is the current rate of a transfer this process is driving. A
+	// browser upload reports its own and leaves this zero; a WebDAV write or a
+	// VPS-local upload has no browser to ask, which is why the server measures
+	// it.
+	Speed float64 `json:"speed,omitempty"`
 }
 
 func uploadBody(job database.UploadJob) uploadJobBody {
@@ -61,7 +66,8 @@ func uploadBody(job database.UploadJob) uploadJobBody {
 		SourceURL:     job.SourceURL,
 		CreatedAt:     job.CreatedAt.UnixMilli(),
 		UpdatedAt:     job.UpdatedAt.UnixMilli(),
-		AvgSpeed:      averageSpeed(job.UploadedBytes, job.StartedAt, job.FinishedAt),
+		AvgSpeed: averageSpeed(job.UploadedBytes, job.StartedAt,
+			measuredUntil(job.FinishedAt, job.Status == database.JobPending || job.Status == database.JobRunning)),
 	}
 	if !job.StartedAt.IsZero() {
 		body.StartedAt = job.StartedAt.UnixMilli()
@@ -138,6 +144,7 @@ func (s *Server) handleListTransfers(w http.ResponseWriter, r *http.Request) {
 			// so a refresh does not briefly show progress going backwards.
 			s.progress.merge(&uploads[i])
 			body := uploadBody(uploads[i])
+			body.Speed = s.progress.speed(body.ID)
 			rows = append(rows, transferRow{
 				ID: body.ID, Kind: body.Kind, Name: body.Name,
 				Status: body.Status, CreatedAt: body.CreatedAt, Upload: &body,

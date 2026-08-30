@@ -3,7 +3,6 @@ import clsx from 'clsx'
 import {
   Check,
   Copy,
-  Gauge,
   HardDriveDownload,
   Layers,
   Link2,
@@ -21,7 +20,7 @@ import {
 import { COPY_FAILED, copyText } from '../lib/clipboard'
 import { downloads, supportsDiskWrites } from '../lib/downloads'
 import { formatBytes } from '../lib/format'
-import { Button, Modal, Slider, Spinner, toast } from './primitives'
+import { Button, Modal, Spinner, toast } from './primitives'
 
 /**
  * The download dialog exists because for a segmented file the choice actually
@@ -39,7 +38,7 @@ const MODE_META: Record<
   direct: {
     title: '直接下载',
     icon: Zap,
-    blurb: '浏览器直接向服务器请求字节，服务器边从 Telegram 读边发。',
+    blurb: '生成一条带令牌的直链交给浏览器，由浏览器自己下载，服务器边从 Telegram 读边发。',
   },
   staged: {
     title: '先暂存到服务器',
@@ -62,7 +61,6 @@ export function DownloadDialog({
 }) {
   const [options, setOptions] = useState<DownloadOptions | null>(null)
   const [mode, setMode] = useState<DownloadMode>('direct')
-  const [connections, setConnections] = useState(4)
   const [error, setError] = useState<string | null>(null)
   const [share, setShare] = useState<ShareResponse | null>(null)
   const [sharing, setSharing] = useState(false)
@@ -84,11 +82,6 @@ export function DownloadDialog({
         setOptions(next)
         const recommended = next.modes.find((m) => m.recommended && m.available)
         setMode(recommended?.mode ?? 'direct')
-        // Without disk access every extra connection buys a copy of the file in
-        // RAM, while a single connection is handed straight to the browser's own
-        // downloader. Defaulting to parallel there is how a routine download
-        // turned into a tab-sized memory buffer.
-        setConnections(supportsDiskWrites() ? Math.min(4, next.maxConnections) : 1)
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -103,18 +96,16 @@ export function DownloadDialog({
     if (!entry || !options) return
     setStarting(true)
     try {
-      // The save picker has to open while the click is still considered a user
-      // gesture, so it goes first — before any await that could outlive it.
-      const parallel = connections > 1
-      const wantsDisk = parallel || mode === 'segments'
-      const handle = wantsDisk ? await downloads.openSaveTarget(entry.name) : null
+      // Only a local join needs a file to write into, and the save picker has
+      // to open while the click is still considered a user gesture, so it goes
+      // first — before any await that could outlive it.
+      const handle = mode === 'segments' ? await downloads.openSaveTarget(entry.name) : null
 
       const running = downloads.start({
         fileId: entry.id,
         name: entry.name,
         size: entry.size,
         mode,
-        connections,
         segmentBounds: options.segmentBounds,
         saveHandle: handle,
       })
@@ -150,7 +141,7 @@ export function DownloadDialog({
     } finally {
       setStarting(false)
     }
-  }, [connections, entry, mode, onClose, options])
+  }, [entry, mode, onClose, options])
 
   const mintShare = async (withSegments: boolean) => {
     if (!entry) return
@@ -247,30 +238,12 @@ export function DownloadDialog({
             })}
           </section>
 
-          <section className="space-y-2 border-t border-[var(--line)] pt-4">
-            <div className="flex items-center gap-2">
-              <Gauge size={15} className="text-[var(--faint)]" />
-              <h3 className="text-sm font-medium">并发连接数</h3>
-            </div>
-            <Slider
-              value={connections}
-              min={1}
-              max={options.maxConnections}
-              onChange={setConnections}
-              suffix="条"
-              format={(value) =>
-                value === 1
-                  ? '单线程：交给浏览器自己下载，最省事'
-                  : `${value} 条连接并行下载；服务器把它们算作一个下载任务`
-              }
-            />
-            {!supportsDiskWrites() && connections > 1 && (
-              <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-                当前浏览器不支持直接写入磁盘（需要 Chrome 或 Edge）。多线程下载会先在内存中拼接，
-                超大文件建议改用单线程，或复制下面的直链交给 aria2 / IDM。
-              </p>
-            )}
-          </section>
+          {mode === 'segments' && !supportsDiskWrites() && (
+            <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
+              当前浏览器不支持直接写入磁盘（需要 Chrome 或 Edge），分卷会逐个下载并附带合并脚本。
+              想要一步到位，可以改用「先暂存到服务器」，或复制下面的直链交给 aria2 / IDM。
+            </p>
+          )}
 
           <section className="space-y-2 border-t border-[var(--line)] pt-4">
             <div className="flex items-center gap-2">

@@ -248,10 +248,11 @@ func (f *FileSystem) OpenFile(ctx context.Context, name string, flag int, _ os.F
 	}
 	user, _ := auth.FromContext(ctx)
 	return &readHandle{
-		fs:   f,
-		ctx:  ctx,
-		file: file,
-		info: fileInfo{entry: entry},
+		fs:     f,
+		ctx:    ctx,
+		file:   file,
+		info:   fileInfo{entry: entry},
+		userID: user.ID,
 		// Every range request a WebDAV client makes for this file shares one
 		// download slot, exactly as a browser download does.
 		sessionKey: "dav:" + user.ID + ":" + file.ID,

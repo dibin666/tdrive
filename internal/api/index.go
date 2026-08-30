@@ -98,6 +98,7 @@ func wireRemoteProgress(svc *drive.Service, broker *events.Broker, live *liveUpl
 				Error:        message,
 				Source:       job.Source,
 				SourceURL:    job.SourceURL,
+				Speed:        live.speed(job.ID),
 			},
 		})
 		if status == database.JobComplete {

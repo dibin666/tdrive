@@ -140,6 +140,188 @@ func mkdir(t *testing.T, db *DB, parentID, name, path string) Dir {
 	return d
 }
 
+// A folder's size in a listing is everything underneath it, so the query has to
+// walk the whole subtree rather than counting the files sitting directly inside.
+func TestSubtreeSizesCountsWholeSubtree(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	movies := mkdir(t, db, "", "movies", "/movies")
+	year := mkdir(t, db, movies.ID, "2024", "/movies/2024")
+	deep := mkdir(t, db, year.ID, "4k", "/movies/2024/4k")
+	docs := mkdir(t, db, "", "docs", "/docs")
+	mkdir(t, db, "", "empty", "/empty")
+
+	add := func(dirID, name string, size int64, status FileStatus) {
+		t.Helper()
+		f := File{ID: NewID(), DirID: dirID, Name: name, Size: size, Status: status, SegmentCount: 1}
+		if err := db.InsertFile(ctx, f); err != nil {
+			t.Fatalf("InsertFile %q: %v", name, err)
+		}
+	}
+
+	add(movies.ID, "top.mkv", 100, StatusComplete)
+	add(year.ID, "mid.mkv", 200, StatusComplete)
+	add(deep.ID, "deep.mkv", 400, StatusComplete)
+	// A half-uploaded file has no bytes in the drive yet, so it must not be
+	// counted — the listing hides it for the same reason.
+	add(deep.ID, "pending.mkv", 800, StatusPending)
+	add(docs.ID, "notes.txt", 7, StatusComplete)
+	// A file at the root belongs to no child directory and must not leak into
+	// any of their totals.
+	add("", "loose.bin", 9999, StatusComplete)
+
+	sizes, err := db.SubtreeSizes(ctx, "")
+	if err != nil {
+		t.Fatalf("SubtreeSizes: %v", err)
+	}
+	if got := sizes[movies.ID]; got != 700 {
+		t.Errorf("movies subtree = %d, want 700", got)
+	}
+	if got := sizes[docs.ID]; got != 7 {
+		t.Errorf("docs subtree = %d, want 7", got)
+	}
+
+	// A directory with nothing under it still needs an entry, so the listing
+	// can say "0 B" rather than falling back to a dash.
+	var empty Dir
+	for _, d := range mustDirs(t, db) {
+		if d.Path == "/empty" {
+			empty = d
+		}
+	}
+	if size, ok := sizes[empty.ID]; !ok || size != 0 {
+		t.Errorf("empty subtree = %d (present=%v), want 0 and present", size, ok)
+	}
+
+	nested, err := db.SubtreeSizes(ctx, movies.ID)
+	if err != nil {
+		t.Fatalf("SubtreeSizes(movies): %v", err)
+	}
+	if got := nested[year.ID]; got != 600 {
+		t.Errorf("2024 subtree = %d, want 600", got)
+	}
+}
+
+// The v4 step rebuilds download_jobs to widen a CHECK constraint, which means
+// dropping the table. Existing history has to survive that, and so do the
+// indexes that went with it.
+func TestMigrateV3PreservesDownloadHistory(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v3.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Rewind to the v3 shape: the old table, the old CHECK, and the version
+	// number that makes migrate run the step under test.
+	for _, stmt := range []string{
+		`DROP TABLE download_jobs`,
+		`CREATE TABLE download_jobs (
+			id               TEXT PRIMARY KEY,
+			user_id          TEXT REFERENCES users (id) ON DELETE CASCADE,
+			file_id          TEXT REFERENCES files (id) ON DELETE SET NULL,
+			name             TEXT NOT NULL,
+			total_size       INTEGER NOT NULL,
+			downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+			mode             TEXT NOT NULL DEFAULT 'direct'
+			                 CHECK (mode IN ('direct', 'staged', 'segments')),
+			status           TEXT NOT NULL
+			                 CHECK (status IN ('pending', 'running', 'ready', 'complete', 'failed', 'cancelled', 'expired')),
+			error            TEXT NOT NULL DEFAULT '',
+			cache_path       TEXT NOT NULL DEFAULT '',
+			created_at       INTEGER NOT NULL,
+			updated_at       INTEGER NOT NULL,
+			started_at       INTEGER NOT NULL DEFAULT 0,
+			finished_at      INTEGER NOT NULL DEFAULT 0,
+			expires_at       INTEGER NOT NULL DEFAULT 0,
+			last_used_at     INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX idx_downloads_user ON download_jobs (user_id)`,
+		`CREATE INDEX idx_downloads_status ON download_jobs (status)`,
+		`CREATE INDEX idx_downloads_created ON download_jobs (created_at)`,
+		`CREATE INDEX idx_downloads_used ON download_jobs (last_used_at)`,
+		`PRAGMA user_version = 3`,
+	} {
+		if _, err := db.Write().ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rewind to v3 (%s): %v", stmt, err)
+		}
+	}
+
+	old := DownloadJob{
+		ID: NewID(), Name: "old.mkv", TotalSize: 1234, DownloadedBytes: 1234,
+		Mode: DownloadStaged, Status: DownloadComplete, CachePath: "/cache/old",
+	}
+	if err := db.InsertDownload(ctx, old); err != nil {
+		t.Fatalf("InsertDownload: %v", err)
+	}
+	db.Close()
+
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer upgraded.Close()
+
+	got, err := upgraded.DownloadByID(ctx, old.ID)
+	if err != nil {
+		t.Fatalf("history did not survive the migration: %v", err)
+	}
+	if got.Name != old.Name || got.TotalSize != old.TotalSize ||
+		got.Mode != old.Mode || got.Status != old.Status || got.CachePath != old.CachePath {
+		t.Fatalf("row changed across the migration: %+v", got)
+	}
+
+	// The point of the rebuild: the widened constraint accepts a WebDAV read.
+	fresh := DownloadJob{ID: NewID(), Name: "new.mkv", TotalSize: 1, Mode: DownloadWebDAV, Status: DownloadRunning}
+	if err := upgraded.InsertDownload(ctx, fresh); err != nil {
+		t.Fatalf("InsertDownload after migration: %v", err)
+	}
+
+	var indexes int
+	err = upgraded.Read().QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'download_jobs'
+		 AND name LIKE 'idx_downloads_%'`).Scan(&indexes)
+	if err != nil {
+		t.Fatalf("count indexes: %v", err)
+	}
+	if indexes != 4 {
+		t.Fatalf("download_jobs has %d indexes after the migration, want 4", indexes)
+	}
+}
+
+func mustDirs(t *testing.T, db *DB) []Dir {
+	t.Helper()
+	dirs, err := db.AllDirs(context.Background())
+	if err != nil {
+		t.Fatalf("AllDirs: %v", err)
+	}
+	return dirs
+}
+
+// A WebDAV read is recorded as a download so it shows in the transfer panel,
+// which the mode column's CHECK constraint has to allow.
+func TestWebDAVDownloadModeIsStorable(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	job := DownloadJob{
+		ID: NewID(), Name: "movie.mkv", TotalSize: 4096,
+		Mode: DownloadWebDAV, Status: DownloadRunning,
+	}
+	if err := db.InsertDownload(ctx, job); err != nil {
+		t.Fatalf("InsertDownload: %v", err)
+	}
+	got, err := db.DownloadByID(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("DownloadByID: %v", err)
+	}
+	if got.Mode != DownloadWebDAV {
+		t.Fatalf("Mode = %q, want %q", got.Mode, DownloadWebDAV)
+	}
+}
+
 // Renaming a directory has to rewrite every descendant path. SQLite's substr()
 // counts characters while Go's len() counts bytes, so a tree with non-ASCII
 // names is the case that actually exercises the offset arithmetic.

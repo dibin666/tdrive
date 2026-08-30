@@ -185,8 +185,10 @@ CREATE TABLE download_jobs (
     name             TEXT NOT NULL,
     total_size       INTEGER NOT NULL,
     downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+    -- webdav is a download the server did not start: a mounted client asked
+    -- for the bytes, and the row exists so the transfer panel can show it.
     mode             TEXT NOT NULL DEFAULT 'direct'
-                     CHECK (mode IN ('direct', 'staged', 'segments')),
+                     CHECK (mode IN ('direct', 'staged', 'segments', 'webdav')),
     status           TEXT NOT NULL
                      CHECK (status IN ('pending', 'running', 'ready', 'complete', 'failed', 'cancelled', 'expired')),
     error            TEXT NOT NULL DEFAULT '',
