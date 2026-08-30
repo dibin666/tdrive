@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Copy, KeyRound, Link2, LogOut, Monitor, Trash2 } from 'lucide-react'
 import { api, type ShareRecord, type Session } from '../../lib/api'
 import { useApp } from '../../app/context'
+import { COPY_FAILED, copyText } from '../../lib/clipboard'
 import { formatDate } from '../../lib/format'
 import { Button, Field, IconButton, Input, Spinner, toast } from '../../components/primitives'
 import { Section } from './shared'
@@ -189,8 +190,7 @@ function WebDAVSection({ path, username }: { path: string; username: string }) {
         <Button
           icon={<Copy size={14} />}
           onClick={() => {
-            void navigator.clipboard.writeText(url)
-            toast('地址已复制', 'success')
+            void copyText(url).then((ok) => toast(ok ? '地址已复制' : COPY_FAILED, ok ? 'success' : 'error'))
           }}
         >
           复制

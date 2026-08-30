@@ -63,6 +63,13 @@ type Service struct {
 	downloadSessionsMu sync.Mutex
 	downloadSessions   map[string]*downloadSession
 
+	// jobRunMu guards jobRuns, the set of upload jobs a goroutine is already
+	// working on. ResumeRemotes runs whenever Telegram becomes ready rather
+	// than only at startup, so a job that is still running must not pick up a
+	// second worker writing the same segments.
+	jobRunMu sync.Mutex
+	jobRuns  map[string]struct{}
+
 	// stageMu serialises the decide-then-insert of a staged download, so two
 	// requests for the same file cannot both conclude they are the first one.
 	stageMu       sync.Mutex
@@ -84,6 +91,7 @@ func New(cfg *config.Config, db *database.DB, backend Backend, log *zap.Logger) 
 		downloadLimiter:  newTaskLimiter(settings.DownloadConcurrency),
 		uploadJobs:       make(map[string]*uploadJobLease),
 		downloadSessions: make(map[string]*downloadSession),
+		jobRuns:          make(map[string]struct{}),
 		stageRuns:        make(map[string]struct{}),
 		stageCancels:     make(map[string]context.CancelFunc),
 	}

@@ -113,6 +113,45 @@ async function describeAudio(track: InputAudioTrack) {
   }
 }
 
+/** A header probe is a few hundred kilobytes of range requests. Taking longer
+ *  than this means something upstream is stalled, and waiting forever on a
+ *  spinner that says "identifying format" is the one outcome worse than
+ *  guessing. */
+const PROBE_TIMEOUT_MS = 30_000
+
+async function describeInput(input: Input): Promise<MediaInfo> {
+  const format = await input.getFormat()
+  const container = containerName(format.name)
+
+  const [videoTrack, audioTrack] = await Promise.all([
+    input.getPrimaryVideoTrack(),
+    input.getPrimaryAudioTrack(),
+  ])
+
+  const [video, audio, duration] = await Promise.all([
+    videoTrack ? describeVideo(videoTrack) : Promise.resolve(undefined),
+    audioTrack ? describeAudio(audioTrack) : Promise.resolve(undefined),
+    input.getDurationFromMetadata().catch(() => 0),
+  ])
+
+  const mime = nativeMimeFor(container, video?.codecString ?? null, audio?.codecString ?? null)
+  let strategy: PlaybackStrategy
+
+  if (mime && canPlayNatively(mime)) {
+    strategy = 'native'
+  } else if (video?.canDecode || (!video && audio?.canDecode)) {
+    // The container is the problem, not the codec: demux here, decode with
+    // WebCodecs, draw to a canvas.
+    strategy = 'decode'
+  } else if (video || audio) {
+    strategy = 'software'
+  } else {
+    strategy = 'unsupported'
+  }
+
+  return { strategy, container, duration: duration ?? 0, video, audio }
+}
+
 export async function probeMedia(url: string): Promise<MediaInfo> {
   // A probe that fails must not stop playback: the browser is perfectly
   // capable of playing a file this code could not parse, and refusing on that
@@ -120,44 +159,21 @@ export async function probeMedia(url: string): Promise<MediaInfo> {
   const fallback: MediaInfo = { strategy: 'native', container: 'unknown', duration: 0 }
 
   let input: Input | null = null
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
     input = new Input({ formats: ALL_FORMATS, source: new UrlSource(url) })
 
-    const format = await input.getFormat()
-    const container = containerName(format.name)
-
-    const [videoTrack, audioTrack] = await Promise.all([
-      input.getPrimaryVideoTrack(),
-      input.getPrimaryAudioTrack(),
-    ])
-
-    const [video, audio, duration] = await Promise.all([
-      videoTrack ? describeVideo(videoTrack) : Promise.resolve(undefined),
-      audioTrack ? describeAudio(audioTrack) : Promise.resolve(undefined),
-      input.getDurationFromMetadata().catch(() => 0),
-    ])
-
-    const mime = nativeMimeFor(container, video?.codecString ?? null, audio?.codecString ?? null)
-    let strategy: PlaybackStrategy
-
-    if (mime && canPlayNatively(mime)) {
-      strategy = 'native'
-    } else if (video?.canDecode || (!video && audio?.canDecode)) {
-      // The container is the problem, not the codec: demux here, decode with
-      // WebCodecs, draw to a canvas.
-      strategy = 'decode'
-    } else if (video || audio) {
-      strategy = 'software'
-    } else {
-      strategy = 'unsupported'
-    }
-
-    return { strategy, container, duration: duration ?? 0, video, audio }
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('识别视频格式超时')), PROBE_TIMEOUT_MS)
+    })
+    return await Promise.race([describeInput(input), expired])
   } catch (err) {
     return { ...fallback, error: err instanceof Error ? err.message : String(err) }
   } finally {
+    clearTimeout(timer)
     // The probe holds an open source; leaving it around would keep buffered
-    // header bytes alive for every file the user glanced at.
+    // header bytes alive for every file the user glanced at — and after a
+    // timeout it is also what cancels the requests still in flight.
     try {
       input?.dispose?.()
     } catch {

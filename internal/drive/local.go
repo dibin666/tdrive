@@ -59,7 +59,9 @@ func (s *Service) StartLocal(ctx context.Context, req LocalRequest) (database.Up
 		return database.UploadJob{}, err
 	}
 
-	go s.runLocal(context.WithoutCancel(ctx), job, localRoot, entry.Path)
+	s.scheduleJobWorker(job.ID, func() {
+		s.runLocal(context.WithoutCancel(ctx), job, localRoot, entry.Path)
+	})
 	return job, nil
 }
 

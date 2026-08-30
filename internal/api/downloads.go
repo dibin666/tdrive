@@ -388,9 +388,24 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "cancel download")
 		return
 	}
-	if err := s.drive.CancelStaged(r.Context(), job.ID); err != nil {
-		s.fail(w, err, "cancel download")
-		return
+
+	if job.Mode == database.DownloadStaged {
+		if err := s.drive.CancelStaged(r.Context(), job.ID); err != nil {
+			s.fail(w, err, "cancel download")
+			return
+		}
+	} else {
+		// Direct and segmented downloads run entirely in the browser, so there
+		// is no worker to interrupt — but the row still has to leave the running
+		// state. Refusing to cancel it, which is what only handling staged jobs
+		// did, stranded every transfer whose tab was closed mid-download:
+		// permanently "in progress", uncancellable, and therefore undeletable.
+		if _, err := s.db.SetDownloadStatusIf(r.Context(), job.ID,
+			database.DownloadCancelled, "cancelled",
+			database.DownloadPending, database.DownloadRunning); err != nil {
+			s.fail(w, err, "cancel download")
+			return
+		}
 	}
 	if fresh, err := s.db.DownloadByID(r.Context(), job.ID); err == nil {
 		s.publishDownload(fresh)

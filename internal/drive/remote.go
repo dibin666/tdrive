@@ -74,12 +74,16 @@ func (s *Service) StartRemote(ctx context.Context, req RemoteRequest) (database.
 		return database.UploadJob{}, err
 	}
 
-	go s.runRemote(context.WithoutCancel(ctx), job, target)
+	s.scheduleJobWorker(job.ID, func() { s.runRemote(context.WithoutCancel(ctx), job, target) })
 	return job, nil
 }
 
 // ResumeRemotes picks up server-side fetches interrupted by a restart. Browser
 // uploads cannot be resumed this way because only the browser holds the bytes.
+//
+// This runs whenever Telegram becomes ready, not only once at startup, so a job
+// that already has a worker must be left alone: two goroutines fetching the
+// same segments would upload each of them twice.
 func (s *Service) ResumeRemotes(ctx context.Context) {
 	jobs, err := s.db.ResumableJobs(ctx)
 	if err != nil {
@@ -92,10 +96,15 @@ func (s *Service) ResumeRemotes(ctx context.Context) {
 				_ = s.db.SetJobStatus(ctx, job.ID, database.JobFailed, "local source path is missing")
 				continue
 			}
+			localRoot := s.cfg.RuntimeSettings().LocalRoot
+			if !s.scheduleJobWorker(job.ID, func() {
+				s.runLocal(context.WithoutCancel(ctx), job, localRoot, job.SourceURL)
+			}) {
+				continue
+			}
 			s.log.Info("resuming a local transfer",
 				zap.String("job", job.ID), zap.String("name", job.Name),
 				zap.Ints("segments", job.PendingSegments()))
-			go s.runLocal(context.WithoutCancel(ctx), job, s.cfg.RuntimeSettings().LocalRoot, job.SourceURL)
 			continue
 		}
 		target, err := url.Parse(job.SourceURL)
@@ -103,11 +112,39 @@ func (s *Service) ResumeRemotes(ctx context.Context) {
 			_ = s.db.SetJobStatus(ctx, job.ID, database.JobFailed, "stored source URL is invalid")
 			continue
 		}
+		if !s.scheduleJobWorker(job.ID, func() {
+			s.runRemote(context.WithoutCancel(ctx), job, target)
+		}) {
+			continue
+		}
 		s.log.Info("resuming a remote transfer",
 			zap.String("job", job.ID), zap.String("name", job.Name),
 			zap.Ints("segments", job.PendingSegments()))
-		go s.runRemote(context.WithoutCancel(ctx), job, target)
 	}
+}
+
+// scheduleJobWorker starts run in its own goroutine unless one is already
+// working on this job, reporting whether it started one. The database row stays
+// pending until the worker gets a task slot, so a status check cannot stand in
+// for this.
+func (s *Service) scheduleJobWorker(jobID string, run func()) bool {
+	s.jobRunMu.Lock()
+	if _, exists := s.jobRuns[jobID]; exists {
+		s.jobRunMu.Unlock()
+		return false
+	}
+	s.jobRuns[jobID] = struct{}{}
+	s.jobRunMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.jobRunMu.Lock()
+			delete(s.jobRuns, jobID)
+			s.jobRunMu.Unlock()
+		}()
+		run()
+	}()
+	return true
 }
 
 // runRemote fetches the segments a job still needs.

@@ -184,14 +184,19 @@ func (s *Server) serveBytes(w http.ResponseWriter, r *http.Request, window byteW
 	w.Header().Set("ETag", window.etag)
 	setDisposition(w, r, window.name, window.attachment)
 
-	start, end, ok := parseRange(r.Header.Get("Range"), window.length)
+	start, end, ranged, ok := parseRange(r.Header.Get("Range"), window.length)
 	if !ok {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", window.length))
 		writeError(w, http.StatusRequestedRangeNotSatisfiable, "the requested range is not satisfiable")
 		return
 	}
 
-	full := window.length == 0 || (start == 0 && end == window.length-1)
+	// A client that asked for a range gets 206 even when the range happens to
+	// cover the whole file. "bytes=0-" is how a range-aware reader probes for
+	// range support, and answering it with 200 tells that reader the server has
+	// none — mediabunny then abandons seeking and streams a multi-gigabyte MKV
+	// from byte zero just to reach the cues at its end, which never finishes.
+	full := window.length == 0 || !ranged
 	if full {
 		w.Header().Set("Content-Length", strconv.FormatInt(window.length, 10))
 	} else {
@@ -370,13 +375,20 @@ func sanitizeFilename(name string) string {
 // not supported; no player or WebDAV client sends them, and answering with the
 // whole file is a valid response to a range header a server cannot satisfy in
 // parts.
-func parseRange(header string, size int64) (start, end int64, ok bool) {
+//
+// ranged reports whether the caller actually asked for a range, which decides
+// between 200 and 206. It is separate from the bounds because a satisfied
+// "bytes=0-" covers the whole file and still has to be answered as partial
+// content.
+func parseRange(header string, size int64) (start, end int64, ranged, ok bool) {
 	if header == "" || size == 0 {
-		return 0, max(size-1, 0), true
+		return 0, max(size-1, 0), false, true
 	}
 	spec, found := strings.CutPrefix(strings.TrimSpace(header), "bytes=")
 	if !found {
-		return 0, size - 1, true
+		// An unknown range unit is ignored, which RFC 9110 allows and which is
+		// not a range request as far as the response is concerned.
+		return 0, size - 1, false, true
 	}
 	// Only the first range of a multi-range request is honoured.
 	if i := strings.IndexByte(spec, ','); i >= 0 {
@@ -385,41 +397,41 @@ func parseRange(header string, size int64) (start, end int64, ok bool) {
 
 	before, after, found := strings.Cut(strings.TrimSpace(spec), "-")
 	if !found {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	before, after = strings.TrimSpace(before), strings.TrimSpace(after)
 
 	switch {
 	case before == "" && after == "":
-		return 0, 0, false
+		return 0, 0, false, false
 
 	case before == "":
 		// Suffix form: the last n bytes.
 		n, err := strconv.ParseInt(after, 10, 64)
 		if err != nil || n <= 0 {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		if n > size {
 			n = size
 		}
-		return size - n, size - 1, true
+		return size - n, size - 1, true, true
 
 	default:
 		start, err := strconv.ParseInt(before, 10, 64)
 		if err != nil || start < 0 || start >= size {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		end = size - 1
 		if after != "" {
 			end, err = strconv.ParseInt(after, 10, 64)
 			if err != nil || end < start {
-				return 0, 0, false
+				return 0, 0, false, false
 			}
 			if end > size-1 {
 				end = size - 1
 			}
 		}
-		return start, end, true
+		return start, end, true, true
 	}
 }
 

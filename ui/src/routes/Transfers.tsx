@@ -199,7 +199,12 @@ export function Transfers() {
 
   const deleteSelected = async () => {
     const removable = selectedRows.filter((r) => !r.active)
-    if (removable.length === 0) return
+    if (removable.length === 0) {
+      // Deleting a row out from under a running transfer would orphan it, so
+      // say what to do instead of doing nothing.
+      toast('选中的传输还在进行中，请先取消再删除', 'info')
+      return
+    }
     if (!confirm(`删除 ${removable.length} 条传输记录？暂存在服务器上的文件也会一并删除。`)) return
     try {
       await api.deleteTransfers({ ids: removable.map((r) => r.id) })
@@ -250,13 +255,21 @@ export function Transfers() {
     }
   }
 
-  const cancel = (row: Row) => {
-    if (row.kind === 'upload') {
-      if (row.localId) uploads.cancel(row.localId)
-      else void api.cancelUpload(row.id).then(reload).catch(() => {})
-    } else {
-      if (row.localId) downloads.cancel(row.localId)
-      else void api.cancelDownload(row.id).then(reload).catch(() => {})
+  const cancel = async (row: Row) => {
+    // A cancellation that quietly fails is how a stuck transfer becomes a
+    // permanent one: it stays "in progress", so the list offers no delete
+    // button either. Report what went wrong instead of swallowing it.
+    try {
+      if (row.kind === 'upload') {
+        if (row.localId) uploads.cancel(row.localId)
+        else await api.cancelUpload(row.id)
+      } else {
+        if (row.localId) downloads.cancel(row.localId)
+        else await api.cancelDownload(row.id)
+      }
+      await reload()
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), 'error')
     }
   }
 
@@ -474,7 +487,7 @@ export function Transfers() {
                       return next
                     })
                   }
-                  onCancel={() => cancel(row)}
+                  onCancel={() => void cancel(row)}
                   onDelete={() => void removeOne(row)}
                 />
               ))}

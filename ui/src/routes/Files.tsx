@@ -38,6 +38,7 @@ import {
 } from '../lib/api'
 import { useApp } from '../app/context'
 import { events } from '../lib/events'
+import { COPY_FAILED, copyText } from '../lib/clipboard'
 import { formatBytes, formatDate, isPreviewable, kindOf, naturalCompare } from '../lib/format'
 import { uploads } from '../lib/uploads'
 import { downloads } from '../lib/downloads'
@@ -223,16 +224,20 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
     [detail, load, selection],
   )
 
-  const copyPaths = useCallback((targets: Entry[]) => {
-    void navigator.clipboard.writeText(targets.map((t) => t.path).join('\n'))
+  const copyPaths = useCallback(async (targets: Entry[]) => {
+    const ok = await copyText(targets.map((t) => t.path).join('\n'))
+    if (!ok) {
+      toast(COPY_FAILED, 'error')
+      return
+    }
     toast(targets.length === 1 ? '路径已复制' : `已复制 ${targets.length} 条路径`, 'success')
   }, [])
 
   const copyLink = useCallback(async (entry: Entry) => {
     try {
       const link = await api.share(entry.id, {})
-      await navigator.clipboard.writeText(link.file.url)
-      toast('下载直链已复制，可直接粘贴到下载工具', 'success')
+      const ok = await copyText(link.file.url)
+      toast(ok ? '下载直链已复制，可直接粘贴到下载工具' : `直链已生成：${link.file.url}`, ok ? 'success' : 'info')
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error')
     }
@@ -255,7 +260,10 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
             connections: 1,
           })
           return
-        } catch {
+        } catch (err) {
+          // A download the user cancelled is finished business; only a real
+          // failure is worth escalating to the dialog.
+          if (err instanceof DOMException && err.name === 'AbortError') return
           /* fall through to the dialog, which can explain what went wrong */
         }
       }
@@ -366,7 +374,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
           id: 'copy-path',
           label: '复制路径',
           icon: <ClipboardCopy size={14} />,
-          onSelect: () => copyPaths(targets),
+          onSelect: () => void copyPaths(targets),
         },
         {
           id: 'info',

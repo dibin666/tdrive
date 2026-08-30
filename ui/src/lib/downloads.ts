@@ -303,7 +303,12 @@ class DownloadManager {
     } catch (err) {
       if (controller.signal.aborted) {
         this.update(id, { state: 'cancelled', speed: 0, connections: 0 })
-        return
+        // A cancelled transfer must not resolve like a finished one. Callers
+        // that reported success on resolution were announcing "下载完成" for a
+        // download the user had just stopped.
+        throw err instanceof DOMException && err.name === 'AbortError'
+          ? err
+          : new DOMException('download cancelled', 'AbortError')
       }
       const message = err instanceof Error ? err.message : String(err)
       this.update(id, { state: 'failed', error: message, speed: 0, connections: 0 })

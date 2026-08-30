@@ -18,6 +18,7 @@ import {
   type Entry,
   type ShareResponse,
 } from '../lib/api'
+import { COPY_FAILED, copyText } from '../lib/clipboard'
 import { downloads, supportsDiskWrites } from '../lib/downloads'
 import { formatBytes } from '../lib/format'
 import { Button, Modal, Slider, Spinner, toast } from './primitives'
@@ -83,7 +84,11 @@ export function DownloadDialog({
         setOptions(next)
         const recommended = next.modes.find((m) => m.recommended && m.available)
         setMode(recommended?.mode ?? 'direct')
-        setConnections(Math.min(4, next.maxConnections))
+        // Without disk access every extra connection buys a copy of the file in
+        // RAM, while a single connection is handed straight to the browser's own
+        // downloader. Defaulting to parallel there is how a routine download
+        // turned into a tab-sized memory buffer.
+        setConnections(supportsDiskWrites() ? Math.min(4, next.maxConnections) : 1)
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -104,7 +109,7 @@ export function DownloadDialog({
       const wantsDisk = parallel || mode === 'segments'
       const handle = wantsDisk ? await downloads.openSaveTarget(entry.name) : null
 
-      await downloads.start({
+      const running = downloads.start({
         fileId: entry.id,
         name: entry.name,
         size: entry.size,
@@ -113,7 +118,32 @@ export function DownloadDialog({
         segmentBounds: options.segmentBounds,
         saveHandle: handle,
       })
-      toast(`"${entry.name}" 下载完成`, 'success')
+
+      // The transfer belongs to the transfer panel from here on. Awaiting it in
+      // the dialog left the button spinning for the whole of a multi-gigabyte
+      // download — and for staging, for the whole server-side assembly — which
+      // reads as "nothing happened" even though the task was already running.
+      let settled = false
+      running
+        .then(() => {
+          settled = true
+          toast(`"${entry.name}" 下载完成`, 'success')
+        })
+        .catch((err) => {
+          settled = true
+          // A cancellation is the user's own decision, not something to report.
+          if (err instanceof DOMException && err.name === 'AbortError') return
+          toast(err instanceof Error ? err.message : String(err), 'error')
+        })
+
+      onClose()
+      // Closing the dialog on its own looks like the click did nothing, so a
+      // transfer that is still going says where to watch it. One that finished
+      // in the meantime — a small file handed straight to the browser — says
+      // nothing, because its own result is about to arrive.
+      setTimeout(() => {
+        if (!settled) toast(`"${entry.name}" 已开始下载，进度在「传输」里`, 'info')
+      }, 600)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
       toast(err instanceof Error ? err.message : String(err), 'error')
@@ -128,8 +158,8 @@ export function DownloadDialog({
     try {
       const link = await api.share(entry.id, { segments: withSegments })
       setShare(link)
-      await navigator.clipboard.writeText(link.file.url).catch(() => {})
-      toast('下载直链已生成并复制到剪贴板', 'success')
+      const copied = await copyText(link.file.url)
+      toast(copied ? '下载直链已生成并复制到剪贴板' : '下载直链已生成，请手动复制', copied ? 'success' : 'info')
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error')
     } finally {
@@ -300,9 +330,14 @@ function LinkRow({ url, label }: { url: string; label: string }) {
         className="shrink-0"
         icon={copied ? <Check size={14} /> : <Copy size={14} />}
         onClick={() => {
-          void navigator.clipboard.writeText(url)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
+          void copyText(url).then((ok) => {
+            if (!ok) {
+              toast(COPY_FAILED, 'error')
+              return
+            }
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1500)
+          })
         }}
       >
         {copied ? '已复制' : '复制'}

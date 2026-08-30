@@ -261,6 +261,14 @@ func (s *Server) handleDeleteTransfer(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err, "delete transfer")
 			return
 		}
+		// downloadForUser lets anyone with access to the file read or join a
+		// staged job, which is what makes a shared staged copy work. Deleting
+		// the record is not part of that: it is someone else's history, and the
+		// bulk endpoint scopes it to the owner too.
+		if job.UserID != "" && job.UserID != user.ID && user.Role != database.RoleAdmin {
+			s.fail(w, fmt.Errorf("%w: download", database.ErrNotFound), "delete transfer")
+			return
+		}
 		switch job.Status {
 		case database.DownloadPending, database.DownloadRunning:
 			writeError(w, http.StatusConflict, "这个下载还在进行中，请先取消")

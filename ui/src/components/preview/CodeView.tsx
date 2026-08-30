@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { Copy, Check, WrapText } from 'lucide-react'
 import type { ViewerProps } from './PreviewModal'
+import { COPY_FAILED, copyText } from '../../lib/clipboard'
 import { TEXT_PREVIEW_LIMIT, formatBytes, kindOf } from '../../lib/format'
 import { highlight, languageFor } from '../../lib/highlight'
-import { IconButton, Spinner } from '../primitives'
+import { IconButton, Spinner, toast } from '../primitives'
 
 /**
  * Text and source files, highlighted with shiki.
@@ -101,9 +102,14 @@ export default function CodeView({ entry, link }: ViewerProps) {
           <IconButton
             label="复制全文"
             onClick={() => {
-              void navigator.clipboard.writeText(text)
-              setCopied(true)
-              setTimeout(() => setCopied(false), 1500)
+              void copyText(text).then((ok) => {
+                if (!ok) {
+                  toast(COPY_FAILED, 'error')
+                  return
+                }
+                setCopied(true)
+                setTimeout(() => setCopied(false), 1500)
+              })
             }}
           >
             {copied ? <Check size={15} /> : <Copy size={15} />}
