@@ -38,10 +38,10 @@ type Event struct {
 	Type Type  `json:"type"`
 	Data any   `json:"data"`
 	At   int64 `json:"at"`
-	// UserID scopes an event to one account; empty means everyone. Upload
-	// progress is scoped, tree changes are not, because every account sees
-	// the same drive.
-	UserID string `json:"-"`
+	// UserID scopes an event to one account; empty means everyone. It is
+	// included in the internal payload so plugin subscribers retain the same
+	// scope information as the browser broker.
+	UserID string `json:"userId,omitempty"`
 }
 
 // Broker fans events out to subscribers.

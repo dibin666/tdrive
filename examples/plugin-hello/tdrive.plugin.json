@@ -1,0 +1,18 @@
+{
+  "id": "hello",
+  "name": "Hello",
+  "description": "A minimal tdrive plugin.",
+  "version": "0.1.0",
+  "sdkVersion": "0.1",
+  "apiVersion": 1,
+  "author": "tdrive",
+  "license": "MIT",
+  "repositoryUrl": "https://github.com/dibin666/tdrive",
+  "documentationUrl": "https://github.com/dibin666/tdrive/blob/main/docs/plugins.md",
+  "entrypoint": "./cmd/plugin-hello",
+  "capabilities": ["events", "http"],
+  "events": ["tree"],
+  "routes": [
+    {"path": "/", "methods": ["GET"], "ui": true}
+  ]
+}

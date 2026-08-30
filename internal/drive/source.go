@@ -204,6 +204,17 @@ func (s *Service) persistDC(ctx context.Context, fileID string, idx, dc int) {
 // OpenFile returns a seekable stream over a whole logical file. Callers get one
 // continuous file no matter how many Telegram documents back it.
 func (s *Service) OpenFile(ctx context.Context, f database.File) (*reader.File, error) {
+	request := struct {
+		FileID string `json:"fileId"`
+	}{FileID: f.ID}
+	operation, err := s.beforePluginOperation(ctx, "files.open", request, &request)
+	if err != nil {
+		return nil, err
+	}
+	f, err = s.db.FileByID(ctx, request.FileID)
+	if err != nil {
+		return nil, err
+	}
 	segs, err := s.db.Segments(ctx, f.ID)
 	if err != nil {
 		return nil, err
@@ -240,9 +251,14 @@ func (s *Service) OpenFile(ctx context.Context, f database.File) (*reader.File, 
 	}
 
 	settings := s.cfg.RuntimeSettings()
-	return reader.Open(ctx, sourceFor, f.Size, f.SegmentSize, reader.Options{
+	opened, err := reader.Open(ctx, sourceFor, f.Size, f.SegmentSize, reader.Options{
 		Concurrency:  settings.StreamConcurrency,
 		Buffers:      s.cfg.Stream.Buffers,
 		ChunkTimeout: s.cfg.Stream.ChunkTimeout,
 	})
+	if err != nil {
+		return nil, err
+	}
+	s.afterPluginOperation(ctx, operation)
+	return opened, nil
 }

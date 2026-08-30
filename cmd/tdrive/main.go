@@ -23,6 +23,7 @@ import (
 	"github.com/dibin/tdrive/internal/drive"
 	"github.com/dibin/tdrive/internal/events"
 	"github.com/dibin/tdrive/internal/indexer"
+	"github.com/dibin/tdrive/internal/plugin"
 	"github.com/dibin/tdrive/internal/tgc"
 	"github.com/dibin/tdrive/ui"
 )
@@ -94,6 +95,16 @@ func run() error {
 	}
 	idx := indexer.New(db, tgm, log.Named("indexer"))
 	api.WireIndexProgress(idx, broker)
+	pluginManager := plugin.New(cfg, db, authSvc, driveSvc, tgm, broker, log.Named("plugin"))
+	if err := pluginManager.Start(ctx); err != nil {
+		// A plugin must never prevent the core drive from starting. The manager
+		// records individual child failures; this covers a database-level
+		// plugin subsystem failure and leaves the management API available.
+		log.Error("could not start plugin manager", zap.Error(err))
+	}
+	if pluginManager.HasHooks() {
+		driveSvc.SetPluginHooks(pluginManager)
+	}
 	apiServer := api.New(cfg, db, authSvc, driveSvc, tgm, idx, broker, log.Named("api"), func(level string) error {
 		parsed, err := zapcore.ParseLevel(level)
 		if err != nil {
@@ -102,6 +113,7 @@ func run() error {
 		logLevel.SetLevel(parsed)
 		return nil
 	})
+	apiServer.SetPluginManager(pluginManager)
 
 	// A failure to connect here is not fatal: the WebUI still needs to come
 	// up so an administrator can fix the credentials.
@@ -109,6 +121,7 @@ func run() error {
 		log.Error("could not connect to telegram at startup", zap.Error(err))
 	}
 	defer tgm.Stop()
+	defer pluginManager.Close(context.Background())
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", apiServer.Routes()))
@@ -125,6 +138,7 @@ func run() error {
 	if cfg.RuntimeSettings().WebDAVEnabled {
 		log.Info("webdav mounted", zap.String("prefix", cfg.WebDAV.Prefix))
 	}
+	mux.Handle("/plugins/", pluginManager.PublicHandler())
 	mux.Handle("/", ui.Handler())
 
 	srv := &http.Server{

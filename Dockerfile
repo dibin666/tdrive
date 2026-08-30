@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # distroless/static is the smallest base that still carries CA certificates,
 # which the Telegram connection and remote-URL fetches both need.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 COPY --from=build /out/tdrive /usr/local/bin/tdrive
 
@@ -59,3 +59,41 @@ EXPOSE 8080
 USER root:root
 
 ENTRYPOINT ["/usr/local/bin/tdrive"]
+
+
+# The builder is a separate image target. Keeping Go, Git and a shell here
+# means the main runtime stays distroless while source installation remains
+# available to Docker deployments.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS plugin-builder-build
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+
+ARG TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/tdrive-plugin-builder ./cmd/tdrive-plugin-builder
+
+FROM golang:1.26-alpine AS plugin-builder
+
+RUN apk add --no-cache git ca-certificates
+
+COPY --from=plugin-builder-build /out/tdrive-plugin-builder /usr/local/bin/tdrive-plugin-builder
+
+VOLUME ["/plugins", "/run/tdrive-plugin-builder"]
+ENV TDRIVE_PLUGIN_DIR=/plugins \
+    TDRIVE_PLUGIN_BUILDER_ADDRESS=/run/tdrive-plugin-builder/plugin-builder.sock
+
+ENTRYPOINT ["/usr/local/bin/tdrive-plugin-builder"]
+
+# Keep `docker build .` pointed at the small runtime image. CI selects the
+# `plugin-builder` target explicitly for the sidecar image.
+FROM runtime AS final

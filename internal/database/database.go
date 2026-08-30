@@ -103,7 +103,7 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 
 // schemaVersion is what schema.sql describes. Anything older is brought up to
 // it by the steps in migrate.
-const schemaVersion = 4
+const schemaVersion = 5
 
 // upgradeSteps are the statements that take an existing database from the
 // version keyed here to the next one. A fresh database skips all of them,
@@ -236,6 +236,34 @@ var upgradeSteps = map[int][]string{
 		`CREATE INDEX idx_downloads_status ON download_jobs (status)`,
 		`CREATE INDEX idx_downloads_created ON download_jobs (created_at)`,
 		`CREATE INDEX idx_downloads_used ON download_jobs (last_used_at)`,
+	},
+	4: {
+		`CREATE TABLE IF NOT EXISTS plugins (
+			id            TEXT PRIMARY KEY,
+			name          TEXT NOT NULL,
+			version       TEXT NOT NULL,
+			author        TEXT NOT NULL,
+			enabled       INTEGER NOT NULL DEFAULT 1,
+			status        TEXT NOT NULL DEFAULT 'disabled',
+			source        TEXT NOT NULL,
+			source_url    TEXT NOT NULL,
+			ref           TEXT NOT NULL DEFAULT '',
+			source_digest TEXT NOT NULL,
+			binary_digest TEXT NOT NULL,
+			binary_path   TEXT NOT NULL,
+			manifest_json TEXT NOT NULL,
+			error         TEXT NOT NULL DEFAULT '',
+			installed_at  INTEGER NOT NULL,
+			updated_at    INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_plugins_enabled ON plugins (enabled)`,
+		`CREATE TABLE IF NOT EXISTS plugin_data (
+			plugin_id  TEXT NOT NULL REFERENCES plugins (id) ON DELETE CASCADE,
+			key        TEXT NOT NULL,
+			value      BLOB NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (plugin_id, key)
+		) WITHOUT ROWID`,
 	},
 }
 

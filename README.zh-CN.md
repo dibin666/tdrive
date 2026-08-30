@@ -19,6 +19,7 @@
 - **索引重建** — 数据库只是缓存；丢失或损坏后可从 Telegram 频道完整重建目录树、文件元数据和归属关系
 - **多用户** — JWT 认证、角色管理、12 项细粒度权限、按用户限定目录范围、存储配额、账号启停、登录会话管理和操作审计日志
 - **传输中心** — 上传和下载合并为一个可筛选的列表：按类型 / 状态 / 来源 / 日期区间筛选，显示实时速度、平均速度和用时，可删除历史记录。服务器自己驱动的传输（WebDAV 上传下载、VPS 本地上传、离线下载、服务器暂存）由服务端计时，进度走 SSE 推送，不用手动刷新
+- **全信任 Go 插件** — 可从插件商店或 HTTPS 源码仓库安装，检查清单后只确认一次；插件以独立 RPC 子进程运行，可调用公开 Host API 并修改核心操作 Hook
 - **轻量部署** — 单二进制 + 一个 SQLite 文件，纯 Go 编译无需 CGO；提供 amd64 / arm64 多架构 Docker 镜像
 
 ## 快速开始
@@ -88,6 +89,12 @@ TDRIVE_DATA_DIR=./data ./tdrive
 | `TDRIVE_CACHE_DIR` | `<数据目录>/cache` | 下载暂存目录 |
 | `TDRIVE_CACHE_LIMIT` | `20GiB` | 下载暂存磁盘上限，设为 0 关闭暂存功能 |
 | `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | 单个下载允许的并发连接数 |
+| `TDRIVE_PLUGIN_DIR` | `<数据目录>/plugins` | 已安装插件二进制目录 |
+| `TDRIVE_PLUGIN_STORE_URL` | `https://raw.githubusercontent.com/dibin666/tdrive/main/plugins/index.json` | 插件商店索引 HTTPS 地址；留空关闭商店 |
+| `TDRIVE_PLUGIN_BUILDER_ADDRESS` | `<数据目录>/plugin-builder.sock` | 私有 builder Unix socket 或 loopback 地址 |
+| `TDRIVE_PLUGIN_BUILDER_COMMAND` | `tdrive-plugin-builder` | 非 Compose 部署时的 builder 命令 |
+| `TDRIVE_PLUGIN_SOURCE_MAX_BYTES` | `512MiB` | 获取插件源码的大小上限 |
+| `TDRIVE_PLUGIN_BUILD_TIMEOUT` | `10m` | 单次插件构建超时 |
 
 使用管理员账号登录后，其余运行参数可在 WebUI 的“设置”中配置：
 
@@ -118,6 +125,14 @@ Telegram 上传分片只列出合法取值，存储分片滑杆的上限和步�
 
 `TDRIVE_LOCAL_PATH` 是 Docker Compose 的宿主机路径，不是容器内路径。若使用 `docker run`，请手动添加
 `-v /srv/repository:/vps:ro`，然后在 WebUI“设置 → 存储与暂存”中填写 `/vps`；不需要设置环境变量。
+
+## 插件
+
+管理员可以在“设置 → 插件”中从商店或 HTTPS Git / 归档地址安装。源码会先检查，随后只需点击一次“确认安装”，构建、校验并立即启动。插件是全信任代码：不做能力授权，安装提示也不是安全沙箱。
+
+主程序镜像仍然是 distroless。Docker Compose 使用空闲的 Go/Git
+`tdrive-plugin-builder` 服务，只在检查或安装插件时获取和编译源码。插件 SDK、manifest、Host API、生命周期和商店提交要求见
+[`docs/plugins.md`](docs/plugins.md)，默认空索引见 [`plugins/index.json`](plugins/index.json)。
 
 ## 多用户与权限
 
@@ -162,7 +177,7 @@ rclone ls tdrive:
 
 ## 技术栈
 
-- **后端** — Go, [gotd/td](https://github.com/gotd/td) (MTProto), [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite）
+- **后端** — Go, [gotd/td](https://github.com/gotd/td)（MTProto）, [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite）, [go-plugin](https://github.com/hashicorp/go-plugin), [go-getter](https://github.com/hashicorp/go-getter)
 - **前端** — React 19, Vite, Tailwind CSS 4, TypeScript；预览用 mediabunny / pdf.js / shiki / SheetJS 等，全部按需懒加载
 - **容器** — 多阶段 Dockerfile, distroless 基础镜像, GitHub Actions CI/CD
 

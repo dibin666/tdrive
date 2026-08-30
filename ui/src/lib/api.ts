@@ -116,6 +116,79 @@ export interface Status {
   webdavPath?: string
 }
 
+export interface PluginRoute {
+  path: string
+  methods?: string[]
+  ui?: boolean
+}
+
+export interface PluginManifest {
+  id: string
+  name: string
+  description?: string
+  version: string
+  sdkVersion: string
+  apiVersion: number
+  minTdriveVersion?: string
+  author: string
+  license: string
+  repositoryUrl: string
+  documentationUrl?: string
+  entrypoint: string
+  capabilities?: string[]
+  events?: string[]
+  routes?: PluginRoute[]
+}
+
+export type PluginLifecycle = 'active' | 'disabled' | 'error' | 'stopped'
+
+export interface PluginStatus {
+  id: string
+  manifest: PluginManifest
+  enabled: boolean
+  status: PluginLifecycle | string
+  source: string
+  sourceUrl?: string
+  ref?: string
+  sourceDigest: string
+  binaryDigest: string
+  error?: string
+  installedAt: string
+  updatedAt: string
+}
+
+export interface PluginInspection {
+  inspectionId: string
+  manifest: PluginManifest
+  sourceUrl: string
+  ref?: string
+  sourceDigest: string
+  compatible: boolean
+  isUpdate: boolean
+  currentVersion?: string
+  warning?: string
+  expiresAt: string
+}
+
+export interface PluginStoreItem {
+  id: string
+  name: string
+  description?: string
+  version: string
+  author: string
+  repositoryUrl: string
+  ref?: string
+  sourceDigest: string
+  documentationUrl?: string
+  license: string
+  tags?: string[]
+}
+
+export interface PluginStoreIndex {
+  updatedAt?: string
+  plugins: PluginStoreItem[]
+}
+
 export interface LocalEntry {
   name: string
   path: string
@@ -641,6 +714,30 @@ export const api = {
 
   rebuildIndex: () => request<IndexStatus>('/index/rebuild', { method: 'POST' }),
   indexStatus: () => request<IndexStatus>('/index/status'),
+
+  plugins: () => request<PluginStatus[]>('/plugins/'),
+  pluginStore: (q = '') => request<PluginStoreIndex>(`/plugins/store${query({ q })}`),
+  inspectPlugin: (body: { sourceUrl: string; ref?: string; sourceDigest?: string }) =>
+    request<PluginInspection>('/plugins/inspect', { method: 'POST', body: json(body) }),
+  installPlugin: (inspectionId: string) =>
+    request<PluginStatus>('/plugins/install', {
+      method: 'POST',
+      body: json({ inspectionId, confirm: true }),
+    }),
+  setPluginEnabled: (id: string, enabled: boolean) =>
+    request<PluginStatus>(`/plugins/${encodeURIComponent(id)}/enable`, {
+      method: 'POST',
+      body: json({ enabled }),
+    }),
+  uninstallPlugin: (id: string) =>
+    request<void>(`/plugins/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  pluginSettings: (id: string) =>
+    request<Record<string, unknown>>(`/plugins/${encodeURIComponent(id)}/settings`),
+  updatePluginSettings: (id: string, settings: Record<string, unknown>) =>
+    request<void>(`/plugins/${encodeURIComponent(id)}/settings`, {
+      method: 'PUT',
+      body: json(settings),
+    }),
 }
 
 /** rawUrl builds a direct link to a file's bytes, for <video> and downloads. */

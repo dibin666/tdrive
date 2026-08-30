@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -38,6 +39,11 @@ type Service struct {
 	db  *database.DB
 	tg  Backend
 	log *zap.Logger
+
+	// pluginHooks stays nil until an active plugin is loaded. Keeping the
+	// pointer here, rather than an always-running broker, preserves the hot
+	// path for deployments that never install plugins.
+	pluginHooks atomic.Pointer[pluginHookHolder]
 
 	refs *refCache
 
@@ -178,16 +184,28 @@ func (s *Service) ResolveDir(ctx context.Context, p string) (database.Dir, error
 
 // Stat resolves a path to either a directory or a file.
 func (s *Service) Stat(ctx context.Context, p string) (Entry, error) {
+	request := struct {
+		Path string `json:"path"`
+	}{Path: p}
+	operation, err := s.beforePluginOperation(ctx, "files.stat", request, &request)
+	if err != nil {
+		return Entry{}, err
+	}
+	p = request.Path
 	clean, err := CleanPath(p)
 	if err != nil {
 		return Entry{}, err
 	}
 	if clean == Root {
-		return Entry{Name: "", Path: Root, IsDir: true, ID: ""}, nil
+		entry := Entry{Name: "", Path: Root, IsDir: true, ID: ""}
+		s.afterPluginOperation(ctx, operation)
+		return entry, nil
 	}
 
 	if dir, err := s.db.DirByPath(ctx, clean); err == nil {
-		return dirEntry(dir), nil
+		entry := dirEntry(dir)
+		s.afterPluginOperation(ctx, operation)
+		return entry, nil
 	} else if !errors.Is(err, database.ErrNotFound) {
 		return Entry{}, err
 	}
@@ -209,11 +227,21 @@ func (s *Service) Stat(ctx context.Context, p string) (Entry, error) {
 		// absent is better than handing a client a truncated stream.
 		return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, clean)
 	}
-	return fileEntry(f, clean), nil
+	entry := fileEntry(f, clean)
+	s.afterPluginOperation(ctx, operation)
+	return entry, nil
 }
 
 // List returns the contents of a directory, directories first.
 func (s *Service) List(ctx context.Context, p string) ([]Entry, error) {
+	request := struct {
+		Path string `json:"path"`
+	}{Path: p}
+	operation, err := s.beforePluginOperation(ctx, "files.list", request, &request)
+	if err != nil {
+		return nil, err
+	}
+	p = request.Path
 	dir, err := s.ResolveDir(ctx, p)
 	if err != nil {
 		return nil, err
@@ -250,6 +278,7 @@ func (s *Service) List(ctx context.Context, p string) ([]Entry, error) {
 	for _, f := range files {
 		out = append(out, fileEntry(f, Join(base, f.Name)))
 	}
+	s.afterPluginOperation(ctx, operation)
 	return out, nil
 }
 
@@ -261,18 +290,29 @@ func (s *Service) List(ctx context.Context, p string) ([]Entry, error) {
 // the indexer picks up on the next rebuild. The other order would leave the
 // index pointing at a message that does not exist.
 func (s *Service) Mkdir(ctx context.Context, p string) (database.Dir, error) {
+	request := struct {
+		Path string `json:"path"`
+	}{Path: p}
+	operation, err := s.beforePluginOperation(ctx, "files.mkdir", request, &request)
+	if err != nil {
+		return database.Dir{}, err
+	}
+	p = request.Path
 	clean, err := CleanPath(p)
 	if err != nil {
 		return database.Dir{}, err
 	}
 	if clean == Root {
-		return database.Dir{Path: Root}, nil
+		directory := database.Dir{Path: Root}
+		s.afterPluginOperation(ctx, operation)
+		return directory, nil
 	}
 
 	s.mkdirMu.Lock()
 	defer s.mkdirMu.Unlock()
 
 	if existing, err := s.db.DirByPath(ctx, clean); err == nil {
+		s.afterPluginOperation(ctx, operation)
 		return existing, nil
 	} else if !errors.Is(err, database.ErrNotFound) {
 		return database.Dir{}, err
@@ -309,6 +349,7 @@ func (s *Service) Mkdir(ctx context.Context, p string) (database.Dir, error) {
 		}
 		current, parentID, parentPath = created, created.ID, childPath
 	}
+	s.afterPluginOperation(ctx, operation)
 	return current, nil
 }
 

@@ -19,6 +19,7 @@ Turn your Telegram account into a network drive with unlimited storage.
 - **Index rebuild** — the database is just a cache; the directory tree, file metadata and ownership can all be reconstructed from the Telegram channel
 - **Multi-user** — JWT authentication, roles, twelve fine-grained permissions, per-account directory scoping, storage quotas, account enable/disable, session management and an audit log
 - **Transfer centre** — uploads and downloads in one filterable list: by kind, status, source and date range, with live speed, average speed and elapsed time, and deletable history. Transfers the server drives itself — WebDAV reads and writes, VPS-local uploads, remote fetches, staged downloads — are timed server-side and stream their progress over SSE, so the list moves without being refreshed
+- **Full-trust Go plugins** — install from the plugin store or an HTTPS source repository, review the manifest once, then run the plugin as an isolated RPC subprocess with access to the public host API and core operation hooks
 - **Lightweight deployment** — single binary + one SQLite file, pure Go with no CGO; multi-arch Docker images for amd64 / arm64
 
 ## Quick Start
@@ -85,6 +86,12 @@ Visit `http://localhost:8080` after launch; a setup wizard will appear on first 
 | `TDRIVE_CACHE_DIR` | `<data dir>/cache` | Where staged downloads are assembled |
 | `TDRIVE_CACHE_LIMIT` | `20GiB` | Disk the staging cache may hold; 0 disables staging |
 | `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | Parallel connections one download may hold |
+| `TDRIVE_PLUGIN_DIR` | `<data dir>/plugins` | Installed plugin binaries |
+| `TDRIVE_PLUGIN_STORE_URL` | *(empty)* | HTTPS plugin store index; empty disables the store |
+| `TDRIVE_PLUGIN_BUILDER_ADDRESS` | `<data dir>/plugin-builder.sock` | Private builder Unix socket or loopback address |
+| `TDRIVE_PLUGIN_BUILDER_COMMAND` | `tdrive-plugin-builder` | Builder command for non-Compose deployments |
+| `TDRIVE_PLUGIN_SOURCE_MAX_BYTES` | `512MiB` | Maximum fetched plugin source size |
+| `TDRIVE_PLUGIN_BUILD_TIMEOUT` | `10m` | Maximum plugin build time |
 
 After logging in as an administrator, configure the remaining runtime settings in **Settings**:
 
@@ -116,6 +123,20 @@ its ceiling and step from it, so an invalid combination cannot be selected in th
 These settings are stored in the SQLite data directory and take effect without restarting the server. The Telegram connection is rebuilt automatically when its pool size or request interval changes.
 
 `TDRIVE_LOCAL_PATH` is the host-side Compose path. With `docker run`, add `-v /srv/repository:/vps:ro` manually, then set `/vps` in **Settings → Storage**; no environment variable is required.
+
+## Plugins
+
+Administrators can open **Settings → Plugins** and install from the configured store or an
+HTTPS Git/archive URL. The source is inspected first; one **Confirm install** action then fetches,
+rebuilds, verifies and starts it immediately. Plugins are full-trust code: no capability
+authorization is applied, and the installation warning is not a sandbox guarantee.
+
+The main image remains distroless. Docker Compose runs an idle Go/Git
+`tdrive-plugin-builder` sidecar; it only fetches or compiles source when plugin inspection or
+installation is requested.
+Plugin SDK, manifest, Host API, lifecycle, and store submission requirements are documented in
+[`docs/plugins.md`](docs/plugins.md). The default empty store index is
+[`plugins/index.json`](plugins/index.json).
 
 ## Accounts and permissions
 
@@ -167,7 +188,7 @@ rclone ls tdrive:
 
 ## Tech Stack
 
-- **Backend** — Go, [gotd/td](https://github.com/gotd/td) (MTProto), [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) (pure Go SQLite)
+- **Backend** — Go, [gotd/td](https://github.com/gotd/td) (MTProto), [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) (pure Go SQLite), [go-plugin](https://github.com/hashicorp/go-plugin), [go-getter](https://github.com/hashicorp/go-getter)
 - **Frontend** — React 19, Vite, Tailwind CSS 4, TypeScript; previews use mediabunny, pdf.js, shiki and SheetJS, all lazily loaded
 - **Container** — multi-stage Dockerfile, distroless base image, GitHub Actions CI/CD
 

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import {
-  Database,
+	Blocks,
+	Database,
   Gauge,
   HardDrive,
   KeyRound,
@@ -20,6 +21,7 @@ import { StoragePage } from './StoragePage'
 import { UsersPage } from './UsersPage'
 import { SecurityPage } from './SecurityPage'
 import { MaintenancePage } from './MaintenancePage'
+import { PluginsPage } from './PluginsPage'
 
 /**
  * Settings, split by the question each page answers.
@@ -31,7 +33,7 @@ import { MaintenancePage } from './MaintenancePage'
  * account, and never sees the eight tuning sliders.
  */
 
-type Tab = 'account' | 'security' | 'users' | 'telegram' | 'performance' | 'storage' | 'maintenance'
+type Tab = 'account' | 'security' | 'users' | 'telegram' | 'performance' | 'storage' | 'maintenance' | 'plugins'
 
 interface TabItem {
   id: Tab
@@ -48,6 +50,7 @@ const TABS: TabItem[] = [
   { id: 'performance', label: '性能参数', icon: SlidersHorizontal, adminOnly: true },
   { id: 'storage', label: '存储与暂存', icon: HardDrive, adminOnly: true },
   { id: 'maintenance', label: '索引与日志', icon: Database, adminOnly: true },
+  { id: 'plugins', label: '插件', icon: Blocks, adminOnly: true },
 ]
 
 export function Settings() {
@@ -99,6 +102,7 @@ export function Settings() {
             {tab === 'performance' && isAdmin && <PerformancePage />}
             {tab === 'storage' && isAdmin && <StoragePage onChanged={refreshStatus} />}
             {tab === 'maintenance' && isAdmin && <MaintenancePage />}
+            {tab === 'plugins' && isAdmin && <PluginsPage />}
           </div>
         </div>
       </div>

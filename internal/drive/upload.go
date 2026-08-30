@@ -54,6 +54,10 @@ type Progress func(uploaded, total int64)
 // transfer panel can show and resume instead of orphaned Telegram messages that
 // nothing points at.
 func (s *Service) Begin(ctx context.Context, req UploadRequest) (database.UploadJob, database.File, error) {
+	operation, err := s.beforePluginOperation(ctx, "files.beginUpload", req, &req)
+	if err != nil {
+		return database.UploadJob{}, database.File{}, err
+	}
 	if err := ValidateName(req.Name); err != nil {
 		return database.UploadJob{}, database.File{}, err
 	}
@@ -141,6 +145,7 @@ func (s *Service) Begin(ctx context.Context, req UploadRequest) (database.Upload
 		_ = s.db.DeleteFile(ctx, file.ID)
 		return database.UploadJob{}, database.File{}, err
 	}
+	s.afterPluginOperation(ctx, operation)
 	return job, file, nil
 }
 
@@ -183,6 +188,20 @@ func (s *Service) PutSegment(
 	size int64,
 	progress Progress,
 ) error {
+	request := struct {
+		JobID string `json:"jobId"`
+		Index int    `json:"index"`
+		Size  int64  `json:"size"`
+	}{JobID: job.ID, Index: index, Size: size}
+	operation, err := s.beforePluginOperation(ctx, "files.putSegment", request, &request)
+	if err != nil {
+		return err
+	}
+	job, err = s.db.JobByID(ctx, request.JobID)
+	if err != nil {
+		return err
+	}
+	index, size = request.Index, request.Size
 	if index < 1 || index > job.SegmentCount {
 		return fmt.Errorf("segment %d is outside the file's %d segments", index, job.SegmentCount)
 	}
@@ -218,6 +237,9 @@ func (s *Service) PutSegment(
 		return err
 	}
 	_, err = s.db.MarkSegmentDone(ctx, job.ID, index, size)
+	if err == nil {
+		s.afterPluginOperation(ctx, operation)
+	}
 	return err
 }
 
@@ -299,7 +321,15 @@ func (s *Service) fileCaption(ctx context.Context, file database.File, index int
 // Complete finalises a job once every segment has landed, making the file
 // visible to listings and WebDAV.
 func (s *Service) Complete(ctx context.Context, jobID string) (database.File, error) {
-	job, err := s.db.JobByID(ctx, jobID)
+	request := struct {
+		JobID string `json:"jobId"`
+	}{JobID: jobID}
+	operation, err := s.beforePluginOperation(ctx, "files.completeUpload", request, &request)
+	if err != nil {
+		return database.File{}, err
+	}
+	jobID = request.JobID
+	job, err := s.db.JobByID(ctx, request.JobID)
 	if err != nil {
 		return database.File{}, err
 	}
@@ -315,12 +345,30 @@ func (s *Service) Complete(ctx context.Context, jobID string) (database.File, er
 	// Only a successful completion closes a browser lease. A missing segment
 	// or a transient database error must leave the job retryable.
 	s.ReleaseUploadJob(jobID)
-	return s.db.FileByID(ctx, job.FileID)
+	file, err := s.db.FileByID(ctx, job.FileID)
+	if err == nil {
+		s.afterPluginOperation(ctx, operation)
+	}
+	return file, err
 }
 
 // Abort tears down a failed or cancelled upload, removing whatever segments did
 // land so the channel is not left holding documents nothing points at.
 func (s *Service) Abort(ctx context.Context, jobID, reason string, status database.JobStatus) error {
+	request := struct {
+		JobID  string `json:"jobId"`
+		Reason string `json:"reason"`
+		Status string `json:"status"`
+	}{JobID: jobID, Reason: reason, Status: string(status)}
+	operation, err := s.beforePluginOperation(ctx, "files.abortUpload", request, &request)
+	if err != nil {
+		return err
+	}
+	jobID, reason = request.JobID, request.Reason
+	status = database.JobStatus(request.Status)
+	if status != database.JobFailed && status != database.JobCancelled {
+		return fmt.Errorf("invalid upload abort status %q", status)
+	}
 	defer s.ReleaseUploadJob(jobID)
 
 	job, err := s.db.JobByID(ctx, jobID)
@@ -335,7 +383,11 @@ func (s *Service) Abort(ctx context.Context, jobID, reason string, status databa
 			}
 		}
 	}
-	return s.db.SetJobStatus(ctx, jobID, status, reason)
+	err = s.db.SetJobStatus(ctx, jobID, status, reason)
+	if err == nil {
+		s.afterPluginOperation(ctx, operation)
+	}
+	return err
 }
 
 // UploadStream stores a whole file from one reader of known length, splitting

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dibin/tdrive/internal/database"
+	tdriveplugin "github.com/dibin/tdrive/pkg/plugin"
 )
 
 type ctxKey int
@@ -37,8 +38,53 @@ func (s *Service) RequireAuth(next http.Handler) http.Handler {
 			writeUnauthorized(w, false)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
+		requestContext := WithUser(r.Context(), user)
+		requestContext = tdriveplugin.WithUserID(requestContext, user.ID)
+		next.ServeHTTP(w, r.WithContext(requestContext))
 	})
+}
+
+// RequireBrowserAuth is the session-aware variant used by pages opened through
+// a normal browser navigation. Such a navigation cannot attach the in-memory
+// bearer token, but it does send the HttpOnly refresh cookie. The cookie is
+// checked without rotating it, so opening a plugin UI does not unexpectedly
+// invalidate other API requests using the current access token.
+func (s *Service) RequireBrowserAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, ok := s.authenticate(r)
+		if !ok {
+			cookie, cookieErr := r.Cookie(RefreshCookie)
+			if cookieErr == nil {
+				user, cookieErr = s.UserForRefresh(r.Context(), cookie.Value)
+				ok = cookieErr == nil
+			}
+		}
+		if !ok {
+			writeUnauthorized(w, false)
+			return
+		}
+		requestContext := WithUser(r.Context(), user)
+		requestContext = tdriveplugin.WithUserID(requestContext, user.ID)
+		next.ServeHTTP(w, r.WithContext(requestContext))
+	})
+}
+
+// UserForRefresh resolves the account behind a refresh cookie without issuing
+// a new token pair. It is intentionally narrow so browser page navigation can
+// reuse the same session check without exposing refresh-token internals.
+func (s *Service) UserForRefresh(ctx context.Context, refresh string) (database.User, error) {
+	userID, _, err := s.db.LookupRefreshToken(ctx, HashRefreshToken(refresh))
+	if err != nil {
+		return database.User{}, ErrBadCredentials
+	}
+	user, err := s.db.UserByID(ctx, userID)
+	if err != nil {
+		return database.User{}, ErrBadCredentials
+	}
+	if !user.Enabled {
+		return database.User{}, ErrAccountDisabled
+	}
+	return user, nil
 }
 
 // RequireAdmin guards the endpoints that reconfigure the drive itself.
@@ -101,7 +147,9 @@ func (s *Service) RequireBasic(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusForbidden, "this account is not allowed to use WebDAV")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
+		requestContext := WithUser(r.Context(), user)
+		requestContext = tdriveplugin.WithUserID(requestContext, user.ID)
+		next.ServeHTTP(w, r.WithContext(requestContext))
 	})
 }
 

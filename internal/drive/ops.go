@@ -18,6 +18,15 @@ import (
 
 // Rename changes the final component of a path.
 func (s *Service) Rename(ctx context.Context, p, newName string) (Entry, error) {
+	request := struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}{Path: p, Name: newName}
+	operation, err := s.beforePluginOperation(ctx, "files.rename", request, &request)
+	if err != nil {
+		return Entry{}, err
+	}
+	p, newName = request.Path, request.Name
 	if err := ValidateName(newName); err != nil {
 		return Entry{}, err
 	}
@@ -31,7 +40,11 @@ func (s *Service) Rename(ctx context.Context, p, newName string) (Entry, error) 
 
 	parentPath, oldName := Parent(clean)
 	if oldName == newName {
-		return s.Stat(ctx, clean)
+		entry, statErr := s.Stat(ctx, clean)
+		if statErr == nil {
+			s.afterPluginOperation(ctx, operation)
+		}
+		return entry, statErr
 	}
 	parent, err := s.ResolveDir(ctx, parentPath)
 	if err != nil {
@@ -42,7 +55,11 @@ func (s *Service) Rename(ctx context.Context, p, newName string) (Entry, error) 
 	}
 
 	if dir, err := s.db.DirByPath(ctx, clean); err == nil {
-		return s.renameDir(ctx, dir, newName, Join(parentPath, newName))
+		entry, renameErr := s.renameDir(ctx, dir, newName, Join(parentPath, newName))
+		if renameErr == nil {
+			s.afterPluginOperation(ctx, operation)
+		}
+		return entry, renameErr
 	} else if !errors.Is(err, database.ErrNotFound) {
 		return Entry{}, err
 	}
@@ -54,7 +71,11 @@ func (s *Service) Rename(ctx context.Context, p, newName string) (Entry, error) 
 	if err != nil {
 		return Entry{}, err
 	}
-	return s.renameFile(ctx, file, newName, parentPath)
+	entry, renameErr := s.renameFile(ctx, file, newName, parentPath)
+	if renameErr == nil {
+		s.afterPluginOperation(ctx, operation)
+	}
+	return entry, renameErr
 }
 
 func (s *Service) renameDir(ctx context.Context, dir database.Dir, newName, newPath string) (Entry, error) {
@@ -105,6 +126,15 @@ func (s *Service) renameFile(ctx context.Context, file database.File, newName, d
 
 // Move relocates a path into another directory.
 func (s *Service) Move(ctx context.Context, from, toDir string) (Entry, error) {
+	request := struct {
+		From  string `json:"from"`
+		ToDir string `json:"toDir"`
+	}{From: from, ToDir: toDir}
+	operation, err := s.beforePluginOperation(ctx, "files.move", request, &request)
+	if err != nil {
+		return Entry{}, err
+	}
+	from, toDir = request.From, request.ToDir
 	src, err := CleanPath(from)
 	if err != nil {
 		return Entry{}, err
@@ -146,7 +176,9 @@ func (s *Service) Move(ctx context.Context, from, toDir string) (Entry, error) {
 				zap.String("path", newPath), zap.Error(err))
 		}
 		s.refreshSubtreeCaptions(ctx, updated)
-		return dirEntry(updated), nil
+		entry := dirEntry(updated)
+		s.afterPluginOperation(ctx, operation)
+		return entry, nil
 	} else if !errors.Is(err, database.ErrNotFound) {
 		return Entry{}, err
 	}
@@ -175,7 +207,9 @@ func (s *Service) Move(ctx context.Context, from, toDir string) (Entry, error) {
 		s.log.Warn("could not update file captions after move",
 			zap.String("file", file.ID), zap.Error(err))
 	}
-	return fileEntry(file, Join(dstDir, name)), nil
+	entry := fileEntry(file, Join(dstDir, name))
+	s.afterPluginOperation(ctx, operation)
+	return entry, nil
 }
 
 // Delete removes a file or a whole directory subtree, taking the Telegram
@@ -185,7 +219,14 @@ func (s *Service) Move(ctx context.Context, from, toDir string) (Entry, error) {
 // dropping them first would strand every document in the channel with nothing
 // pointing at it.
 func (s *Service) Delete(ctx context.Context, p string) error {
-	clean, err := CleanPath(p)
+	request := struct {
+		Path string `json:"path"`
+	}{Path: p}
+	operation, err := s.beforePluginOperation(ctx, "files.delete", request, &request)
+	if err != nil {
+		return err
+	}
+	clean, err := CleanPath(request.Path)
 	if err != nil {
 		return err
 	}
@@ -201,7 +242,11 @@ func (s *Service) Delete(ctx context.Context, p string) error {
 		if err := s.deleteMessages(ctx, msgs); err != nil {
 			return err
 		}
-		return s.db.DeleteDir(ctx, dir.ID)
+		err = s.db.DeleteDir(ctx, dir.ID)
+		if err == nil {
+			s.afterPluginOperation(ctx, operation)
+		}
+		return err
 	} else if !errors.Is(err, database.ErrNotFound) {
 		return err
 	}
@@ -218,17 +263,33 @@ func (s *Service) Delete(ctx context.Context, p string) error {
 	if err != nil {
 		return err
 	}
-	return s.deleteFileRow(ctx, file)
+	err = s.deleteFileRow(ctx, file)
+	if err == nil {
+		s.afterPluginOperation(ctx, operation)
+	}
+	return err
 }
 
 // DeleteFileByID removes one file, used by the API where the client already
 // holds an id.
 func (s *Service) DeleteFileByID(ctx context.Context, id string) error {
+	request := struct {
+		ID string `json:"id"`
+	}{ID: id}
+	operation, err := s.beforePluginOperation(ctx, "files.deleteByID", request, &request)
+	if err != nil {
+		return err
+	}
+	id = request.ID
 	file, err := s.db.FileByID(ctx, id)
 	if err != nil {
 		return err
 	}
-	return s.deleteFileRow(ctx, file)
+	err = s.deleteFileRow(ctx, file)
+	if err == nil {
+		s.afterPluginOperation(ctx, operation)
+	}
+	return err
 }
 
 func (s *Service) deleteFileRow(ctx context.Context, file database.File) error {

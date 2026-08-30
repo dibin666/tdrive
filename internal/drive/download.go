@@ -68,6 +68,15 @@ type StageRequest struct {
 // first rather than pulling the same bytes out of Telegram twice, which is
 // both faster for them and cheaper on the rate limit.
 func (s *Service) StartStaged(ctx context.Context, req StageRequest) (database.DownloadJob, error) {
+	request := struct {
+		FileID string `json:"fileId"`
+		UserID string `json:"userId"`
+	}{FileID: req.FileID, UserID: req.UserID}
+	operation, err := s.beforePluginOperation(ctx, "downloads.stage", request, &request)
+	if err != nil {
+		return database.DownloadJob{}, err
+	}
+	req = StageRequest{FileID: request.FileID, UserID: request.UserID}
 	file, err := s.db.FileByID(ctx, req.FileID)
 	if err != nil {
 		return database.DownloadJob{}, err
@@ -93,6 +102,7 @@ func (s *Service) StartStaged(ctx context.Context, req StageRequest) (database.D
 	if existing, err := s.db.StagedDownloadFor(ctx, file.ID, time.Now().UnixMilli()); err == nil {
 		if _, statErr := os.Stat(existing.CachePath); statErr == nil {
 			_ = s.db.TouchDownload(ctx, existing.ID)
+			s.afterPluginOperation(ctx, operation)
 			return existing, nil
 		}
 		// The row outlived its file, which means something outside tdrive
@@ -106,6 +116,7 @@ func (s *Service) StartStaged(ctx context.Context, req StageRequest) (database.D
 	defer s.stageMu.Unlock()
 
 	if active, err := s.db.ActiveStagedFor(ctx, file.ID); err == nil {
+		s.afterPluginOperation(ctx, operation)
 		return active, nil
 	} else if !errors.Is(err, database.ErrNotFound) {
 		return database.DownloadJob{}, err
@@ -129,6 +140,7 @@ func (s *Service) StartStaged(ctx context.Context, req StageRequest) (database.D
 	}
 
 	s.scheduleStagedWorker(context.WithoutCancel(ctx), job, file)
+	s.afterPluginOperation(ctx, operation)
 	return job, nil
 }
 
@@ -181,7 +193,14 @@ func (s *Service) scheduleStagedWorker(ctx context.Context, job database.Downloa
 // LRU position. It reports ErrNotFound when the copy is not usable, so callers
 // fall through to streaming from Telegram.
 func (s *Service) StagedFile(ctx context.Context, jobID string) (database.DownloadJob, error) {
-	job, err := s.db.DownloadByID(ctx, jobID)
+	request := struct {
+		JobID string `json:"jobId"`
+	}{JobID: jobID}
+	operation, err := s.beforePluginOperation(ctx, "downloads.stagedFile", request, &request)
+	if err != nil {
+		return database.DownloadJob{}, err
+	}
+	job, err := s.db.DownloadByID(ctx, request.JobID)
 	if err != nil {
 		return database.DownloadJob{}, err
 	}
@@ -204,11 +223,20 @@ func (s *Service) StagedFile(ctx context.Context, jobID string) (database.Downlo
 		return database.DownloadJob{}, fmt.Errorf("%w: staged copy is gone", database.ErrNotFound)
 	}
 	_ = s.db.TouchDownload(ctx, job.ID)
+	s.afterPluginOperation(ctx, operation)
 	return job, nil
 }
 
 // CancelStaged stops a staged download and removes whatever it wrote.
 func (s *Service) CancelStaged(ctx context.Context, jobID string) error {
+	request := struct {
+		JobID string `json:"jobId"`
+	}{JobID: jobID}
+	operation, err := s.beforePluginOperation(ctx, "downloads.cancel", request, &request)
+	if err != nil {
+		return err
+	}
+	jobID = request.JobID
 	job, err := s.db.DownloadByID(ctx, jobID)
 	if err != nil {
 		return err
@@ -228,6 +256,7 @@ func (s *Service) CancelStaged(ctx context.Context, jobID string) error {
 		return err
 	}
 	_ = s.db.SetDownloadCache(ctx, jobID, "", 0)
+	s.afterPluginOperation(ctx, operation)
 	return nil
 }
 

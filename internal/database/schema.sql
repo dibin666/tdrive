@@ -250,3 +250,37 @@ CREATE TABLE audit_log (
 );
 CREATE INDEX idx_audit_at ON audit_log (at);
 CREATE INDEX idx_audit_actor ON audit_log (actor_id);
+
+-- Installed plugins are local configuration, not Telegram index data. They are
+-- kept separate so an index rebuild can never enable, disable, or remove a
+-- plugin. The manifest is stored as received and validated again before a
+-- binary is started.
+CREATE TABLE plugins (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    version       TEXT NOT NULL,
+    author        TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    status        TEXT NOT NULL DEFAULT 'disabled',
+    source        TEXT NOT NULL,
+    source_url    TEXT NOT NULL,
+    ref           TEXT NOT NULL DEFAULT '',
+    source_digest TEXT NOT NULL,
+    binary_digest TEXT NOT NULL,
+    binary_path   TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    error         TEXT NOT NULL DEFAULT '',
+    installed_at  INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+CREATE INDEX idx_plugins_enabled ON plugins (enabled);
+
+-- Namespaced plugin state is deliberately opaque to the core. A plugin can
+-- persist small settings without opening the host database itself.
+CREATE TABLE plugin_data (
+    plugin_id  TEXT NOT NULL REFERENCES plugins (id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    value      BLOB NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (plugin_id, key)
+) WITHOUT ROWID;

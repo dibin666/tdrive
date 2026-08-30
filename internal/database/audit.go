@@ -32,6 +32,11 @@ const (
 	AuditCachePurge      = "cache.purge"
 	AuditFileDelete      = "file.delete"
 	AuditFileBatchRename = "file.batchRename"
+	AuditPluginInspect   = "plugin.inspect"
+	AuditPluginInstall   = "plugin.install"
+	AuditPluginEnable    = "plugin.enable"
+	AuditPluginDisable   = "plugin.disable"
+	AuditPluginUninstall = "plugin.uninstall"
 )
 
 // AppendAudit records one action. Callers treat a failure as non-fatal: losing

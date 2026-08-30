@@ -16,6 +16,7 @@ import (
 	"github.com/dibin/tdrive/internal/drive"
 	"github.com/dibin/tdrive/internal/events"
 	"github.com/dibin/tdrive/internal/indexer"
+	"github.com/dibin/tdrive/internal/plugin"
 	"github.com/dibin/tdrive/internal/tgc"
 )
 
@@ -32,9 +33,17 @@ type Server struct {
 	setLogLevel func(string) error
 	settingsMu  sync.Mutex
 	progress    *liveUploadProgress
+	plugins     *plugin.Manager
 	// downloadRates times the staged downloads this process is copying, which
 	// is the only place their speed can be measured.
 	downloadRates *liveRates
+}
+
+// SetPluginManager attaches the optional plugin management surface. It is a
+// setter rather than a required constructor argument so existing embedders and
+// API tests keep the no-plugin construction path.
+func (s *Server) SetPluginManager(manager *plugin.Manager) {
+	s.plugins = manager
 }
 
 func New(
@@ -70,6 +79,9 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
+	if s.plugins != nil {
+		r.Use(s.plugins.HTTPMiddleware)
+	}
 	// No blanket request timeout: a single upload segment or a long download
 	// legitimately runs for many minutes, and the handlers that do need a
 	// deadline set their own.
@@ -200,6 +212,8 @@ func (s *Server) Routes() http.Handler {
 
 			r.Post("/index/rebuild", s.handleRebuildIndex)
 			r.Get("/index/status", s.handleIndexStatus)
+
+			s.pluginRoutes(r)
 		})
 	})
 

@@ -291,6 +291,60 @@ func TestMigrateV3PreservesDownloadHistory(t *testing.T) {
 	}
 }
 
+func TestPluginMetadataAndDataAreIndependentFromDriveIndex(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "plugins.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	pluginRecord := PluginRecord{
+		ID:           "example",
+		Name:         "Example",
+		Version:      "1.0.0",
+		Author:       "tdrive",
+		Enabled:      true,
+		Status:       PluginStatusActive,
+		Source:       "source",
+		SourceURL:    "https://example.com/plugin",
+		SourceDigest: "source-digest",
+		BinaryDigest: "binary-digest",
+		BinaryPath:   "/plugins/example",
+		ManifestJSON: "{}",
+		InstalledAt:  time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	if err := db.UpsertPlugin(ctx, pluginRecord); err != nil {
+		t.Fatalf("UpsertPlugin: %v", err)
+	}
+	if err := db.SetPluginData(ctx, pluginRecord.ID, "settings", []byte(`{"enabled":true}`)); err != nil {
+		t.Fatalf("SetPluginData: %v", err)
+	}
+	value, err := db.PluginData(ctx, pluginRecord.ID, "settings")
+	if err != nil {
+		t.Fatalf("PluginData: %v", err)
+	}
+	if string(value) != `{"enabled":true}` {
+		t.Fatalf("plugin data changed: %s", value)
+	}
+
+	updated, err := db.UpdatePluginState(ctx, pluginRecord.ID, false, PluginStatusDisabled, "")
+	if err != nil {
+		t.Fatalf("UpdatePluginState: %v", err)
+	}
+	if updated.Enabled || updated.Status != PluginStatusDisabled {
+		t.Fatalf("plugin state was not updated: %+v", updated)
+	}
+	plugins, err := db.ListPlugins(ctx)
+	if err != nil || len(plugins) != 1 {
+		t.Fatalf("ListPlugins = %#v, %v", plugins, err)
+	}
+	if _, err := db.ListDirs(ctx, ""); err != nil {
+		t.Fatalf("plugin metadata broke drive index: %v", err)
+	}
+}
+
 func mustDirs(t *testing.T, db *DB) []Dir {
 	t.Helper()
 	dirs, err := db.AllDirs(context.Background())
