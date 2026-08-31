@@ -40,6 +40,12 @@ type Message struct {
 // shows up on the day someone actually needs it.
 type Source interface {
 	ScanHistory(ctx context.Context, ch drive.ChannelRef, visit func(Message) error) error
+
+	// ID names the Telegram account doing the scanning. Document access hashes
+	// are minted per account, so the handles a rebuild recovers are only usable
+	// by this one; recording that lets a reader on another account know it has
+	// to resolve its own rather than presenting these and failing.
+	ID() string
 }
 
 // RecoveredDir is where directories whose parent is missing are attached, so a
@@ -489,6 +495,11 @@ func (ix *Indexer) buildFiles(
 				row.AccessHash = seg.doc.AccessHash
 				row.FileReference = seg.doc.FileReference
 				row.DCID = seg.doc.DCID
+				// The handles above belong to whichever account read the
+				// history, not to whichever originally uploaded — that is not
+				// recoverable from a caption. Recording the scanner keeps the
+				// pair usable by at least one account instead of none.
+				row.AccountID = ix.tg.ID()
 			}
 			segments = append(segments, row)
 		}

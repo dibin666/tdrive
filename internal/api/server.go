@@ -22,11 +22,15 @@ import (
 
 // Server wires the HTTP surface together.
 type Server struct {
-	cfg         *config.Config
-	db          *database.DB
-	auth        *auth.Service
-	drive       *drive.Service
-	tg          *tgc.Manager
+	cfg   *config.Config
+	db    *database.DB
+	auth  *auth.Service
+	drive *drive.Service
+	// accounts holds every Telegram login. Handlers that manage the drive's
+	// identity — the setup wizard, the channel picker, credential changes —
+	// act on the primary account through primary(); the ones under
+	// /tg/accounts address a specific one.
+	accounts    *tgc.Cluster
 	index       *indexer.Indexer
 	events      *events.Broker
 	log         *zap.Logger
@@ -51,7 +55,7 @@ func New(
 	db *database.DB,
 	authSvc *auth.Service,
 	driveSvc *drive.Service,
-	tgm *tgc.Manager,
+	accounts *tgc.Cluster,
 	idx *indexer.Indexer,
 	broker *events.Broker,
 	log *zap.Logger,
@@ -63,13 +67,31 @@ func New(
 	}
 	server := &Server{
 		cfg: cfg, db: db, auth: authSvc, drive: driveSvc,
-		tg: tgm, index: idx, events: broker, log: log, setLogLevel: applyLogLevel,
+		accounts: accounts, index: idx, events: broker, log: log, setLogLevel: applyLogLevel,
 		progress:      newLiveUploadProgress(),
 		downloadRates: newLiveRates(),
 	}
 	wireRemoteProgress(driveSvc, broker, server.progress)
 	wireDownloadProgress(driveSvc, broker, server.downloadRates)
 	return server
+}
+
+// primary is the account the drive's identity belongs to: the one the setup
+// wizard signs in, the one whose access hash the channels table holds, and the
+// one the top-level /tg endpoints act on. Accounts added afterwards are managed
+// individually under /tg/accounts.
+func (s *Server) primary() (*tgc.Manager, error) {
+	return s.accounts.Primary()
+}
+
+// telegramStatus reports the primary account without failing when there is no
+// account at all, which is precisely the state the setup wizard exists for.
+func (s *Server) telegramStatus() tgc.Status {
+	manager, err := s.primary()
+	if err != nil {
+		return tgc.Status{State: tgc.StateUnconfigured}
+	}
+	return manager.Status()
 }
 
 // Routes builds the /api subtree. WebDAV and the static UI are mounted by the
@@ -187,6 +209,19 @@ func (s *Server) Routes() http.Handler {
 				r.Get("/channels", s.handleListChannels)
 				r.Post("/channels", s.handleCreateChannel)
 				r.Post("/channels/select", s.handleSelectChannel)
+
+				// Additional Telegram accounts. The endpoints above act on the
+				// primary one, which is what the setup wizard configures.
+				r.Route("/accounts", func(r chi.Router) {
+					r.Get("/", s.handleListAccounts)
+					r.Post("/", s.handleCreateAccount)
+					r.Patch("/{id}", s.handleUpdateAccount)
+					r.Delete("/{id}", s.handleDeleteAccount)
+					r.Post("/{id}/join-channel", s.handleAccountJoinChannel)
+					r.Post("/{id}/login/code", s.handleAccountSendCode)
+					r.Post("/{id}/login/signin", s.handleAccountSignIn)
+					r.Post("/{id}/login/password", s.handleAccountPassword)
+				})
 			})
 		})
 
@@ -257,7 +292,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	body := statusBody{
 		NeedsSetup:   needsSetup,
-		Telegram:     s.tg.Status(),
+		Telegram:     s.telegramStatus(),
 		Version:      tgc.Version,
 		SegmentSize:  s.cfg.RuntimeSettings().SegmentSize,
 		LocalEnabled: s.cfg.RuntimeSettings().LocalRoot != "",

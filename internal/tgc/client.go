@@ -1,10 +1,17 @@
-// Package tgc owns the Telegram connection: its lifecycle, its connection pool
-// and the login flow that the WebUI drives.
+// Package tgc owns the Telegram connections: their lifecycle, their connection
+// pools and the login flow that the WebUI drives.
 //
 // gotd's Client.Run blocks for as long as the connection should live, which
 // suits a CLI but not a server that has to answer HTTP requests the whole time.
 // Manager therefore runs it on its own goroutine and publishes a snapshot of
 // the connection state that handlers can read without blocking.
+//
+// One Manager is one Telegram account. A deployment may hold several, held
+// together by Cluster: Telegram meters FLOOD_WAIT and transfer quota per
+// account, so a second login is the only way to get a second budget. Nothing
+// is shared between them — separate credentials, separate session files,
+// separate pools, separate rate limiters — which is what lets one sit out a
+// FLOOD_WAIT while the others keep working.
 package tgc
 
 import (
@@ -15,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gotd/contrib/middleware/floodwait"
@@ -68,20 +76,30 @@ type Status struct {
 	AwaitingCode bool   `json:"awaitingCode"`
 	// AwaitingPassword means the account has 2FA and the code was accepted.
 	AwaitingPassword bool `json:"awaitingPassword"`
+	// CooldownMs is how long Telegram has told this account to wait before
+	// sending more requests. Non-zero means the scheduler is routing new work
+	// to the other accounts.
+	CooldownMs int64 `json:"cooldownMs,omitempty"`
 }
 
-// Manager owns the single Telegram connection shared by the whole process.
+// Manager owns one Telegram account's connection.
 type Manager struct {
 	cfg *config.Config
 	db  *database.DB
 	log *zap.Logger
 
 	mu     sync.RWMutex
+	acct   database.TGAccount
 	state  State
 	runErr error
 	client *telegram.Client
 	pool   Pool
 	self   *tg.User
+
+	// coolUntil is a Unix-milli deadline set by the health middleware when
+	// Telegram answers with FLOOD_WAIT. It is read without the mutex on every
+	// scheduling decision, which is why it is atomic rather than guarded.
+	coolUntil atomic.Int64
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -99,33 +117,93 @@ type Manager struct {
 	awaitingPass  bool
 }
 
-// New builds a manager. It does not connect; call Start.
-func New(cfg *config.Config, db *database.DB, log *zap.Logger) *Manager {
-	return &Manager{cfg: cfg, db: db, log: log, state: StateUnconfigured}
+// New builds a manager for one account. It does not connect; call Start.
+func New(cfg *config.Config, db *database.DB, log *zap.Logger, acct database.TGAccount) *Manager {
+	return &Manager{
+		cfg:   cfg,
+		db:    db,
+		log:   log.With(zap.String("account", acct.ID)),
+		acct:  acct,
+		state: StateUnconfigured,
+	}
 }
 
-// Credentials resolves the api_id/api_hash pair from the current runtime
-// snapshot. The snapshot starts with legacy environment values and is then
-// overlaid with values saved by the setup wizard or WebUI.
-func (m *Manager) Credentials(ctx context.Context) (int, string, error) {
-	settings := m.cfg.RuntimeSettings()
-	appID, appHash := settings.AppID, settings.AppHash
-	if appID == 0 {
-		if v := m.db.SettingOr(ctx, database.SettingTGAppID, ""); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil {
-				return 0, "", fmt.Errorf("stored app id %q is not a number: %w", v, err)
-			}
-			appID = n
-		}
+// ID identifies this account across the drive, the scheduler and the segments
+// table.
+func (m *Manager) ID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.acct.ID
+}
+
+// Account returns the stored row backing this connection.
+func (m *Manager) Account() database.TGAccount {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.acct
+}
+
+// SessionPath is where this account's gotd session lives. Every account gets
+// its own file: sharing one would mean two clients overwriting each other's
+// auth key.
+func (m *Manager) SessionPath() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return sessionPath(m.cfg, m.acct)
+}
+
+func sessionPath(cfg *config.Config, acct database.TGAccount) string {
+	name := acct.SessionFile
+	if name == "" {
+		name = database.LegacySessionFile
 	}
-	if appHash == "" {
-		appHash = m.db.SettingOr(ctx, database.SettingTGAppHash, "")
+	if filepath.IsAbs(name) {
+		return name
 	}
+	return filepath.Join(cfg.Server.DataDir, name)
+}
+
+// Credentials returns this account's api_id/api_hash pair.
+func (m *Manager) Credentials(context.Context) (int, string, error) {
+	m.mu.RLock()
+	appID, appHash := m.acct.AppID, m.acct.AppHash
+	m.mu.RUnlock()
 	if appID == 0 || appHash == "" {
 		return 0, "", ErrNotConfigured
 	}
 	return appID, appHash, nil
+}
+
+// Cooldown is how much of a FLOOD_WAIT this account still has to sit out. Zero
+// means it is free to take work.
+func (m *Manager) Cooldown() time.Duration {
+	remaining := time.UnixMilli(m.coolUntil.Load()).Sub(time.Now())
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
+// Available reports whether the scheduler may hand this account new work: it
+// is signed in and not sitting out a FLOOD_WAIT.
+func (m *Manager) Available() bool {
+	return m.Ready() && m.Cooldown() == 0
+}
+
+// markFlood records a FLOOD_WAIT so the scheduler stops choosing this account
+// until it expires. The waiter middleware still absorbs the wait for requests
+// already in flight; this only steers new ones elsewhere.
+func (m *Manager) markFlood(wait time.Duration) {
+	if wait <= 0 {
+		return
+	}
+	until := time.Now().Add(wait).UnixMilli()
+	for {
+		current := m.coolUntil.Load()
+		if current >= until || m.coolUntil.CompareAndSwap(current, until) {
+			return
+		}
+	}
 }
 
 // Start connects and, if a stored session is still valid, comes up signed in.
@@ -147,8 +225,9 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	m.Stop()
 	settings := m.cfg.RuntimeSettings()
+	sessionFile := m.SessionPath()
 
-	if err := os.MkdirAll(filepath.Dir(m.cfg.Telegram.SessionFile), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
 		return fmt.Errorf("create session directory: %w", err)
 	}
 
@@ -156,13 +235,22 @@ func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	// FLOOD_WAIT at all; the waiter then absorbs the ones that still happen,
 	// which is what the reference implementation does by hand around every
 	// send_message call.
+	//
+	// The health observer sits inside the waiter so that it sees the raw
+	// FLOOD_WAIT before the waiter retries it away. That is the signal the
+	// scheduler needs to start sending new transfers to another account.
+	//
+	// Every one of these is per-account: the rate limiter, the retry budget and
+	// the connection pool below all belong to this login alone, which is the
+	// whole point of running more than one.
 	middlewares := []telegram.Middleware{
 		floodwait.NewSimpleWaiter().WithMaxRetries(5).WithMaxWait(5 * time.Minute),
+		m.healthMiddleware(),
 		ratelimit.New(rate.Every(settings.RateLimit), m.cfg.Telegram.RateBurst),
 	}
 
 	client := telegram.NewClient(appID, appHash, telegram.Options{
-		SessionStorage: &session.FileStorage{Path: m.cfg.Telegram.SessionFile},
+		SessionStorage: &session.FileStorage{Path: sessionFile},
 		Middlewares:    middlewares,
 		Device: telegram.DeviceConfig{
 			DeviceModel:   "tdrive",
@@ -246,11 +334,17 @@ func (m *Manager) refreshAuth(ctx context.Context) {
 	m.mu.Lock()
 	becameReady := false
 	var onReady func()
+	accountID := m.acct.ID
 	if status.Authorized {
 		becameReady = m.state != StateReady
 		m.self = status.User
 		m.state = StateReady
 		m.loginPhone, m.loginCodeHash, m.awaitingPass = "", "", false
+		m.acct.TGUserID = status.User.GetID()
+		m.acct.Username = status.User.Username
+		if status.User.Phone != "" {
+			m.acct.Phone = status.User.Phone
+		}
 		m.log.Info("telegram session ready",
 			zap.Int64("user_id", status.User.GetID()),
 			zap.String("username", status.User.Username))
@@ -258,28 +352,54 @@ func (m *Manager) refreshAuth(ctx context.Context) {
 		m.self = nil
 		m.state = StateUnauthorized
 	}
+	self := m.self
 	onReady = m.OnReady
 	m.mu.Unlock()
+
+	// Caching who this account is lets the accounts list name it without a
+	// live connection, which is exactly the situation where an operator most
+	// wants to know which login is broken.
+	if self != nil && accountID != "" {
+		if err := m.db.SetAccountIdentity(ctx, accountID, self.GetID(), self.Username, self.Phone); err != nil {
+			m.log.Warn("could not cache the telegram account identity", zap.Error(err))
+		}
+	}
 
 	if becameReady && onReady != nil {
 		go onReady()
 	}
 }
 
-// Configure stores new app credentials and reconnects with them.
+// Configure stores new app credentials on this account and reconnects with
+// them.
 func (m *Manager) Configure(ctx context.Context, appID int, appHash string) error {
 	if appID == 0 || appHash == "" {
 		return errors.New("app id and app hash are both required")
 	}
-	if err := m.db.SetSetting(ctx, database.SettingTGAppID, strconv.Itoa(appID)); err != nil {
-		return err
+
+	m.mu.Lock()
+	acct := m.acct
+	m.acct.AppID, m.acct.AppHash = appID, appHash
+	m.mu.Unlock()
+
+	if acct.ID != "" {
+		if err := m.db.UpdateAccountSettings(ctx, acct.ID, acct.Label, appID, appHash, acct.Enabled); err != nil {
+			return err
+		}
 	}
-	if err := m.db.SetSetting(ctx, database.SettingTGAppHash, appHash); err != nil {
-		return err
+	// The primary account's credentials are also the ones the settings page and
+	// the setup wizard show, so they stay mirrored into the runtime snapshot.
+	if acct.IsPrimary {
+		if err := m.db.SetSettings(ctx, map[string]string{
+			database.SettingTGAppID:   strconv.Itoa(appID),
+			database.SettingTGAppHash: appHash,
+		}); err != nil {
+			return err
+		}
+		settings := m.cfg.RuntimeSettings()
+		settings.AppID, settings.AppHash = appID, appHash
+		m.cfg.SetRuntimeSettings(settings)
 	}
-	settings := m.cfg.RuntimeSettings()
-	settings.AppID, settings.AppHash = appID, appHash
-	m.cfg.SetRuntimeSettings(settings)
 	return m.start(ctx, appID, appHash)
 }
 
@@ -391,6 +511,7 @@ func (m *Manager) Status() Status {
 	if m.client != nil && m.state == StateReady {
 		s.DC = m.client.Config().ThisDC
 	}
+	s.CooldownMs = m.Cooldown().Milliseconds()
 	return s
 }
 

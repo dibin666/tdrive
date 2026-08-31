@@ -69,12 +69,13 @@ func (s *Service) StartLocal(ctx context.Context, req LocalRequest) (database.Up
 // granularity used by server-side URL fetches. It deliberately reopens the
 // source in the goroutine so the HTTP request does not own a file descriptor.
 func (s *Service) runLocal(ctx context.Context, job database.UploadJob, localRoot, sourcePath string) {
-	release, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx)
 	if err != nil {
 		s.failLocal(ctx, job, err)
 		return
 	}
-	defer release()
+	defer lease.release()
+	defer s.bindUploadAccount(job.ID, lease.account)()
 
 	source := localfs.New(localRoot)
 	fileHandle, info, err := source.Open(sourcePath)

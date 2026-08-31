@@ -77,6 +77,40 @@ type Session struct {
 	ExpiresAt  time.Time `json:"expiresAt"`
 }
 
+// TGAccount is one Telegram login. A deployment may hold several so that the
+// per-account FLOOD_WAIT and transfer budgets add up instead of contending;
+// each one carries its own api credentials and its own session file.
+type TGAccount struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	AppID int    `json:"appId"`
+	// AppHash is a credential and is only exposed to administrators, so it
+	// rides along here and is stripped by the API layer where appropriate.
+	AppHash string `json:"appHash"`
+	// SessionFile is relative to the data directory.
+	SessionFile string `json:"-"`
+	Enabled     bool   `json:"enabled"`
+	IsPrimary   bool   `json:"isPrimary"`
+	// TGUserID, Username and Phone are cached from the last successful login so
+	// the accounts list can name an account without a live connection.
+	TGUserID  int64     `json:"tgUserId,omitempty"`
+	Username  string    `json:"username,omitempty"`
+	Phone     string    `json:"phone,omitempty"`
+	Position  int       `json:"-"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ChannelAccess is one account's view of a storage channel. Telegram mints
+// access hashes per account, so each account holds a different value for the
+// same channel and an account without a row here has never resolved it.
+type ChannelAccess struct {
+	ChannelID  string
+	AccountID  string
+	AccessHash int64
+	CanPost    bool
+	CheckedAt  time.Time
+}
+
 // Channel is a Telegram channel used as a storage backend. The default channel
 // receives new uploads; others stay readable so that switching channels does
 // not orphan existing files.
@@ -140,6 +174,13 @@ type Segment struct {
 	// roughly an hour, so a stale value here is normal and readers refresh it
 	// rather than treating it as an error.
 	FileReference []byte `json:"-"`
+	// AccountID is the Telegram account that uploaded this segment, and
+	// therefore the only account for which AccessHash and FileReference above
+	// are valid — Telegram mints both per account. Any other account has to
+	// re-resolve its own handle from TGMsgID before reading. Empty means
+	// unknown: rows written before multiple accounts existed, and rows
+	// recovered by an index rebuild.
+	AccountID string `json:"-"`
 }
 
 // UploadJob is the resumable state of one upload. DoneMask is a bitset over

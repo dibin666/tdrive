@@ -96,6 +96,29 @@ export interface TelegramStatus {
   dc?: number
   awaitingCode: boolean
   awaitingPassword: boolean
+  /** How long Telegram has told this account to wait. Non-zero means new
+   *  transfers are being routed to the other accounts. */
+  cooldownMs?: number
+}
+
+/**
+ * One Telegram login. A drive may hold several: Telegram meters its rate limits
+ * and transfer quota per account, so a second account is the only way to get a
+ * second budget — several api_id values on one phone number share one.
+ */
+export interface TelegramAccount {
+  id: string
+  label: string
+  appId: number
+  enabled: boolean
+  isPrimary: boolean
+  status: TelegramStatus
+  /** Admitted to the storage channel with posting rights. Without this the
+   *  account is configured but carries no transfers. */
+  canPost: boolean
+  inChannel: boolean
+  activeUploads: number
+  activeDownloads: number
 }
 
 export interface TelegramAccountExport {
@@ -223,6 +246,15 @@ export interface RuntimeSettings {
   maxDownloadConns: number
   downloadGraceMs: number
   shareTtlHours: number
+
+  /**
+   * Read-only. uploadConcurrency and downloadConcurrency above are per Telegram
+   * account, so what the drive actually runs is the limit times the number of
+   * accounts that can take work.
+   */
+  accountCount?: number
+  effectiveUploadConcurrency?: number
+  effectiveDownloadConcurrency?: number
 }
 
 export type JobStatus = 'pending' | 'running' | 'complete' | 'failed' | 'cancelled'
@@ -387,6 +419,13 @@ export interface Channel {
   title: string
   isDefault: boolean
   createdAt: string
+}
+
+/** Choosing a storage channel also admits the other accounts to it. joinedBy
+ *  lists, by account id, the ones that could not be admitted. */
+export interface ChannelResult {
+  channel: Channel
+  joinedBy?: Record<string, string>
 }
 
 export interface ChannelOption {
@@ -669,9 +708,41 @@ export const api = {
   channels: () =>
     request<{ channels: ChannelOption[]; selected: number }>('/tg/channels'),
   createChannel: (title: string) =>
-    request<Channel>('/tg/channels', { method: 'POST', body: json({ title }) }),
+    request<ChannelResult>('/tg/channels', { method: 'POST', body: json({ title }) }),
   selectChannel: (tgId: number, accessHash: number) =>
-    request<Channel>('/tg/channels/select', { method: 'POST', body: json({ tgId, accessHash }) }),
+    request<ChannelResult>('/tg/channels/select', {
+      method: 'POST',
+      body: json({ tgId, accessHash }),
+    }),
+
+  telegramAccounts: () =>
+    request<{ accounts: TelegramAccount[] }>('/tg/accounts'),
+  addTelegramAccount: (body: { label: string; appId: number; appHash: string }) =>
+    request<{ id: string; status: TelegramStatus }>('/tg/accounts', {
+      method: 'POST',
+      body: json(body),
+    }),
+  updateTelegramAccount: (id: string, body: { label?: string; enabled?: boolean }) =>
+    request<void>(`/tg/accounts/${id}`, { method: 'PATCH', body: json(body) }),
+  deleteTelegramAccount: (id: string) =>
+    request<void>(`/tg/accounts/${id}`, { method: 'DELETE' }),
+  joinStorageChannel: (id: string) =>
+    request<{ canPost: boolean }>(`/tg/accounts/${id}/join-channel`, { method: 'POST' }),
+  accountSendCode: (id: string, phone: string) =>
+    request<{ delivery: string; codeLength?: number; alreadyAuthorized: boolean }>(
+      `/tg/accounts/${id}/login/code`,
+      { method: 'POST', body: json({ phone }) },
+    ),
+  accountSignIn: (id: string, code: string) =>
+    request<{ needsPassword: boolean; passwordHint?: string }>(
+      `/tg/accounts/${id}/login/signin`,
+      { method: 'POST', body: json({ code }) },
+    ),
+  accountSubmitPassword: (id: string, password: string) =>
+    request<TelegramStatus>(`/tg/accounts/${id}/login/password`, {
+      method: 'POST',
+      body: json({ password }),
+    }),
 
   users: () => request<User[]>('/users'),
   permissionCatalog: () =>

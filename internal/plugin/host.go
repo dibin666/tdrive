@@ -239,7 +239,11 @@ func (host *managerHost) dispatch(ctx context.Context, method string, request js
 		if err != nil {
 			return nil, err
 		}
-		reader, err := host.manager.drive.OpenFile(ctx, file)
+		account, err := host.manager.drive.ReadAccount(ctx, file.ID)
+		if err != nil {
+			return nil, err
+		}
+		reader, err := host.manager.drive.OpenFile(ctx, file, account)
 		if err != nil {
 			return nil, err
 		}
@@ -407,7 +411,11 @@ func (host *managerHost) OpenStream(ctx context.Context, method string, request 
 	if err != nil {
 		return nil, err
 	}
-	reader, err := host.manager.drive.OpenFile(ctx, file)
+	account, err := host.manager.drive.ReadAccount(ctx, file.ID)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := host.manager.drive.OpenFile(ctx, file, account)
 	if err != nil {
 		return nil, err
 	}

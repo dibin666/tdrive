@@ -317,12 +317,24 @@ func (s *Service) deleteMessages(ctx context.Context, msgs []database.TGMessage)
 		}
 	}
 
+	// Deletes are cheap metadata calls, so they take no transfer slot. Any
+	// account can remove another's messages: every account is granted delete
+	// rights when it is admitted to the channel, precisely so that a rename or
+	// a delete never has to wait for the account that happened to upload.
+	account, err := s.metaAccount(ctx)
+	if err != nil {
+		return err
+	}
 	for channelID, ids := range byChannel {
 		ch, err := s.channelFor(ctx, channelID)
 		if err != nil {
 			return err
 		}
-		if err := s.tg.DeleteRecords(ctx, ref(ch), ids); err != nil {
+		chRef, err := channelRef(ctx, account, ch)
+		if err != nil {
+			return err
+		}
+		if err := account.DeleteRecords(ctx, chRef, ids); err != nil {
 			return err
 		}
 	}
@@ -356,7 +368,15 @@ func (s *Service) rewriteDirCaption(ctx context.Context, dir database.Dir) error
 	if err != nil {
 		return err
 	}
-	return s.tg.EditRecord(ctx, ref(channel), dir.TGMsgID, caption)
+	account, err := s.metaAccount(ctx)
+	if err != nil {
+		return err
+	}
+	chRef, err := channelRef(ctx, account, channel)
+	if err != nil {
+		return err
+	}
+	return account.EditRecord(ctx, chRef, dir.TGMsgID, caption)
 }
 
 // rewriteFileCaptions updates every segment's caption after a rename or move.
@@ -372,9 +392,18 @@ func (s *Service) rewriteFileCaptions(ctx context.Context, file database.File) e
 	if err != nil {
 		return err
 	}
+	account, err := s.metaAccount(ctx)
+	if err != nil {
+		return err
+	}
+	chRef, err := channelRef(ctx, account, channel)
+	if err != nil {
+		return err
+	}
 
 	// Editing a message invalidates its file reference, so anything cached
-	// for this file has to go.
+	// for this file has to go — for every account, since each one holds its
+	// own handles.
 	s.refs.Forget(file.ID)
 
 	for _, seg := range segs {
@@ -382,7 +411,7 @@ func (s *Service) rewriteFileCaptions(ctx context.Context, file database.File) e
 		if err != nil {
 			return err
 		}
-		if err := s.tg.EditRecord(ctx, ref(channel), seg.TGMsgID, caption); err != nil {
+		if err := account.EditRecord(ctx, chRef, seg.TGMsgID, caption); err != nil {
 			return err
 		}
 	}

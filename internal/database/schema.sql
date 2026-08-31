@@ -58,14 +58,58 @@ CREATE TABLE settings (
     value TEXT NOT NULL
 );
 
+-- One row per Telegram login. A deployment may hold several, because Telegram
+-- meters FLOOD_WAIT and transfer quota per account: a second account is the
+-- only way to get a second budget, and multiple api_id values on one phone
+-- number buy nothing at all.
+--
+-- Every account is fully isolated — its own credentials, its own session file,
+-- its own connection pool and its own share of the task limits — so one being
+-- throttled never stalls the others.
+CREATE TABLE tg_accounts (
+    id           TEXT PRIMARY KEY,
+    label        TEXT NOT NULL DEFAULT '',
+    app_id       INTEGER NOT NULL,
+    app_hash     TEXT NOT NULL,
+    -- Relative to the data directory. The primary account keeps the historical
+    -- session.json so an upgrade does not have to re-authenticate.
+    session_file TEXT NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    -- The primary account owns the setup wizard, the index rebuild and the
+    -- channel invites that add the others.
+    is_primary   INTEGER NOT NULL DEFAULT 0,
+    tg_user_id   INTEGER NOT NULL DEFAULT 0,
+    username     TEXT NOT NULL DEFAULT '',
+    phone        TEXT NOT NULL DEFAULT '',
+    position     INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL
+);
+CREATE INDEX idx_tg_accounts_enabled ON tg_accounts (enabled);
+
 CREATE TABLE channels (
     id          TEXT PRIMARY KEY,
     tg_id       INTEGER NOT NULL UNIQUE,
+    -- The primary account's access hash. Every account resolves its own; this
+    -- column stays as the primary's copy and as the fallback for a database
+    -- written before accounts existed.
     access_hash INTEGER NOT NULL,
     title       TEXT NOT NULL,
     is_default  INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL
 );
+
+-- Telegram access hashes are minted per account: the value one account holds
+-- for a channel is meaningless to another. can_post records whether the
+-- account was actually admitted with posting rights, which is what decides
+-- whether it may be scheduled for uploads.
+CREATE TABLE channel_accounts (
+    channel_id  TEXT NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+    account_id  TEXT NOT NULL REFERENCES tg_accounts (id) ON DELETE CASCADE,
+    access_hash INTEGER NOT NULL,
+    can_post    INTEGER NOT NULL DEFAULT 0,
+    checked_at  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (channel_id, account_id)
+) WITHOUT ROWID;
 
 -- The drive root is not a row: parent_id IS NULL means "at the root", which
 -- lines up with tagcodec's #pid_root.
@@ -130,6 +174,12 @@ CREATE TABLE segments (
     access_hash    INTEGER NOT NULL,
     dc_id          INTEGER NOT NULL DEFAULT 0,
     file_reference BLOB,
+    -- Which account uploaded this segment, and therefore whose access_hash and
+    -- file_reference the two columns above hold. Another account reading this
+    -- segment must re-resolve its own handle from tg_msg_id first. Empty means
+    -- unknown, which is how rows written before accounts existed and rows
+    -- recovered by an index rebuild are marked.
+    account_id     TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (file_id, idx)
 ) WITHOUT ROWID;
 

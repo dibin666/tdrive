@@ -103,7 +103,7 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 
 // schemaVersion is what schema.sql describes. Anything older is brought up to
 // it by the steps in migrate.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // upgradeSteps are the statements that take an existing database from the
 // version keyed here to the next one. A fresh database skips all of them,
@@ -265,6 +265,36 @@ var upgradeSteps = map[int][]string{
 			PRIMARY KEY (plugin_id, key)
 		) WITHOUT ROWID`,
 	},
+	5: {
+		// Several Telegram accounts instead of one. Only the structure is
+		// created here; the existing credentials and channel access hash are
+		// carried into the new tables by SeedPrimaryAccount, which also has to
+		// run for a database created fresh at this version.
+		`CREATE TABLE IF NOT EXISTS tg_accounts (
+			id           TEXT PRIMARY KEY,
+			label        TEXT NOT NULL DEFAULT '',
+			app_id       INTEGER NOT NULL,
+			app_hash     TEXT NOT NULL,
+			session_file TEXT NOT NULL,
+			enabled      INTEGER NOT NULL DEFAULT 1,
+			is_primary   INTEGER NOT NULL DEFAULT 0,
+			tg_user_id   INTEGER NOT NULL DEFAULT 0,
+			username     TEXT NOT NULL DEFAULT '',
+			phone        TEXT NOT NULL DEFAULT '',
+			position     INTEGER NOT NULL DEFAULT 0,
+			created_at   INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tg_accounts_enabled ON tg_accounts (enabled)`,
+		`CREATE TABLE IF NOT EXISTS channel_accounts (
+			channel_id  TEXT NOT NULL REFERENCES channels (id) ON DELETE CASCADE,
+			account_id  TEXT NOT NULL REFERENCES tg_accounts (id) ON DELETE CASCADE,
+			access_hash INTEGER NOT NULL,
+			can_post    INTEGER NOT NULL DEFAULT 0,
+			checked_at  INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (channel_id, account_id)
+		) WITHOUT ROWID`,
+		`ALTER TABLE segments ADD COLUMN account_id TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 // migrate applies schema.sql once. The schema is versioned through SQLite's
@@ -293,6 +323,9 @@ func (d *DB) migrate(ctx context.Context) error {
 		for from := version; from < schemaVersion; from++ {
 			for _, stmt := range upgradeSteps[from] {
 				if _, err := tx.ExecContext(ctx, stmt); err != nil {
+					if isAlreadyApplied(stmt, err) {
+						continue
+					}
 					return fmt.Errorf("migrate schema v%d to v%d: %w", from, from+1, err)
 				}
 			}
@@ -304,6 +337,22 @@ func (d *DB) migrate(ctx context.Context) error {
 		return fmt.Errorf("set schema version: %w", err)
 	}
 	return tx.Commit()
+}
+
+// isAlreadyApplied recognises the one way a re-run of an upgrade step fails
+// that is not a real error: adding a column the table already has.
+//
+// The other steps lean on CREATE TABLE IF NOT EXISTS for this, but SQLite has
+// no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, and a database can genuinely
+// arrive at a step with the column present — one created from schema.sql, which
+// always describes the final shape, and then rolled back to an older
+// user_version. A failed statement does not poison the surrounding transaction,
+// so skipping it and carrying on is safe.
+func isAlreadyApplied(stmt string, err error) bool {
+	if !strings.Contains(strings.ToUpper(stmt), "ADD COLUMN") {
+		return false
+	}
+	return strings.Contains(err.Error(), "duplicate column name")
 }
 
 // Read returns the multi-connection pool. Use it for anything that does not

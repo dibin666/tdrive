@@ -19,11 +19,15 @@ const maxPluginHTTPBody = 8 << 20
 // endpoints live below /api/plugins and are mounted by the API package. All
 // plugin-owned HTTP routes require a normal tdrive login; a plugin cannot use
 // its route declaration to create an unauthenticated entry point.
+//
+// The check is the browser-aware one: a plugin UI is reached from the WebUI as
+// a page rather than as an XHR, so it carries the session cookie instead of the
+// in-memory bearer token. Both are accepted.
 func (manager *Manager) PublicHandler() http.Handler {
 	if manager.auth == nil {
 		return http.HandlerFunc(manager.servePublicHTTP)
 	}
-	return manager.auth.RequireAuth(http.HandlerFunc(manager.servePublicHTTP))
+	return manager.auth.RequireBrowserAuth(http.HandlerFunc(manager.servePublicHTTP))
 }
 
 // HTTPMiddleware gives active plugins a last-resort interception point for

@@ -50,9 +50,46 @@ type Backend interface {
 	MigratedDC(err error) (int, bool)
 }
 
-// ChannelRef identifies a storage channel.
+// Account is one Telegram login. Every Backend call belongs to exactly one of
+// them, because Telegram meters its limits per account and — more awkwardly —
+// mints access hashes per account too: the coordinates one account holds for a
+// channel or a document are meaningless to another.
+type Account interface {
+	Backend
+
+	// ID identifies the account in the segments table and in the scheduler.
+	ID() string
+
+	// Available reports whether the scheduler should hand this account new
+	// work: signed in, and not sitting out a FLOOD_WAIT.
+	Available() bool
+
+	// ChannelRef resolves this account's own coordinates for a stored channel.
+	// It fails for an account that has never been admitted to the channel,
+	// which is the correct answer: it cannot read or write there.
+	ChannelRef(ctx context.Context, channelID string) (ChannelRef, error)
+}
+
+// Cluster is the set of accounts a deployment has. Which one a given transfer
+// runs on is decided in this package rather than here, because the choice is
+// inseparable from the task slot it comes with.
+type Cluster interface {
+	// Ready reports whether any account can serve requests.
+	Ready() bool
+
+	// Accounts lists the accounts eligible for new work, in a stable order.
+	Accounts() []Account
+
+	// Account looks one up by id, including accounts that are currently
+	// throttled or signed out.
+	Account(id string) (Account, bool)
+}
+
+// ChannelRef identifies a storage channel, as seen by one particular account.
 type ChannelRef struct {
-	TGID       int64
+	TGID int64
+	// AccessHash is minted per account. Using one account's value with another
+	// account's connection fails with CHANNEL_INVALID.
 	AccessHash int64
 }
 

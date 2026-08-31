@@ -146,8 +146,29 @@ func (m *Manager) SubmitPassword(ctx context.Context, password string) error {
 }
 
 // LogOut ends the Telegram session and deletes the stored session file, so a
-// later login starts clean rather than resurrecting a revoked session.
+// later login starts clean rather than resurrecting a revoked session. The
+// client is left connected but unauthenticated, ready for the next login.
 func (m *Manager) LogOut(ctx context.Context) error {
+	if err := m.logOut(ctx); err != nil {
+		return err
+	}
+	// Reconnect unauthenticated so the wizard can immediately log in again.
+	return m.Start(ctx)
+}
+
+// Close logs out and stays down. It is what removing an account wants:
+// reconnecting a client that is about to be deleted would make the delete wait
+// on a connection nobody will use.
+func (m *Manager) Close(ctx context.Context) error {
+	err := m.logOut(ctx)
+	m.Stop()
+	return err
+}
+
+// logOut revokes the authorization on Telegram's side and clears the local
+// session. Both halves matter: skipping the call leaves a live session in the
+// account's device list, and skipping the file leaves credentials on disk.
+func (m *Manager) logOut(ctx context.Context) error {
 	client, err := m.Raw()
 	if err == nil {
 		if _, err := client.API().AuthLogOut(ctx); err != nil {
@@ -157,16 +178,14 @@ func (m *Manager) LogOut(ctx context.Context) error {
 	}
 
 	m.Stop()
-	if err := os.Remove(m.cfg.Telegram.SessionFile); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(m.SessionPath()); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove session file: %w", err)
 	}
 
 	m.mu.Lock()
 	m.loginPhone, m.loginCodeHash, m.awaitingPass = "", "", false
 	m.mu.Unlock()
-
-	// Reconnect unauthenticated so the wizard can immediately log in again.
-	return m.Start(ctx)
+	return nil
 }
 
 // CancelLogin discards a half-finished login.

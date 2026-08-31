@@ -125,7 +125,11 @@ func (f *davFS) OpenFile(ctx context.Context, name string, flag int, _ os.FileMo
 	if err != nil {
 		return nil, err
 	}
-	stream, err := f.h.svc.OpenFile(ctx, file)
+	account, err := f.h.svc.ReadAccount(ctx, file.ID)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := f.h.svc.OpenFile(ctx, file, account)
 	if err != nil {
 		return nil, err
 	}

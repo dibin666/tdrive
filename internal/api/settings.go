@@ -37,6 +37,14 @@ type settingsBody struct {
 	MaxDownloadConns    int    `json:"maxDownloadConns"`
 	DownloadGraceMs     int64  `json:"downloadGraceMs"`
 	ShareTTLHours       int64  `json:"shareTtlHours"`
+
+	// The task limits above are per Telegram account, so what an operator
+	// actually gets is the limit times the number of accounts able to take
+	// work. These three are derived and read-only; the WebUI shows them next to
+	// the sliders so the multiplication is not a surprise.
+	AccountCount                 int `json:"accountCount"`
+	EffectiveUploadConcurrency   int `json:"effectiveUploadConcurrency"`
+	EffectiveDownloadConcurrency int `json:"effectiveDownloadConcurrency"`
 }
 
 type settingsUpdateRequest struct {
@@ -85,9 +93,20 @@ func toSettingsBody(s config.RuntimeSettings) settingsBody {
 	}
 }
 
+// settingsBodyFor fills in the derived per-account totals, which toSettingsBody
+// cannot compute on its own because they depend on how many accounts are live.
+func (s *Server) settingsBodyFor(settings config.RuntimeSettings) settingsBody {
+	body := toSettingsBody(settings)
+	accounts, upload, download := s.drive.TransferCapacity()
+	body.AccountCount = accounts
+	body.EffectiveUploadConcurrency = upload
+	body.EffectiveDownloadConcurrency = download
+	return body
+}
+
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, toSettingsBody(s.cfg.RuntimeSettings()))
+	writeJSON(w, http.StatusOK, s.settingsBodyFor(s.cfg.RuntimeSettings()))
 }
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -234,16 +253,30 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A new app credential pair must reconnect the Telegram client. Pool size
-	// also belongs to connection setup, so changing it rebuilds the pool while
-	// preserving the existing session file.
+	// A new app credential pair must reconnect the Telegram client. The
+	// credentials on this page are the primary account's; the others are
+	// managed under /tg/accounts.
+	primary, primaryErr := s.primary()
+	configureTelegram := primaryErr == nil && (credentialsChanged ||
+		(!primary.Ready() && (req.AppID != nil || req.AppHash != nil) && next.AppID > 0 && next.AppHash != ""))
+
 	var reconnectErr error
-	configureTelegram := credentialsChanged ||
-		(!s.tg.Ready() && (req.AppID != nil || req.AppHash != nil) && next.AppID > 0 && next.AppHash != "")
-	if configureTelegram {
-		reconnectErr = s.tg.Configure(r.Context(), next.AppID, next.AppHash)
-	} else if (next.PoolSize != current.PoolSize || next.RateLimit != current.RateLimit) && s.tg.Ready() {
-		reconnectErr = s.tg.Reload(r.Context())
+	switch {
+	case configureTelegram:
+		reconnectErr = primary.Configure(r.Context(), next.AppID, next.AppHash)
+	case next.PoolSize != current.PoolSize || next.RateLimit != current.RateLimit:
+		// Pool size and request interval are connection setup, and every account
+		// builds its own pool and its own rate limiter from them. Reconnecting
+		// only the primary would leave the others on the old numbers, so they
+		// all rebuild — each keeping its own session file and login.
+		for _, manager := range s.accounts.All() {
+			if !manager.Ready() {
+				continue
+			}
+			if err := manager.Reload(r.Context()); err != nil && reconnectErr == nil {
+				reconnectErr = err
+			}
+		}
 	}
 	if reconnectErr != nil {
 		s.fail(w, reconnectErr, "apply telegram settings")
@@ -251,5 +284,5 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.audit(r, database.AuditSettingsUpdate, "", "runtime settings")
-	writeJSON(w, http.StatusOK, toSettingsBody(next))
+	writeJSON(w, http.StatusOK, s.settingsBodyFor(next))
 }

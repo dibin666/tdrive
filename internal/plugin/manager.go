@@ -110,7 +110,7 @@ type Manager struct {
 	db     *database.DB
 	auth   *auth.Service
 	drive  *drive.Service
-	tg     *tgc.Manager
+	tg     TelegramStatus
 	broker *events.Broker
 	log    *zap.Logger
 
@@ -125,6 +125,14 @@ type Manager struct {
 	closed       bool
 }
 
+// TelegramStatus is all a plugin may learn about the Telegram side: whether the
+// drive's account is connected. A deployment holds one account per api_id pair,
+// so this reports the primary one rather than exposing the whole cluster to
+// plugin code.
+type TelegramStatus interface {
+	Status() tgc.Status
+}
+
 // New creates a manager without touching the plugin directory. The builder
 // client is only a transport object; it does not connect or spawn anything
 // until Inspect or Install is called.
@@ -133,7 +141,7 @@ func New(
 	db *database.DB,
 	authSvc *auth.Service,
 	driveSvc *drive.Service,
-	tgm *tgc.Manager,
+	tgm TelegramStatus,
 	broker *events.Broker,
 	log *zap.Logger,
 ) *Manager {

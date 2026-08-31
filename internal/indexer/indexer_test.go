@@ -35,6 +35,12 @@ func (c *channel) ScanHistory(_ context.Context, _ drive.ChannelRef, visit func(
 	return nil
 }
 
+// ID names the account doing the scan, which the rebuild stamps onto every
+// recovered segment so a reader knows whose access hashes it recorded.
+func (c *channel) ID() string { return scannerAccountID }
+
+const scannerAccountID = "acct-scanner"
+
 // builder assembles a channel in upload order and reverses it on Build, since
 // history arrives newest first.
 type builder struct {
@@ -492,6 +498,8 @@ func (s *slowChannel) ScanHistory(ctx context.Context, ch drive.ChannelRef, visi
 	}
 	return s.inner.ScanHistory(ctx, ch, visit)
 }
+
+func (s *slowChannel) ID() string { return s.inner.ID() }
 
 func keys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))

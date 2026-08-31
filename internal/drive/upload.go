@@ -219,7 +219,18 @@ func (s *Service) PutSegment(
 		return err
 	}
 
-	doc, err := s.uploadSegment(ctx, file, channel, index, r, size, progress)
+	// The account comes from the job's lease, so every segment of one upload
+	// goes through the same login. A server-side transfer that holds no browser
+	// lease falls back to a scheduled account.
+	account, ok := s.uploadJobAccount(job.ID)
+	if !ok {
+		account, err = s.metaAccount(ctx)
+		if err != nil {
+			return err
+		}
+	}
+
+	doc, account, err := s.uploadSegment(ctx, account, file, channel, index, r, size, progress)
 	if err != nil {
 		return err
 	}
@@ -233,6 +244,9 @@ func (s *Service) PutSegment(
 		AccessHash:    doc.AccessHash,
 		DCID:          doc.DCID,
 		FileReference: doc.FileReference,
+		// Recording who stored it is what lets a later read know whether the
+		// handle above is one it can use.
+		AccountID: account.ID(),
 	}); err != nil {
 		return err
 	}
@@ -244,19 +258,26 @@ func (s *Service) PutSegment(
 }
 
 // uploadSegment performs the Telegram half: stream the bytes, then post the
-// document with its tagged caption.
+// document with its tagged caption. It returns the account that actually stored
+// the segment, which is not always the one it was handed — see below.
 func (s *Service) uploadSegment(
 	ctx context.Context,
+	account Account,
 	file database.File,
 	channel database.Channel,
 	index int,
 	r io.Reader,
 	size int64,
 	progress Progress,
-) (StoredDoc, error) {
+) (StoredDoc, Account, error) {
 	caption, err := s.fileCaption(ctx, file, index)
 	if err != nil {
-		return StoredDoc{}, err
+		return StoredDoc{}, account, err
+	}
+
+	chRef, err := channelRef(ctx, account, channel)
+	if err != nil {
+		return StoredDoc{}, account, err
 	}
 
 	// An empty file has no bytes to store, and Telegram will not accept a
@@ -264,11 +285,11 @@ func (s *Service) uploadSegment(
 	// the tags alone are enough to rebuild it, and the reader short-circuits
 	// on size 0 without ever asking for a segment.
 	if size == 0 && file.Size == 0 {
-		msgID, err := s.tg.SendRecord(ctx, ref(channel), caption)
+		msgID, err := account.SendRecord(ctx, chRef, caption)
 		if err != nil {
-			return StoredDoc{}, err
+			return StoredDoc{}, account, err
 		}
-		return StoredDoc{MsgID: msgID}, nil
+		return StoredDoc{MsgID: msgID}, account, nil
 	}
 
 	segName := file.Name
@@ -278,18 +299,58 @@ func (s *Service) uploadSegment(
 		segName = fmt.Sprintf("%s.part%03d", file.Name, index)
 	}
 
-	doc, err := s.tg.Upload(ctx, ref(channel), UploadSpec{
+	spec := UploadSpec{
 		Name:     segName,
 		MIME:     file.MIME,
 		Caption:  caption,
 		Body:     r,
 		Size:     size,
 		Progress: progress,
-	})
-	if err != nil {
-		return StoredDoc{}, fmt.Errorf("upload segment %d of %q: %w", index, file.Name, err)
 	}
-	return doc, nil
+	doc, err := account.Upload(ctx, chRef, spec)
+	if err == nil {
+		return doc, account, nil
+	}
+
+	// The account was throttled partway through. A segment is the unit a
+	// resumed upload retries anyway, so it is also the natural unit to move to
+	// another account — but only once, because a body that has already been
+	// partly consumed cannot be re-read and a retry storm across every account
+	// would be worse than waiting out the FLOOD_WAIT.
+	if next, ok := s.failoverAccount(ctx, account, spec.Body); ok {
+		s.log.Warn("moving a segment to another telegram account after a rate limit",
+			zap.String("file", file.ID), zap.Int("segment", index),
+			zap.String("from", account.ID()), zap.String("to", next.ID()), zap.Error(err))
+
+		nextRef, refErr := channelRef(ctx, next, channel)
+		if refErr == nil {
+			if doc, retryErr := next.Upload(ctx, nextRef, spec); retryErr == nil {
+				return doc, next, nil
+			}
+		}
+	}
+	return StoredDoc{}, account, fmt.Errorf("upload segment %d of %q: %w", index, file.Name, err)
+}
+
+// failoverAccount picks a different account to retry a throttled segment on.
+//
+// It refuses unless the body can be rewound, because Telegram's uploader has
+// already consumed some of it: re-sending from a half-read stream would store a
+// truncated segment, which is the one failure this program must never produce.
+func (s *Service) failoverAccount(ctx context.Context, failed Account, body io.Reader) (Account, bool) {
+	seeker, ok := body.(io.Seeker)
+	if !ok {
+		return nil, false
+	}
+	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+		return nil, false
+	}
+	for _, candidate := range s.cluster.Accounts() {
+		if candidate.ID() != failed.ID() && candidate.Available() {
+			return candidate, true
+		}
+	}
+	return nil, false
 }
 
 // fileCaption builds the tagged caption for one segment, including the
@@ -399,22 +460,24 @@ func (s *Service) Abort(ctx context.Context, jobID, reason string, status databa
 // of order. Parallel segments are available to callers that can seek, which in
 // practice means the browser slicing a local file.
 func (s *Service) UploadStream(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
-	release, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx)
 	if err != nil {
 		return database.File{}, err
 	}
-	defer release()
+	defer lease.release()
 
-	return s.uploadStream(ctx, req, r, progress)
+	return s.uploadStream(ctx, lease.account, req, r, progress)
 }
 
 // uploadStream is the implementation shared by known-size and unsized
-// uploads. Callers must already hold the task slot before entering it.
-func (s *Service) uploadStream(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
+// uploads. Callers must already hold the task slot before entering it, and pass
+// the account it was taken on so every segment lands on the same login.
+func (s *Service) uploadStream(ctx context.Context, account Account, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
 	job, file, err := s.Begin(ctx, req)
 	if err != nil {
 		return database.File{}, err
 	}
+	defer s.bindUploadAccount(job.ID, account)()
 	if err := s.db.SetJobStatus(ctx, job.ID, database.JobRunning, ""); err != nil {
 		return database.File{}, err
 	}
@@ -464,11 +527,11 @@ func (s *Service) uploadStream(ctx context.Context, req UploadRequest, r io.Read
 // cannot be told the size afterwards. Callers that do know the length should
 // use UploadStream and skip the disk entirely.
 func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
-	release, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx)
 	if err != nil {
 		return database.File{}, err
 	}
-	defer release()
+	defer lease.release()
 
 	if err := os.MkdirAll(s.cfg.Storage.SpoolDir, 0o750); err != nil {
 		return database.File{}, fmt.Errorf("create spool directory: %w", err)
@@ -494,7 +557,7 @@ func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Rea
 	}
 
 	req.Size = size
-	return s.uploadStream(ctx, req, spool, progress)
+	return s.uploadStream(ctx, lease.account, req, spool, progress)
 }
 
 // PutSegmentsParallel uploads several independently-sourced segments at once.
@@ -506,11 +569,12 @@ func (s *Service) PutSegmentsParallel(
 	segments map[int]io.Reader,
 	progress Progress,
 ) error {
-	release, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx)
 	if err != nil {
 		return err
 	}
-	defer release()
+	defer lease.release()
+	defer s.bindUploadAccount(job.ID, lease.account)()
 
 	file, err := s.db.FileByID(ctx, job.FileID)
 	if err != nil {

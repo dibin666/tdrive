@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Blocks, ExternalLink, PackageOpen, Plus, Power, RefreshCw, Trash2 } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Blocks, PackageOpen, PanelsTopLeft, Plus, Power, RefreshCw, Trash2, X } from 'lucide-react'
 import { api, type PluginInspection, type PluginStatus, type PluginStoreItem } from '../../lib/api'
 import { Button, Drawer, Field, IconButton, Input, Modal, Spinner, Switch, toast } from '../../components/primitives'
 import { Section, StatusDot } from './shared'
@@ -13,6 +13,13 @@ function statusTone(status: string): 'ok' | 'warn' | 'error' | 'idle' | 'busy' {
   if (status === 'error') return 'error'
   if (status === 'disabled' || status === 'stopped') return 'idle'
   return 'busy'
+}
+
+/** uiRoute returns the path a plugin declared as its user interface, with the
+ *  wildcard suffix stripped so it can be used as a URL. */
+function uiRoute(plugin: PluginStatus): string | null {
+  const route = plugin.manifest.routes?.find((item) => item.ui)
+  return route ? route.path.replace(/\/\*$/, '') : null
 }
 
 export function PluginsPage() {
@@ -29,6 +36,7 @@ export function PluginsPage() {
   const [configText, setConfigText] = useState('{}')
   const [configLoading, setConfigLoading] = useState(false)
   const [configSaving, setConfigSaving] = useState(false)
+  const [embedded, setEmbedded] = useState<PluginStatus | null>(null)
 
   const loadPlugins = () => {
     setLoading(true)
@@ -86,6 +94,7 @@ export function PluginsPage() {
       await api.uninstallPlugin(plugin.id)
       setPlugins((current) => current.filter((item) => item.id !== plugin.id))
       if (configuring?.id === plugin.id) setConfiguring(null)
+      if (embedded?.id === plugin.id) setEmbedded(null)
     } catch (error) {
       toast(errorMessage(error), 'error')
     }
@@ -155,6 +164,7 @@ export function PluginsPage() {
                 key={plugin.id}
                 plugin={plugin}
                 onEnabled={(enabled) => void setEnabled(plugin, enabled)}
+                onOpen={() => setEmbedded(plugin)}
                 onConfigure={() => void openConfiguration(plugin)}
                 onUninstall={() => void uninstall(plugin)}
               />
@@ -221,22 +231,75 @@ export function PluginsPage() {
           />
         )}
       </Modal>
+
+      {embedded && <PluginFrame plugin={embedded} onClose={() => setEmbedded(null)} />}
     </>
+  )
+}
+
+/**
+ * PluginFrame hosts a plugin's own page inside the WebUI.
+ *
+ * The alternative — a link that opens /plugins/{id} in a new tab — drops the
+ * user out of the app and leaves them without the shell, so a plugin whose
+ * whole job is configuration would be configured somewhere that does not look
+ * like tdrive. The frame is same-origin, so the plugin page can read the theme
+ * and the compiled stylesheet, and its requests carry the session cookie.
+ */
+function PluginFrame({ plugin, onClose }: { plugin: PluginStatus; onClose: () => void }) {
+  const frame = useRef<HTMLIFrameElement>(null)
+  const path = uiRoute(plugin) ?? '/'
+  const source = `/plugins/${encodeURIComponent(plugin.id)}${path}`
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col bg-[var(--bg)]" role="dialog" aria-modal="true">
+      <header className="flex shrink-0 items-center gap-3 border-b border-[var(--line)] px-4 py-2.5">
+        <Blocks size={16} className="text-[var(--color-clay)]" />
+        <div className="min-w-0 flex-1">
+          <span className="truncate text-sm font-medium">{plugin.manifest.name}</span>
+          <span className="ml-2 text-xs text-[var(--faint)]">v{plugin.manifest.version}</span>
+        </div>
+        <IconButton
+          label="刷新"
+          onClick={() => {
+            // Reassigning src rather than calling location.reload() keeps this
+            // working regardless of what the plugin navigated to inside.
+            if (frame.current) frame.current.src = source
+          }}
+        >
+          <RefreshCw size={15} />
+        </IconButton>
+        <IconButton label="关闭" onClick={onClose}>
+          <X size={15} />
+        </IconButton>
+      </header>
+      <iframe ref={frame} src={source} title={plugin.manifest.name} className="min-h-0 w-full flex-1 border-0" />
+    </div>
   )
 }
 
 function PluginRow({
   plugin,
   onEnabled,
+  onOpen,
   onConfigure,
   onUninstall,
 }: {
   plugin: PluginStatus
   onEnabled: (enabled: boolean) => void
+  onOpen: () => void
   onConfigure: () => void
   onUninstall: () => void
 }) {
-  const route = plugin.manifest.routes?.find((item) => item.ui)
+  const hasUI = uiRoute(plugin) !== null
   return (
     <div className="flex flex-wrap items-center gap-3 py-3 first:pt-0 last:pb-0">
       <StatusDot tone={statusTone(plugin.status)} />
@@ -250,14 +313,11 @@ function PluginRow({
           {plugin.error ? ` · ${plugin.error}` : ''}
         </div>
       </div>
-      {route && (
-        <a
-          href={`/plugins/${encodeURIComponent(plugin.id)}${route.path.replace(/\/\*$/, '')}`}
-          className="btn btn-ghost !px-2 !py-1.5 text-xs"
-        >
-          <ExternalLink size={14} />
+      {hasUI && (
+        <button type="button" onClick={onOpen} className="btn btn-ghost !px-2 !py-1.5 text-xs">
+          <PanelsTopLeft size={14} />
           打开
-        </a>
+        </button>
       )}
       <Switch checked={plugin.enabled} onChange={onEnabled} label={plugin.enabled ? '启用' : '停用'} />
       <div className="flex gap-1">

@@ -84,18 +84,27 @@ func run() error {
 	}
 
 	broker := events.NewBroker()
-	tgm := tgc.New(cfg, db, log.Named("telegram"))
-	driveSvc := drive.New(cfg, db, tgm, log.Named("drive"))
-	// Resume both kinds of detached work whenever Telegram becomes ready,
+	// One cluster, one or more Telegram accounts. A deployment upgrading from a
+	// single account finds its credentials and session adopted as the primary.
+	cluster, err := tgc.NewCluster(ctx, cfg, db, log.Named("telegram"))
+	if err != nil {
+		return err
+	}
+	driveSvc := drive.New(cfg, db, cluster, log.Named("drive"))
+	// Resume both kinds of detached work whenever any account becomes ready,
 	// including a setup or login completed after the HTTP server has started.
-	tgm.OnReady = func() {
+	cluster.OnReady = func() {
 		resumeCtx := context.WithoutCancel(ctx)
 		driveSvc.ResumeRemotes(resumeCtx)
 		driveSvc.ResumeStaged(resumeCtx)
 	}
-	idx := indexer.New(db, tgm, log.Named("indexer"))
+	// The index rebuild and the plugin host each speak to one account. The
+	// primary is the right one: it is the account the wizard signed in and the
+	// one whose access hash the channels table holds.
+	primary := tgc.PrimarySource(cluster)
+	idx := indexer.New(db, primary, log.Named("indexer"))
 	api.WireIndexProgress(idx, broker)
-	pluginManager := plugin.New(cfg, db, authSvc, driveSvc, tgm, broker, log.Named("plugin"))
+	pluginManager := plugin.New(cfg, db, authSvc, driveSvc, primary, broker, log.Named("plugin"))
 	if err := pluginManager.Start(ctx); err != nil {
 		// A plugin must never prevent the core drive from starting. The manager
 		// records individual child failures; this covers a database-level
@@ -105,7 +114,7 @@ func run() error {
 	if pluginManager.HasHooks() {
 		driveSvc.SetPluginHooks(pluginManager)
 	}
-	apiServer := api.New(cfg, db, authSvc, driveSvc, tgm, idx, broker, log.Named("api"), func(level string) error {
+	apiServer := api.New(cfg, db, authSvc, driveSvc, cluster, idx, broker, log.Named("api"), func(level string) error {
 		parsed, err := zapcore.ParseLevel(level)
 		if err != nil {
 			return fmt.Errorf("invalid log level %q", level)
@@ -116,11 +125,12 @@ func run() error {
 	apiServer.SetPluginManager(pluginManager)
 
 	// A failure to connect here is not fatal: the WebUI still needs to come
-	// up so an administrator can fix the credentials.
-	if err := tgm.Start(ctx); err != nil {
+	// up so an administrator can fix the credentials. One account failing does
+	// not hold back the others either.
+	if err := cluster.Start(ctx); err != nil {
 		log.Error("could not connect to telegram at startup", zap.Error(err))
 	}
-	defer tgm.Stop()
+	defer cluster.Stop()
 	defer pluginManager.Close(context.Background())
 
 	mux := http.NewServeMux()

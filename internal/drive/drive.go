@@ -32,13 +32,14 @@ var (
 	ErrLoop = errors.New("drive: cannot move a directory into its own subtree")
 )
 
-// Service is the drive. One instance serves every user, because a tdrive
-// deployment is one Telegram account and therefore one file tree.
+// Service is the drive. One instance serves every user and every Telegram
+// account, because a tdrive deployment is one file tree however many logins
+// are behind it.
 type Service struct {
-	cfg *config.Config
-	db  *database.DB
-	tg  Backend
-	log *zap.Logger
+	cfg     *config.Config
+	db      *database.DB
+	cluster Cluster
+	log     *zap.Logger
 
 	// pluginHooks stays nil until an active plugin is loaded. Keeping the
 	// pointer here, rather than an always-running broker, preserves the hot
@@ -58,13 +59,26 @@ type Service struct {
 	// lose the unique-index race, leaving an orphaned record in the channel.
 	mkdirMu sync.Mutex
 
-	// Task limiters count whole logical file transfers. The upload job leases
-	// and download sessions below let concurrent requests belonging to one
-	// transfer share a single slot.
-	uploadLimiter   *taskLimiter
-	downloadLimiter *taskLimiter
-	uploadJobsMu    sync.Mutex
-	uploadJobs      map[string]*uploadJobLease
+	// Task limiters count whole logical file transfers, one pair per Telegram
+	// account. The configured limit is therefore per account: two accounts and
+	// a limit of one means two transfers run at once, each on its own login
+	// with its own rate-limit budget. The upload job leases and download
+	// sessions below let concurrent requests belonging to one transfer share a
+	// single slot — and pin that transfer to the account holding it.
+	limitersMu       sync.Mutex
+	uploadLimiters   map[string]*taskLimiter
+	downloadLimiters map[string]*taskLimiter
+	// schedCursor round-robins across accounts that are equally loaded, so a
+	// quiet drive does not send everything to the first account in the list.
+	schedCursor atomic.Uint64
+
+	uploadJobsMu sync.Mutex
+	uploadJobs   map[string]*uploadJobLease
+	// jobAccounts pins server-side uploads — a VPS-local file, a remote URL, a
+	// WebDAV PUT — to the account their task slot was taken on. Browser uploads
+	// carry the same information on their uploadJobLease; these have no lease
+	// because nothing reconnects to them between segments.
+	jobAccounts map[string]Account
 
 	downloadSessionsMu sync.Mutex
 	downloadSessions   map[string]*downloadSession
@@ -93,17 +107,17 @@ type Service struct {
 	stageCancels  map[string]context.CancelFunc
 }
 
-func New(cfg *config.Config, db *database.DB, backend Backend, log *zap.Logger) *Service {
-	settings := cfg.RuntimeSettings()
+func New(cfg *config.Config, db *database.DB, cluster Cluster, log *zap.Logger) *Service {
 	return &Service{
 		cfg:              cfg,
 		db:               db,
-		tg:               backend,
+		cluster:          cluster,
 		log:              log,
 		refs:             newRefCache(cfg.Stream.LocationTTL),
-		uploadLimiter:    newTaskLimiter(settings.UploadConcurrency),
-		downloadLimiter:  newTaskLimiter(settings.DownloadConcurrency),
+		uploadLimiters:   make(map[string]*taskLimiter),
+		downloadLimiters: make(map[string]*taskLimiter),
 		uploadJobs:       make(map[string]*uploadJobLease),
+		jobAccounts:      make(map[string]Account),
 		downloadSessions: make(map[string]*downloadSession),
 		clientDownloads:  make(map[string]*clientDownload),
 		clientJobs:       make(map[string]*clientDownload),
@@ -159,9 +173,11 @@ func (s *Service) storageChannel(ctx context.Context) (database.Channel, error) 
 	return ch, err
 }
 
-// ref converts a stored channel row into the reference the backend takes.
-func ref(ch database.Channel) ChannelRef {
-	return ChannelRef{TGID: ch.TGID, AccessHash: ch.AccessHash}
+// channelRef resolves the coordinates one account uses to reach a channel.
+// Telegram mints an access hash per account, so this cannot be derived from the
+// channel row alone: it has to be asked of the account that will make the call.
+func channelRef(ctx context.Context, account Account, ch database.Channel) (ChannelRef, error) {
+	return account.ChannelRef(ctx, ch.ID)
 }
 
 // ResolveDir walks a path to its directory row. The root has no row, so it
@@ -364,7 +380,18 @@ func (s *Service) createDir(ctx context.Context, parentID, name, path string) (d
 		return database.Dir{}, err
 	}
 
-	msgID, err := s.tg.SendRecord(ctx, ref(channel), caption)
+	// A directory record is one small message, so it takes no transfer slot;
+	// any account admitted to the channel can write it.
+	account, err := s.metaAccount(ctx)
+	if err != nil {
+		return database.Dir{}, err
+	}
+	chRef, err := channelRef(ctx, account, channel)
+	if err != nil {
+		return database.Dir{}, err
+	}
+
+	msgID, err := account.SendRecord(ctx, chRef, caption)
 	if err != nil {
 		return database.Dir{}, fmt.Errorf("record directory %q in telegram: %w", path, err)
 	}
@@ -380,7 +407,7 @@ func (s *Service) createDir(ctx context.Context, parentID, name, path string) (d
 	if err := s.db.InsertDir(ctx, dir); err != nil {
 		// The message is already in the channel. Rather than leaving a
 		// record the index will never match, take it back out.
-		if delErr := s.tg.DeleteRecords(ctx, ref(channel), []int{msgID}); delErr != nil {
+		if delErr := account.DeleteRecords(ctx, chRef, []int{msgID}); delErr != nil {
 			s.log.Warn("could not roll back a directory record",
 				zap.String("path", path), zap.Int("message", msgID), zap.Error(delErr))
 		}

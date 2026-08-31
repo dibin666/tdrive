@@ -2,16 +2,57 @@ package tgc
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 
+	"github.com/dibin/tdrive/internal/database"
 	"github.com/dibin/tdrive/internal/drive"
 )
 
-// Manager implements drive.Backend. The adapter lives here rather than in the
+// Manager implements drive.Account. The adapter lives here rather than in the
 // drive package so that nothing above this layer has to import gotd types.
-var _ drive.Backend = (*Manager)(nil)
+var _ drive.Account = (*Manager)(nil)
+
+// ChannelRef resolves this account's own coordinates for a storage channel.
+//
+// The per-account row is the authoritative one, because Telegram mints an
+// access hash for the requesting account. The channels table is consulted only
+// for the primary account, whose column predates per-account rows and is what a
+// database written before this feature has.
+func (m *Manager) ChannelRef(ctx context.Context, channelID string) (drive.ChannelRef, error) {
+	acct := m.Account()
+
+	access, err := m.db.ChannelAccessFor(ctx, channelID, acct.ID)
+	switch {
+	case err == nil:
+		channel, err := m.db.ChannelByID(ctx, channelID)
+		if err != nil {
+			return drive.ChannelRef{}, err
+		}
+		return drive.ChannelRef{TGID: channel.TGID, AccessHash: access.AccessHash}, nil
+	case !errors.Is(err, database.ErrNotFound):
+		return drive.ChannelRef{}, err
+	}
+
+	channel, err := m.db.ChannelByID(ctx, channelID)
+	if err != nil {
+		return drive.ChannelRef{}, err
+	}
+	if !acct.IsPrimary {
+		return drive.ChannelRef{}, fmt.Errorf(
+			"%w: account %s has not been admitted to channel %q",
+			ErrNotInChannel, acct.Label, channel.Title)
+	}
+	return drive.ChannelRef{TGID: channel.TGID, AccessHash: channel.AccessHash}, nil
+}
+
+// ErrNotInChannel marks an account that cannot reach the storage channel,
+// which is a configuration problem rather than a transient failure: the
+// account has to be invited and given posting rights before it can be used.
+var ErrNotInChannel = errors.New("tgc: account is not a member of the storage channel")
 
 // Upload streams one document into a channel.
 //

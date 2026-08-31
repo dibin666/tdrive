@@ -154,12 +154,13 @@ func (s *Service) scheduleJobWorker(jobID string, run func()) bool {
 // same granularity the browser uploads at, which keeps one recovery story for
 // both paths.
 func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target *url.URL) {
-	release, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx)
 	if err != nil {
 		s.failRemote(ctx, job, err)
 		return
 	}
-	defer release()
+	defer lease.release()
+	defer s.bindUploadAccount(job.ID, lease.account)()
 
 	if err := s.db.SetJobStatus(ctx, job.ID, database.JobRunning, ""); err != nil {
 		s.log.Warn("could not mark a transfer running", zap.String("job", job.ID), zap.Error(err))

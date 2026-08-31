@@ -15,6 +15,7 @@ import (
 
 	"github.com/dibin/tdrive/internal/config"
 	"github.com/dibin/tdrive/internal/database"
+	"github.com/dibin/tdrive/internal/reader"
 	"github.com/dibin/tdrive/internal/tagcodec"
 )
 
@@ -33,6 +34,13 @@ type harness struct {
 // newHarness builds a drive with a deliberately tiny segment size, so a file of
 // a few kilobytes exercises the same multi-segment paths a 12 GB file would.
 func newHarness(t *testing.T, segmentSize int64) *harness {
+	t.Helper()
+	return newHarnessN(t, segmentSize, 1)
+}
+
+// newHarnessN builds the same drive over a cluster of the given size, for the
+// tests that care about how work is spread across Telegram accounts.
+func newHarnessN(t *testing.T, segmentSize int64, accounts int) *harness {
 	t.Helper()
 	ctx := context.Background()
 
@@ -58,13 +66,29 @@ func newHarness(t *testing.T, segmentSize int64) *harness {
 	cfg.Stream.Buffers = 4
 	cfg.Stream.LocationTTL = 0 // never trust the cache, so every read re-resolves
 
-	tg := newFakeTelegram()
+	tg := newFakeTelegramN(accounts)
 	return &harness{
 		svc: New(cfg, db, tg, zap.NewNop()),
 		db:  db,
 		tg:  tg,
 		cfg: cfg,
 	}
+}
+
+// open reads a file the way a real caller does: through an account. Which
+// account is the scheduler's business, so tests that do not care about
+// placement go through here.
+func (h *harness) open(t *testing.T, file database.File) *reader.File {
+	t.Helper()
+	account, err := h.svc.ReadAccount(context.Background(), file.ID)
+	if err != nil {
+		t.Fatalf("pick a reading account for %q: %v", file.Name, err)
+	}
+	r, err := h.svc.OpenFile(context.Background(), file, account)
+	if err != nil {
+		t.Fatalf("open %q: %v", file.Name, err)
+	}
+	return r
 }
 
 func randomBytes(n int, seed int64) []byte {
@@ -90,10 +114,7 @@ func (h *harness) store(t *testing.T, dir, name string, data []byte) database.Fi
 
 func (h *harness) readAll(t *testing.T, file database.File) []byte {
 	t.Helper()
-	r, err := h.svc.OpenFile(context.Background(), file)
-	if err != nil {
-		t.Fatalf("open %q: %v", file.Name, err)
-	}
+	r := h.open(t, file)
 	defer r.Close()
 
 	got, err := io.ReadAll(r)
@@ -182,10 +203,7 @@ func TestRangeReadsAcrossSegmentBoundaries(t *testing.T) {
 			}
 
 			t.Run(fmt.Sprintf("at=%d len=%d", start, end-start), func(t *testing.T) {
-				r, err := h.svc.OpenFile(context.Background(), file)
-				if err != nil {
-					t.Fatalf("open: %v", err)
-				}
+				r := h.open(t, file)
 				defer r.Close()
 
 				if _, err := r.Seek(start, io.SeekStart); err != nil {
@@ -667,10 +685,7 @@ func TestSmallReadTouchesOnlyOneSegment(t *testing.T) {
 
 	before := h.tg.reads.Load()
 
-	r, err := h.svc.OpenFile(context.Background(), file)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	r := h.open(t, file)
 	defer r.Close()
 
 	head := make([]byte, 4096)

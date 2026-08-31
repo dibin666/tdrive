@@ -18,6 +18,7 @@ import { api, type RuntimeSettings, type TelegramAccountExport } from '../../lib
 import { useApp } from '../../app/context'
 import { Button, Field, Input, Modal, Spinner, toast } from '../../components/primitives'
 import { ChannelStep, LoginStep } from '../Setup'
+import { AccountsSection } from './AccountsSection'
 import { Line, Section, StatusDot } from './shared'
 
 /**
@@ -131,6 +132,8 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
           <ChannelStep onDone={onChanged} />
         )}
       </Step>
+
+      <AccountsSection hasChannel={hasChannel} onChanged={onChanged} />
 
       <AdvancedSection ready={signedIn} onChanged={onChanged} />
 

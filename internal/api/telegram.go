@@ -2,20 +2,23 @@ package api
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/dibin/tdrive/internal/database"
 	"github.com/dibin/tdrive/internal/events"
+	"github.com/dibin/tdrive/internal/tgc"
 )
 
 func (s *Server) handleTelegramStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.tg.Status())
+	writeJSON(w, http.StatusOK, s.telegramStatus())
 }
 
 // publishTelegram pushes the connection state so the setup wizard advances
 // without the browser polling.
 func (s *Server) publishTelegram() {
-	s.events.Publish(events.Event{Type: events.TypeTelegram, Data: s.tg.Status()})
+	s.events.Publish(events.Event{Type: events.TypeTelegram, Data: s.telegramStatus()})
 }
 
 type configureRequest struct {
@@ -28,13 +31,33 @@ func (s *Server) handleTelegramConfigure(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.tg.Configure(r.Context(), req.AppID, req.AppHash); err != nil {
+	// On a first run there is no account yet, so the wizard's credentials
+	// create the primary one. Afterwards this endpoint edits it in place.
+	manager, err := s.primary()
+	if errors.Is(err, tgc.ErrNoAccounts) {
+		if _, err := s.accounts.Add(r.Context(), primaryAccountLabel, req.AppID, req.AppHash); err != nil {
+			s.fail(w, err, "configure telegram")
+			return
+		}
+		s.publishTelegram()
+		writeJSON(w, http.StatusOK, s.telegramStatus())
+		return
+	}
+	if err != nil {
+		s.fail(w, err, "configure telegram")
+		return
+	}
+	if err := manager.Configure(r.Context(), req.AppID, req.AppHash); err != nil {
 		s.fail(w, err, "configure telegram")
 		return
 	}
 	s.publishTelegram()
-	writeJSON(w, http.StatusOK, s.tg.Status())
+	writeJSON(w, http.StatusOK, s.telegramStatus())
 }
+
+// primaryAccountLabel names the account the setup wizard creates, matching the
+// label SeedPrimaryAccount gives an upgraded single-account deployment.
+const primaryAccountLabel = "主账号"
 
 type phoneRequest struct {
 	Phone string `json:"phone"`
@@ -45,7 +68,12 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.tg.SendCode(r.Context(), req.Phone)
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "send login code")
+		return
+	}
+	res, err := manager.SendCode(r.Context(), req.Phone)
 	if err != nil {
 		s.fail(w, err, "send login code")
 		return
@@ -63,7 +91,12 @@ func (s *Server) handleSignIn(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	res, err := s.tg.SignIn(r.Context(), req.Code)
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "telegram sign in")
+		return
+	}
+	res, err := manager.SignIn(r.Context(), req.Code)
 	if err != nil {
 		s.fail(w, err, "telegram sign in")
 		return
@@ -81,21 +114,31 @@ func (s *Server) handleSubmitPassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.tg.SubmitPassword(r.Context(), req.Password); err != nil {
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "telegram password")
+		return
+	}
+	if err := manager.SubmitPassword(r.Context(), req.Password); err != nil {
 		s.fail(w, err, "telegram password")
 		return
 	}
 	s.publishTelegram()
-	writeJSON(w, http.StatusOK, s.tg.Status())
+	writeJSON(w, http.StatusOK, s.telegramStatus())
 }
 
 func (s *Server) handleTelegramLogout(w http.ResponseWriter, r *http.Request) {
-	if err := s.tg.LogOut(r.Context()); err != nil {
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "telegram logout")
+		return
+	}
+	if err := manager.LogOut(r.Context()); err != nil {
 		s.fail(w, err, "telegram logout")
 		return
 	}
 	s.publishTelegram()
-	writeJSON(w, http.StatusOK, s.tg.Status())
+	writeJSON(w, http.StatusOK, s.telegramStatus())
 }
 
 const telegramAccountExportVersion = 1
@@ -112,12 +155,17 @@ type telegramAccountExport struct {
 // app credentials needed to open it. WebUI users, channels and the local index
 // are intentionally not part of this portable account package.
 func (s *Server) handleTelegramAccountExport(w http.ResponseWriter, r *http.Request) {
-	appID, appHash, err := s.tg.Credentials(r.Context())
+	manager, err := s.primary()
 	if err != nil {
 		s.fail(w, err, "export telegram account")
 		return
 	}
-	sessionData, err := s.tg.ExportSession(r.Context())
+	appID, appHash, err := manager.Credentials(r.Context())
+	if err != nil {
+		s.fail(w, err, "export telegram account")
+		return
+	}
+	sessionData, err := manager.ExportSession(r.Context())
 	if err != nil {
 		s.fail(w, err, "export telegram account")
 		return
@@ -158,18 +206,28 @@ func (s *Server) handleTelegramAccountImport(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "Telegram account session is not valid base64")
 		return
 	}
-	if err := s.tg.ImportSession(r.Context(), req.AppID, req.AppHash, sessionData); err != nil {
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "import telegram account")
+		return
+	}
+	if err := manager.ImportSession(r.Context(), req.AppID, req.AppHash, sessionData); err != nil {
 		s.fail(w, err, "import telegram account")
 		return
 	}
 	s.publishTelegram()
-	writeJSON(w, http.StatusOK, s.tg.Status())
+	writeJSON(w, http.StatusOK, s.telegramStatus())
 }
 
 // handleListChannels offers the account's existing channels so a drive can
 // reuse one rather than always creating a new channel.
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
-	channels, err := s.tg.ListChannels(r.Context())
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "list channels")
+		return
+	}
+	channels, err := manager.ListChannels(r.Context())
 	if err != nil {
 		s.fail(w, err, "list channels")
 		return
@@ -205,7 +263,12 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		req.About = "Storage channel for TDrive. Messages here are file records; editing them by hand will confuse the index."
 	}
 
-	info, err := s.tg.CreateChannel(r.Context(), req.Title, req.About)
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "create channel")
+		return
+	}
+	info, err := manager.CreateChannel(r.Context(), req.Title, req.About)
 	if err != nil {
 		s.fail(w, err, "create channel")
 		return
@@ -219,7 +282,10 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "create channel")
 		return
 	}
-	writeJSON(w, http.StatusCreated, channel)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"channel":  channel,
+		"joinedBy": s.admitAccounts(r, channel),
+	})
 }
 
 type selectChannelRequest struct {
@@ -236,7 +302,12 @@ func (s *Server) handleSelectChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := s.tg.ResolveChannel(r.Context(), req.TGID, req.AccessHash)
+	manager, err := s.primary()
+	if err != nil {
+		s.fail(w, err, "select channel")
+		return
+	}
+	info, err := manager.ResolveChannel(r.Context(), req.TGID, req.AccessHash)
 	if err != nil {
 		s.fail(w, err, "select channel")
 		return
@@ -256,5 +327,27 @@ func (s *Server) handleSelectChannel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "select channel")
 		return
 	}
-	writeJSON(w, http.StatusOK, channel)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channel":  channel,
+		"joinedBy": s.admitAccounts(r, channel),
+	})
+}
+
+// admitAccounts brings every account into the newly chosen channel and reports
+// which ones could not be admitted.
+//
+// A failure here is deliberately not fatal to choosing the channel: the primary
+// account can already store into it, so the drive works. The others are simply
+// idle until the problem — usually a primary that is not the channel creator
+// and therefore cannot grant admin rights — is sorted out by hand.
+func (s *Server) admitAccounts(r *http.Request, channel database.Channel) map[string]string {
+	failures := s.accounts.JoinAll(r.Context(), channel)
+	if len(failures) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(failures))
+	for id, err := range failures {
+		out[id] = err.Error()
+	}
+	return out
 }

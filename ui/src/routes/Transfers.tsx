@@ -76,6 +76,10 @@ const SOURCE_META: Record<string, { label: string; tone: 'clay' | 'blue' | 'gree
   direct: { label: '直接下载', tone: 'clay' },
   staged: { label: '服务器暂存', tone: 'blue' },
   segments: { label: '分卷下载', tone: 'purple' },
+  // Plugins set their own source string. Listing the known ones here only
+  // affects the label; an unknown source still renders through the fallback
+  // below.
+  aliyunpan: { label: '阿里云盘', tone: 'blue' },
 }
 
 const STATUS_LABEL: Record<string, string> = {

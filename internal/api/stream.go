@@ -218,7 +218,10 @@ func (s *Server) serveBytes(w http.ResponseWriter, r *http.Request, window byteW
 	// slot, so a parallel downloader counts as one transfer against the
 	// configured limit rather than as one per connection. The lease is held
 	// until this response's copy ends.
-	release, err := s.drive.AcquireDownloadSession(r.Context(), window.sessionKey)
+	// The slot carries the Telegram account the whole download runs on, so a
+	// multi-connection client stays on one login rather than spending several
+	// accounts' budgets on one file.
+	account, release, err := s.drive.AcquireDownloadSession(r.Context(), window.sessionKey, file.ID)
 	if err != nil {
 		s.fail(w, err, "open file")
 		return
@@ -238,7 +241,7 @@ func (s *Server) serveBytes(w http.ResponseWriter, r *http.Request, window byteW
 		w.WriteHeader(http.StatusPartialContent)
 	}
 
-	reader, err := s.drive.OpenFile(r.Context(), file)
+	reader, err := s.drive.OpenFile(r.Context(), file, account)
 	if err != nil {
 		s.fail(w, err, "open file")
 		return

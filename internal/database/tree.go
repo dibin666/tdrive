@@ -307,12 +307,12 @@ func (d *DB) DeleteFile(ctx context.Context, id string) error {
 	return affectedOne(res, err, "delete file")
 }
 
-const segCols = `file_id, idx, size, tg_msg_id, tg_doc_id, access_hash, dc_id, file_reference`
+const segCols = `file_id, idx, size, tg_msg_id, tg_doc_id, access_hash, dc_id, file_reference, account_id`
 
 func scanSegment(row interface{ Scan(...any) error }) (Segment, error) {
 	var s Segment
 	err := row.Scan(&s.FileID, &s.Index, &s.Size, &s.TGMsgID, &s.TGDocID,
-		&s.AccessHash, &s.DCID, &s.FileReference)
+		&s.AccessHash, &s.DCID, &s.FileReference, &s.AccountID)
 	if err != nil {
 		return Segment{}, Translate(err)
 	}
@@ -324,12 +324,14 @@ func scanSegment(row interface{ Scan(...any) error }) (Segment, error) {
 // the crash.
 func (d *DB) UpsertSegment(ctx context.Context, s Segment) error {
 	_, err := d.write.ExecContext(ctx,
-		`INSERT INTO segments (`+segCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO segments (`+segCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (file_id, idx) DO UPDATE SET
 		   size = excluded.size, tg_msg_id = excluded.tg_msg_id,
 		   tg_doc_id = excluded.tg_doc_id, access_hash = excluded.access_hash,
-		   dc_id = excluded.dc_id, file_reference = excluded.file_reference`,
-		s.FileID, s.Index, s.Size, s.TGMsgID, s.TGDocID, s.AccessHash, s.DCID, s.FileReference)
+		   dc_id = excluded.dc_id, file_reference = excluded.file_reference,
+		   account_id = excluded.account_id`,
+		s.FileID, s.Index, s.Size, s.TGMsgID, s.TGDocID, s.AccessHash, s.DCID,
+		s.FileReference, s.AccountID)
 	if err != nil {
 		return fmt.Errorf("upsert segment %d of %s: %w", s.Index, s.FileID, Translate(err))
 	}
@@ -359,9 +361,15 @@ func (d *DB) Segments(ctx context.Context, fileID string) ([]Segment, error) {
 
 // RefreshFileReference writes back a file reference that had to be re-resolved
 // after Telegram expired the cached one.
-func (d *DB) RefreshFileReference(ctx context.Context, fileID string, idx int, ref []byte) error {
+//
+// The write is scoped to the account that owns the row, because a file
+// reference is only valid for the account that fetched it. A second account
+// reading the same segment resolves its own and keeps it in memory; letting it
+// store that here would hand the owner a reference it cannot use.
+func (d *DB) RefreshFileReference(ctx context.Context, fileID string, idx int, ref []byte, accountID string) error {
 	_, err := d.write.ExecContext(ctx,
-		`UPDATE segments SET file_reference = ? WHERE file_id = ? AND idx = ?`, ref, fileID, idx)
+		`UPDATE segments SET file_reference = ? WHERE file_id = ? AND idx = ? AND account_id = ?`,
+		ref, fileID, idx, accountID)
 	return Translate(err)
 }
 
@@ -504,9 +512,9 @@ func (d *DB) ReplaceIndex(ctx context.Context, dirs []Dir, files []File, segment
 		}
 		for _, s := range segments {
 			_, err := tx.ExecContext(ctx,
-				`INSERT INTO segments (`+segCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO segments (`+segCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				s.FileID, s.Index, s.Size, s.TGMsgID, s.TGDocID,
-				s.AccessHash, s.DCID, s.FileReference)
+				s.AccessHash, s.DCID, s.FileReference, s.AccountID)
 			if err != nil {
 				return fmt.Errorf("rebuild segment %d of %s: %w", s.Index, s.FileID, Translate(err))
 			}

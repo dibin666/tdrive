@@ -16,6 +16,7 @@ Turn your Telegram account into a network drive with unlimited storage.
 - **VPS local upload** — Docker can mount a VPS directory read-only, letting the WebUI upload dialog choose server-side files without sending them through the browser first
 - **Remote URL fetch** — submit a URL and the server downloads it directly into Telegram; large files never travel through the browser
 - **Parallel download** — multiple concurrent 1 MiB chunk prefetches replace single-connection sequential reads, significantly improving download speed
+- **Multiple Telegram accounts** — configure several api_id / api_hash pairs to spread the load. Accounts are fully isolated (their own session, connection pool, rate limiter and task budget), the tuning knobs are per account, and a throttled account is routed around automatically
 - **Index rebuild** — the database is just a cache; the directory tree, file metadata and ownership can all be reconstructed from the Telegram channel
 - **Multi-user** — JWT authentication, roles, twelve fine-grained permissions, per-account directory scoping, storage quotas, account enable/disable, session management and an audit log
 - **Transfer centre** — uploads and downloads in one filterable list: by kind, status, source and date range, with live speed, average speed and elapsed time, and deletable history. Transfers the server drives itself — WebDAV reads and writes, VPS-local uploads, remote fetches, staged downloads — are timed server-side and stream their progress over SSE, so the list moves without being refreshed
@@ -137,6 +138,47 @@ installation is requested.
 Plugin SDK, manifest, Host API, lifecycle, and store submission requirements are documented in
 [`docs/plugins.md`](docs/plugins.md). The default empty store index is
 [`plugins/index.json`](plugins/index.json).
+
+## Multiple Telegram accounts
+
+A drive can be backed by several Telegram accounts, which multiplies its upload and download budget.
+Add them under **Settings → Telegram → Telegram accounts**.
+
+**Each one has to be a different phone number.** Telegram meters FLOOD_WAIT and transfer quota per
+*account*, so registering a second api_id / api_hash against the same number just opens another
+authorization on the same budget. It buys no speed and makes the account more likely to be flagged.
+
+Adding an account is three steps, which the Web UI walks through:
+
+1. Enter the api_id / api_hash that number registered at my.telegram.org.
+2. Sign in with that phone number (code, plus the 2FA password if it has one).
+3. Join the storage channel — the primary account exports an invite, the new account joins, and the
+   primary promotes it with **post, edit and delete** rights. Edit and delete are not optional:
+   renaming, moving and deleting a file rewrite messages other accounts wrote.
+
+If the primary account did not create the channel it may not be allowed to grant admin rights, and
+that step fails with a message saying so. Promote the account by hand in a Telegram client, ticking
+those same three rights.
+
+### Isolation and scheduling
+
+Accounts share nothing: separate `session-*.json`, separate MTProto pools, separate rate limiters,
+separate task budgets.
+
+- **The tuning knobs are per account.** "One upload at a time" with two accounts runs two uploads at
+  once, one per login. Pool size and request interval work the same way. The settings page shows the
+  resulting totals next to each slider.
+- **A transfer stays on one account.** Every segment of a browser upload and every connection of a
+  parallel download goes through the same login, never split across accounts.
+- **Throttling is routed around.** An account that receives a FLOOD_WAIT is marked as cooling down,
+  and new transfers go elsewhere until it expires. Requests already in flight still wait it out.
+- **Any account can read any file.** Telegram mints access hashes per account, so an account reading
+  a file it did not upload first re-resolves its own handle from the message id — one extra round
+  trip per segment, cached per account for 30 minutes. That is what lets a newly added account share
+  the download load for files that predate it.
+
+Removing an account does not delete the files it uploaded; the others re-resolve handles and carry
+on. The last enabled account cannot be removed or disabled.
 
 ## Accounts and permissions
 

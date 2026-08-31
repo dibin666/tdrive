@@ -89,19 +89,13 @@ func TestTaskLimiterLimitChangeWakesWaiters(t *testing.T) {
 }
 
 func TestUploadJobSegmentsShareOneTaskSlot(t *testing.T) {
-	cfg := &config.Config{Transfer: config.Transfer{UploadConcurrency: 1, DownloadConcurrency: 1}}
-	svc := &Service{
-		cfg:             cfg,
-		uploadLimiter:   newTaskLimiter(1),
-		downloadLimiter: newTaskLimiter(1),
-		uploadJobs:      make(map[string]*uploadJobLease),
-	}
+	svc := limiterTestService(1, 1, time.Millisecond, 8, 1)
 
-	first, err := svc.AcquireUploadJob(context.Background(), "job-a")
+	_, first, err := svc.AcquireUploadJob(context.Background(), "job-a")
 	if err != nil {
 		t.Fatalf("acquire first segment: %v", err)
 	}
-	second, err := svc.AcquireUploadJob(context.Background(), "job-a")
+	_, second, err := svc.AcquireUploadJob(context.Background(), "job-a")
 	if err != nil {
 		t.Fatalf("join second segment: %v", err)
 	}
@@ -110,7 +104,7 @@ func TestUploadJobSegmentsShareOneTaskSlot(t *testing.T) {
 
 	waiting := make(chan func(), 1)
 	go func() {
-		release, err := svc.AcquireUploadJob(context.Background(), "job-b")
+		_, release, err := svc.AcquireUploadJob(context.Background(), "job-b")
 		if err == nil {
 			waiting <- release
 		}
@@ -140,19 +134,29 @@ func TestUploadJobSegmentsShareOneTaskSlot(t *testing.T) {
 // settings are read, and withRuntimeDefaults would substitute the 15 second
 // production default.
 func downloadTestService(limit int, grace time.Duration, maxConns int) *Service {
+	return limiterTestService(1, limit, grace, maxConns, 1)
+}
+
+// limiterTestService builds a Service with only the fields the scheduler and
+// the session code touch, over a fake cluster of the given size. The task
+// limits are per account, so the totals a test should expect are
+// upload*accounts and download*accounts.
+func limiterTestService(upload, download int, grace time.Duration, maxConns, accounts int) *Service {
 	cfg := &config.Config{
 		Transfer: config.Transfer{
-			UploadConcurrency:   1,
-			DownloadConcurrency: limit,
+			UploadConcurrency:   upload,
+			DownloadConcurrency: download,
 			MaxDownloadConns:    maxConns,
 			DownloadGrace:       grace,
 		},
 	}
 	return &Service{
 		cfg:              cfg,
-		uploadLimiter:    newTaskLimiter(1),
-		downloadLimiter:  newTaskLimiter(limit),
+		cluster:          newFakeTelegramN(accounts),
+		uploadLimiters:   make(map[string]*taskLimiter),
+		downloadLimiters: make(map[string]*taskLimiter),
 		uploadJobs:       make(map[string]*uploadJobLease),
+		jobAccounts:      make(map[string]Account),
 		downloadSessions: make(map[string]*downloadSession),
 	}
 }
@@ -165,7 +169,7 @@ func TestDownloadSessionSharesOneTaskSlot(t *testing.T) {
 
 	releases := make([]func(), 0, 4)
 	for i := range 4 {
-		release, err := svc.AcquireDownloadSession(context.Background(), "file-a")
+		_, release, err := svc.AcquireDownloadSession(context.Background(), "file-a", "")
 		if err != nil {
 			t.Fatalf("acquire connection %d of the same download: %v", i+1, err)
 		}
@@ -175,7 +179,7 @@ func TestDownloadSessionSharesOneTaskSlot(t *testing.T) {
 	// A different file is a different transfer and must wait.
 	waiting := make(chan func(), 1)
 	go func() {
-		release, err := svc.AcquireDownloadSession(context.Background(), "file-b")
+		_, release, err := svc.AcquireDownloadSession(context.Background(), "file-b", "")
 		if err == nil {
 			waiting <- release
 		}
@@ -204,7 +208,7 @@ func TestDownloadSessionSharesOneTaskSlot(t *testing.T) {
 func TestDownloadSessionHoldsSlotThroughIdleGrace(t *testing.T) {
 	svc := downloadTestService(1, 200*time.Millisecond, 8)
 
-	release, err := svc.AcquireDownloadSession(context.Background(), "file-a")
+	_, release, err := svc.AcquireDownloadSession(context.Background(), "file-a", "")
 	if err != nil {
 		t.Fatalf("acquire download: %v", err)
 	}
@@ -214,12 +218,12 @@ func TestDownloadSessionHoldsSlotThroughIdleGrace(t *testing.T) {
 	// transfer must not be admitted yet.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := svc.AcquireDownloadSession(ctx, "file-b"); err == nil {
+	if _, _, err := svc.AcquireDownloadSession(ctx, "file-b", ""); err == nil {
 		t.Fatal("another download took the slot during the grace period")
 	}
 
 	// The same download coming back for its next range reuses the session.
-	again, err := svc.AcquireDownloadSession(context.Background(), "file-a")
+	_, again, err := svc.AcquireDownloadSession(context.Background(), "file-a", "")
 	if err != nil {
 		t.Fatalf("rejoin the same download during grace: %v", err)
 	}
@@ -229,7 +233,7 @@ func TestDownloadSessionHoldsSlotThroughIdleGrace(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		next, err := svc.AcquireDownloadSession(ctx, "file-b")
+		_, next, err := svc.AcquireDownloadSession(ctx, "file-b", "")
 		cancel()
 		if err == nil {
 			next()
@@ -245,18 +249,18 @@ func TestDownloadSessionHoldsSlotThroughIdleGrace(t *testing.T) {
 func TestDownloadSessionCapsConnections(t *testing.T) {
 	svc := downloadTestService(4, time.Millisecond, 2)
 
-	first, err := svc.AcquireDownloadSession(context.Background(), "file-a")
+	_, first, err := svc.AcquireDownloadSession(context.Background(), "file-a", "")
 	if err != nil {
 		t.Fatalf("acquire first connection: %v", err)
 	}
 	defer first()
-	second, err := svc.AcquireDownloadSession(context.Background(), "file-a")
+	_, second, err := svc.AcquireDownloadSession(context.Background(), "file-a", "")
 	if err != nil {
 		t.Fatalf("acquire second connection: %v", err)
 	}
 	defer second()
 
-	if _, err := svc.AcquireDownloadSession(context.Background(), "file-a"); !errors.Is(err, ErrTooManyConnections) {
+	if _, _, err := svc.AcquireDownloadSession(context.Background(), "file-a", ""); !errors.Is(err, ErrTooManyConnections) {
 		t.Fatalf("expected a too-many-connections error, got %v", err)
 	}
 }

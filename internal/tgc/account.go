@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"github.com/gotd/td/session"
-
-	"github.com/dibin/tdrive/internal/database"
 )
 
 const maxSessionSize = 1 << 20
@@ -30,7 +28,7 @@ func (m *Manager) ExportSession(ctx context.Context) ([]byte, error) {
 		return nil, ErrNotReady
 	}
 
-	data, err := os.ReadFile(m.cfg.Telegram.SessionFile)
+	data, err := os.ReadFile(m.SessionPath())
 	if os.IsNotExist(err) {
 		return nil, ErrNotReady
 	}
@@ -61,24 +59,17 @@ func (m *Manager) ImportSession(ctx context.Context, appID int, appHash string, 
 
 	m.Stop()
 	m.CancelLogin()
-	if err := replaceSessionFile(m.cfg.Telegram.SessionFile, data); err != nil {
+	if err := replaceSessionFile(m.SessionPath(), data); err != nil {
 		m.setState(StateError, err)
 		return err
 	}
-	if err := m.db.SetSetting(ctx, database.SettingTGAppID, fmt.Sprint(appID)); err != nil {
-		err = fmt.Errorf("store telegram app id: %w", err)
+	// Configure stores the credentials against this account (and mirrors them
+	// into settings when it is the primary) and reconnects with them.
+	if err := m.Configure(ctx, appID, appHash); err != nil {
 		m.setState(StateError, err)
 		return err
 	}
-	if err := m.db.SetSetting(ctx, database.SettingTGAppHash, appHash); err != nil {
-		err = fmt.Errorf("store telegram app hash: %w", err)
-		m.setState(StateError, err)
-		return err
-	}
-	settings := m.cfg.RuntimeSettings()
-	settings.AppID, settings.AppHash = appID, appHash
-	m.cfg.SetRuntimeSettings(settings)
-	return m.start(ctx, appID, appHash)
+	return nil
 }
 
 func validateSession(ctx context.Context, data []byte) error {

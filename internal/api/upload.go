@@ -172,7 +172,9 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 	// multiple HTTP requests at once. The job lease makes those requests share
 	// one global upload slot while still allowing the segments to run in
 	// parallel inside that task.
-	releaseRequest, err := s.drive.AcquireUploadJob(r.Context(), job.ID)
+	// The lease also fixes which Telegram account the job runs on, so every
+	// segment of this upload lands through the same login.
+	_, releaseRequest, err := s.drive.AcquireUploadJob(r.Context(), job.ID)
 	if err != nil {
 		s.fail(w, err, "put segment")
 		return

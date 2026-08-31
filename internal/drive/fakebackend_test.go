@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -12,8 +14,13 @@ import (
 // fakeTelegram is an in-memory stand-in for a Telegram channel. It enforces the
 // constraints that actually bite in production — a 1 MiB read ceiling that may
 // not straddle a 1 MiB boundary, an exact upload length, expiring file
-// references — so a test that passes here is exercising the same edge cases the
+// references, and access hashes that are only valid for the account they were
+// minted for — so a test that passes here is exercising the same edge cases the
 // real service would.
+//
+// It doubles as the Cluster: one fake Telegram serves however many fake
+// accounts a test asks for, which is what makes multi-account scheduling and
+// cross-account reads testable without a network.
 type fakeTelegram struct {
 	mu       sync.Mutex
 	messages map[int]*fakeMessage
@@ -29,41 +36,127 @@ type fakeTelegram struct {
 
 	reads   atomic.Int64
 	uploads atomic.Int64
+
+	accounts []*fakeAccount
 }
 
 type fakeMessage struct {
 	caption string
 	// body is nil for caption-only records: directories and empty files.
-	body       []byte
-	docID      int64
-	accessHash int64
-	dc         int
-	// generation bumps on every caption edit, invalidating outstanding file
+	body  []byte
+	docID int64
+	dc    int
+	// fileRef rotates on every caption edit, invalidating outstanding
 	// references exactly as Telegram does.
 	fileRef []byte
+}
+
+// fakeAccount is one Telegram login onto the shared fake channel. Everything an
+// account can observe that differs from its peers lives here: its id, whether
+// the scheduler may use it, and the access hashes it mints.
+type fakeAccount struct {
+	tg *fakeTelegram
+	id string
+
+	// unavailable stands in for a FLOOD_WAIT: the account is still signed in
+	// and still works if asked, but the scheduler should route around it.
+	unavailable atomic.Bool
+	// uploads counts what this particular account stored, which is how a test
+	// checks that work actually spread across accounts.
+	uploads atomic.Int64
+	reads   atomic.Int64
+	// refreshes counts handle resolutions, which is how a test checks that a
+	// cross-account read pays exactly one extra round trip and a same-account
+	// read pays none.
+	refreshes atomic.Int64
 }
 
 var (
 	errRefExpired = errors.New("FILE_REFERENCE_EXPIRED")
 	errMigrate    = errors.New("FILE_MIGRATE")
+	// errWrongAccount is what Telegram effectively answers when an account
+	// presents a handle minted for a different account.
+	errWrongAccount = errors.New("FILE_ID_INVALID")
 )
 
-func newFakeTelegram() *fakeTelegram {
-	return &fakeTelegram{
+func newFakeTelegram() *fakeTelegram { return newFakeTelegramN(1) }
+
+// newFakeTelegramN builds a cluster of n independent accounts over one channel.
+func newFakeTelegramN(n int) *fakeTelegram {
+	f := &fakeTelegram{
 		messages: make(map[int]*fakeMessage),
 		nextID:   1000,
 		nextDoc:  5000,
 		ready:    true,
 	}
+	for i := range n {
+		f.accounts = append(f.accounts, &fakeAccount{tg: f, id: "acct-" + strconv.Itoa(i+1)})
+	}
+	return f
 }
 
 func (f *fakeTelegram) Ready() bool { return f.ready }
 
-func (f *fakeTelegram) Upload(ctx context.Context, _ ChannelRef, spec UploadSpec) (StoredDoc, error) {
+// Accounts implements Cluster. Like the real cluster it falls back to the
+// signed-in accounts when every one of them is unavailable, so a test that
+// throttles everything sees queueing rather than a hard failure.
+func (f *fakeTelegram) Accounts() []Account {
+	var out []Account
+	for _, a := range f.accounts {
+		if !a.unavailable.Load() {
+			out = append(out, a)
+		}
+	}
+	if len(out) > 0 || !f.ready {
+		return out
+	}
+	for _, a := range f.accounts {
+		out = append(out, a)
+	}
+	return out
+}
+
+func (f *fakeTelegram) Account(id string) (Account, bool) {
+	for _, a := range f.accounts {
+		if a.id == id {
+			return a, true
+		}
+	}
+	return nil, false
+}
+
+// account is the test-side accessor for one account, so a test can throttle it
+// or read its counters.
+func (f *fakeTelegram) account(i int) *fakeAccount { return f.accounts[i] }
+
+func (a *fakeAccount) ID() string      { return a.id }
+func (a *fakeAccount) Available() bool { return a.tg.ready && !a.unavailable.Load() }
+
+// ChannelRef mints this account's own view of the channel. The fake ignores the
+// value when serving, but handing out a different one per account matches
+// reality and keeps callers honest about asking the right account.
+func (a *fakeAccount) ChannelRef(_ context.Context, channelID string) (ChannelRef, error) {
+	return ChannelRef{TGID: 1, AccessHash: hashFor(1, a.id) + int64(len(channelID))}, nil
+}
+
+func (a *fakeAccount) Ready() bool { return a.tg.ready }
+
+// hashFor derives the access hash a given account would be handed for a
+// document. Deriving rather than storing is the point: it makes presenting
+// another account's hash detectably wrong.
+func hashFor(docID int64, accountID string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(accountID))
+	return docID*7 ^ int64(h.Sum64()&0x7fffffff)
+}
+
+func (a *fakeAccount) Upload(ctx context.Context, _ ChannelRef, spec UploadSpec) (StoredDoc, error) {
+	f := a.tg
 	if err := ctx.Err(); err != nil {
 		return StoredDoc{}, err
 	}
 	f.uploads.Add(1)
+	a.uploads.Add(1)
 
 	// Telegram commits to a part count from the declared size, so a body that
 	// does not match exactly is a bug worth failing loudly on.
@@ -85,26 +178,26 @@ func (f *fakeTelegram) Upload(ctx context.Context, _ ChannelRef, spec UploadSpec
 	f.nextID++
 	f.nextDoc++
 	msg := &fakeMessage{
-		caption:    spec.Caption,
-		body:       body,
-		docID:      f.nextDoc,
-		accessHash: f.nextDoc * 7,
-		dc:         2,
-		fileRef:    []byte(fmt.Sprintf("ref-%d-0", f.nextDoc)),
+		caption: spec.Caption,
+		body:    body,
+		docID:   f.nextDoc,
+		dc:      2,
+		fileRef: []byte(fmt.Sprintf("ref-%d-0", f.nextDoc)),
 	}
 	f.messages[f.nextID] = msg
 
 	return StoredDoc{
 		MsgID:         f.nextID,
 		DocID:         msg.docID,
-		AccessHash:    msg.accessHash,
+		AccessHash:    hashFor(msg.docID, a.id),
 		DCID:          msg.dc,
 		FileReference: msg.fileRef,
 		Size:          int64(len(body)),
 	}, nil
 }
 
-func (f *fakeTelegram) SendRecord(_ context.Context, _ ChannelRef, caption string) (int, error) {
+func (a *fakeAccount) SendRecord(_ context.Context, _ ChannelRef, caption string) (int, error) {
+	f := a.tg
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
@@ -112,7 +205,8 @@ func (f *fakeTelegram) SendRecord(_ context.Context, _ ChannelRef, caption strin
 	return f.nextID, nil
 }
 
-func (f *fakeTelegram) EditRecord(_ context.Context, _ ChannelRef, msgID int, caption string) error {
+func (a *fakeAccount) EditRecord(_ context.Context, _ ChannelRef, msgID int, caption string) error {
+	f := a.tg
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	msg, ok := f.messages[msgID]
@@ -128,7 +222,8 @@ func (f *fakeTelegram) EditRecord(_ context.Context, _ ChannelRef, msgID int, ca
 	return nil
 }
 
-func (f *fakeTelegram) DeleteRecords(_ context.Context, _ ChannelRef, ids []int) error {
+func (a *fakeAccount) DeleteRecords(_ context.Context, _ ChannelRef, ids []int) error {
+	f := a.tg
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, id := range ids {
@@ -137,22 +232,30 @@ func (f *fakeTelegram) DeleteRecords(_ context.Context, _ ChannelRef, ids []int)
 	return nil
 }
 
-func (f *fakeTelegram) ReadChunk(
+func (a *fakeAccount) ReadChunk(
 	ctx context.Context,
 	_ ChannelRef,
 	doc StoredDoc,
 	offset, limit int64,
 ) ([]byte, error) {
+	f := a.tg
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	f.reads.Add(1)
+	a.reads.Add(1)
 
 	if limit > 1<<20 {
 		return nil, fmt.Errorf("limit %d exceeds Telegram's 1 MiB ceiling", limit)
 	}
 	if offset/(1<<20) != (offset+limit-1)/(1<<20) {
 		return nil, fmt.Errorf("read [%d,%d) straddles a 1 MiB boundary", offset, offset+limit)
+	}
+
+	// A handle minted for another account is not merely stale, it is invalid —
+	// no amount of refreshing the file reference would make it work.
+	if doc.AccessHash != hashFor(doc.DocID, a.id) {
+		return nil, errWrongAccount
 	}
 
 	if f.migrateTo > 0 && doc.DCID != f.migrateTo {
@@ -185,7 +288,10 @@ func (f *fakeTelegram) ReadChunk(
 	return out, nil
 }
 
-func (f *fakeTelegram) RefreshDoc(_ context.Context, _ ChannelRef, msgID int) (StoredDoc, error) {
+func (a *fakeAccount) RefreshDoc(_ context.Context, _ ChannelRef, msgID int) (StoredDoc, error) {
+	f := a.tg
+	a.refreshes.Add(1)
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	msg, ok := f.messages[msgID]
@@ -199,18 +305,18 @@ func (f *fakeTelegram) RefreshDoc(_ context.Context, _ ChannelRef, msgID int) (S
 	return StoredDoc{
 		MsgID:         msgID,
 		DocID:         msg.docID,
-		AccessHash:    msg.accessHash,
+		AccessHash:    hashFor(msg.docID, a.id),
 		DCID:          dc,
 		FileReference: msg.fileRef,
 		Size:          int64(len(msg.body)),
 	}, nil
 }
 
-func (f *fakeTelegram) IsReferenceExpired(err error) bool { return errors.Is(err, errRefExpired) }
+func (a *fakeAccount) IsReferenceExpired(err error) bool { return errors.Is(err, errRefExpired) }
 
-func (f *fakeTelegram) MigratedDC(err error) (int, bool) {
+func (a *fakeAccount) MigratedDC(err error) (int, bool) {
 	if errors.Is(err, errMigrate) {
-		return f.migrateTo, true
+		return a.tg.migrateTo, true
 	}
 	return 0, false
 }
