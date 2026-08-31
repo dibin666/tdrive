@@ -145,6 +145,13 @@ export interface PluginRoute {
   ui?: boolean
 }
 
+/** PluginArtifact is one prebuilt executable, keyed in the manifest by
+ *  "goos/goarch". tdrive installs the entry matching the server it runs on. */
+export interface PluginArtifact {
+  url: string
+  sha256: string
+}
+
 export interface PluginManifest {
   id: string
   name: string
@@ -157,7 +164,8 @@ export interface PluginManifest {
   license: string
   repositoryUrl: string
   documentationUrl?: string
-  entrypoint: string
+  artifacts: Record<string, PluginArtifact>
+  entrypoint?: string
   capabilities?: string[]
   events?: string[]
   routes?: PluginRoute[]
@@ -171,9 +179,8 @@ export interface PluginStatus {
   enabled: boolean
   status: PluginLifecycle | string
   source: string
-  sourceUrl?: string
-  ref?: string
-  sourceDigest: string
+  manifestUrl?: string
+  manifestDigest: string
   binaryDigest: string
   error?: string
   installedAt: string
@@ -183,9 +190,11 @@ export interface PluginStatus {
 export interface PluginInspection {
   inspectionId: string
   manifest: PluginManifest
-  sourceUrl: string
-  ref?: string
-  sourceDigest: string
+  manifestUrl: string
+  manifestDigest: string
+  platform: string
+  binaryUrl: string
+  binaryDigest: string
   compatible: boolean
   isUpdate: boolean
   currentVersion?: string
@@ -200,8 +209,8 @@ export interface PluginStoreItem {
   version: string
   author: string
   repositoryUrl: string
-  ref?: string
-  sourceDigest: string
+  manifestUrl: string
+  manifestDigest: string
   documentationUrl?: string
   license: string
   tags?: string[]
@@ -788,7 +797,7 @@ export const api = {
 
   plugins: () => request<PluginStatus[]>('/plugins/'),
   pluginStore: (q = '') => request<PluginStoreIndex>(`/plugins/store${query({ q })}`),
-  inspectPlugin: (body: { sourceUrl: string; ref?: string; sourceDigest?: string }) =>
+  inspectPlugin: (body: { manifestUrl: string; manifestDigest?: string }) =>
     request<PluginInspection>('/plugins/inspect', { method: 'POST', body: json(body) }),
   installPlugin: (inspectionId: string) =>
     request<PluginStatus>('/plugins/install', {

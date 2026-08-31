@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,15 +34,18 @@ const (
 	pluginCallTimeout  = 30 * time.Second
 )
 
-// Inspection is the one-time source review shown by the WebUI before an
-// installation is confirmed. The source digest binds the later build to the
-// exact tree inspected here.
+// Inspection is the one-time manifest review shown by the WebUI before an
+// installation is confirmed. The manifest digest binds the later download to
+// the exact document reviewed here, and the manifest in turn fixes the binary
+// digest, so confirming is a decision about known bytes.
 type Inspection struct {
 	ID             string                `json:"inspectionId"`
 	Manifest       tdriveplugin.Manifest `json:"manifest"`
-	SourceURL      string                `json:"sourceUrl"`
-	Ref            string                `json:"ref,omitempty"`
-	SourceDigest   string                `json:"sourceDigest"`
+	ManifestURL    string                `json:"manifestUrl"`
+	ManifestDigest string                `json:"manifestDigest"`
+	Platform       string                `json:"platform"`
+	BinaryURL      string                `json:"binaryUrl"`
+	BinaryDigest   string                `json:"binaryDigest"`
 	Compatible     bool                  `json:"compatible"`
 	IsUpdate       bool                  `json:"isUpdate"`
 	CurrentVersion string                `json:"currentVersion,omitempty"`
@@ -50,7 +54,7 @@ type Inspection struct {
 }
 
 // StoreIndex is the intentionally boring JSON format consumed by the plugin
-// store UI. A store only discovers source metadata; installation still goes
+// store UI. A store only discovers plugin metadata; installation still goes
 // through the same inspect-and-confirm flow as a manually entered URL.
 type StoreIndex struct {
 	UpdatedAt time.Time     `json:"updatedAt"`
@@ -58,35 +62,33 @@ type StoreIndex struct {
 }
 
 type StorePlugin struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Description   string   `json:"description,omitempty"`
-	Version       string   `json:"version"`
-	Author        string   `json:"author"`
-	RepositoryURL string   `json:"repositoryUrl"`
-	SourceURL     string   `json:"sourceUrl,omitempty"`
-	Ref           string   `json:"ref,omitempty"`
-	SourceDigest  string   `json:"sourceDigest"`
-	Documentation string   `json:"documentationUrl,omitempty"`
-	License       string   `json:"license"`
-	Tags          []string `json:"tags,omitempty"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description,omitempty"`
+	Version        string   `json:"version"`
+	Author         string   `json:"author"`
+	RepositoryURL  string   `json:"repositoryUrl"`
+	ManifestURL    string   `json:"manifestUrl"`
+	ManifestDigest string   `json:"manifestDigest"`
+	Documentation  string   `json:"documentationUrl,omitempty"`
+	License        string   `json:"license"`
+	Tags           []string `json:"tags,omitempty"`
 }
 
 // PluginStatus is safe to return to the WebUI. The raw binary path and
 // manifest JSON remain host-only fields.
 type PluginStatus struct {
-	ID           string                `json:"id"`
-	Manifest     tdriveplugin.Manifest `json:"manifest"`
-	Enabled      bool                  `json:"enabled"`
-	Status       string                `json:"status"`
-	Source       string                `json:"source"`
-	SourceURL    string                `json:"sourceUrl,omitempty"`
-	Ref          string                `json:"ref,omitempty"`
-	SourceDigest string                `json:"sourceDigest"`
-	BinaryDigest string                `json:"binaryDigest"`
-	Error        string                `json:"error,omitempty"`
-	InstalledAt  time.Time             `json:"installedAt"`
-	UpdatedAt    time.Time             `json:"updatedAt"`
+	ID             string                `json:"id"`
+	Manifest       tdriveplugin.Manifest `json:"manifest"`
+	Enabled        bool                  `json:"enabled"`
+	Status         string                `json:"status"`
+	Source         string                `json:"source"`
+	ManifestURL    string                `json:"manifestUrl,omitempty"`
+	ManifestDigest string                `json:"manifestDigest"`
+	BinaryDigest   string                `json:"binaryDigest"`
+	Error          string                `json:"error,omitempty"`
+	InstalledAt    time.Time             `json:"installedAt"`
+	UpdatedAt      time.Time             `json:"updatedAt"`
 }
 
 type activePlugin struct {
@@ -114,7 +116,7 @@ type Manager struct {
 	broker *events.Broker
 	log    *zap.Logger
 
-	builder sourceBuilder
+	fetcher releaseFetcher
 
 	installMu    sync.Mutex
 	mu           sync.RWMutex
@@ -133,9 +135,9 @@ type TelegramStatus interface {
 	Status() tgc.Status
 }
 
-// New creates a manager without touching the plugin directory. The builder
-// client is only a transport object; it does not connect or spawn anything
-// until Inspect or Install is called.
+// New creates a manager without touching the plugin directory. The fetcher is
+// only an HTTP client; nothing is downloaded until Inspect or Install is
+// called.
 func New(
 	cfg *config.Config,
 	db *database.DB,
@@ -148,7 +150,7 @@ func New(
 	if log == nil {
 		log = zap.NewNop()
 	}
-	manager := &Manager{
+	return &Manager{
 		cfg:         cfg,
 		db:          db,
 		auth:        authSvc,
@@ -156,22 +158,17 @@ func New(
 		tg:          tgm,
 		broker:      broker,
 		log:         log,
+		fetcher:     newHTTPFetcher(cfg.Plugins.MaxBinaryBytes),
 		active:      make(map[string]*activePlugin),
 		inspections: make(map[string]pendingInspection),
 	}
-	if builder, err := newBuilderClient(cfg.Plugins); err == nil {
-		manager.builder = builder
-	} else {
-		manager.log.Warn("plugin builder configuration is invalid", zap.Error(err))
-	}
-	return manager
 }
 
-// SetBuilder is intended for package tests and embedded deployments that
-// provide their own builder implementation.
-func (manager *Manager) SetBuilder(builder sourceBuilder) {
+// SetFetcher is intended for package tests, which cannot reach a public HTTPS
+// host.
+func (manager *Manager) SetFetcher(fetcher releaseFetcher) {
 	manager.mu.Lock()
-	manager.builder = builder
+	manager.fetcher = fetcher
 	manager.mu.Unlock()
 }
 
@@ -204,8 +201,8 @@ func (manager *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-// Close gracefully stops plugin children and a builder started by this
-// process. It is deliberately idempotent so shutdown paths can defer it.
+// Close gracefully stops the plugin children. It is deliberately idempotent so
+// shutdown paths can defer it.
 func (manager *Manager) Close(ctx context.Context) error {
 	manager.mu.Lock()
 	if manager.closed {
@@ -220,7 +217,6 @@ func (manager *Manager) Close(ctx context.Context) error {
 		plugins = append(plugins, plugin)
 		delete(manager.active, id)
 	}
-	builder := manager.builder
 	manager.mu.Unlock()
 	manager.refreshDriveHooks()
 
@@ -229,9 +225,6 @@ func (manager *Manager) Close(ctx context.Context) error {
 	}
 	for _, plugin := range plugins {
 		manager.stopRuntime(ctx, plugin)
-	}
-	if builder != nil {
-		builder.Close()
 	}
 	return nil
 }
@@ -290,45 +283,48 @@ func (manager *Manager) After(ctx context.Context, operation tdriveplugin.Operat
 	}
 }
 
-// Inspect gets and validates a source tree and stores a one-time inspection
-// token. The token is consumed by Install, so a confirmation cannot be replayed
-// against a different source or silently rebuild a mutable branch.
-func (manager *Manager) Inspect(ctx context.Context, sourceURL, ref string, expectedDigest ...string) (Inspection, error) {
-	if _, err := ValidateSourceURL(sourceURL); err != nil {
-		return Inspection{}, err
-	}
-	if err := ValidateRef(ref); err != nil {
+// Inspect downloads and validates a plugin manifest and stores a one-time
+// inspection token. Nothing is executed here and no plugin binary is fetched:
+// the review shown to the administrator is built purely from the manifest.
+// The token is consumed by Install, so a confirmation cannot be replayed
+// against a different manifest.
+func (manager *Manager) Inspect(ctx context.Context, manifestURL string, expectedDigest ...string) (Inspection, error) {
+	if _, err := ValidateDownloadURL(manifestURL); err != nil {
 		return Inspection{}, err
 	}
 	manager.mu.RLock()
-	builder := manager.builder
+	fetcher := manager.fetcher
 	manager.mu.RUnlock()
-	if builder == nil {
-		return Inspection{}, errors.New("plugin builder is not configured")
+	if fetcher == nil {
+		return Inspection{}, errors.New("plugin installer is not configured")
 	}
-	request := BuilderRequest{SourceURL: sourceURL, Ref: ref}
-	if len(expectedDigest) > 0 {
-		request.ExpectedSourceDigest = expectedDigest[0]
-	}
-	result, err := builder.Inspect(ctx, request)
+	manifest, manifestDigest, err := fetcher.Manifest(ctx, manifestURL)
 	if err != nil {
 		return Inspection{}, err
 	}
-	compatible := result.Manifest.APIVersion == tdriveplugin.APIVersion
-	if !compatible {
-		return Inspection{}, fmt.Errorf("plugin API version %d is not supported; host uses %d", result.Manifest.APIVersion, tdriveplugin.APIVersion)
+	if len(expectedDigest) > 0 && expectedDigest[0] != "" && !strings.EqualFold(expectedDigest[0], manifestDigest) {
+		return Inspection{}, fmt.Errorf("plugin manifest digest changed: expected %s, got %s", expectedDigest[0], manifestDigest)
+	}
+	if manifest.APIVersion != tdriveplugin.APIVersion {
+		return Inspection{}, fmt.Errorf("plugin API version %d is not supported; host uses %d", manifest.APIVersion, tdriveplugin.APIVersion)
+	}
+	artifact, err := manifest.ArtifactFor(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return Inspection{}, err
 	}
 	inspection := Inspection{
-		ID:           database.NewID(),
-		Manifest:     result.Manifest,
-		SourceURL:    sourceURL,
-		Ref:          ref,
-		SourceDigest: result.SourceDigest,
-		Compatible:   compatible,
-		Warning:      "全信任插件可调用和修改 tdrive 暴露的全部功能，并可执行其构建出的程序。",
-		ExpiresAt:    time.Now().Add(inspectionLifetime),
+		ID:             database.NewID(),
+		Manifest:       manifest,
+		ManifestURL:    manifestURL,
+		ManifestDigest: manifestDigest,
+		Platform:       tdriveplugin.HostPlatform(),
+		BinaryURL:      artifact.URL,
+		BinaryDigest:   artifact.SHA256,
+		Compatible:     true,
+		Warning:        "全信任插件可调用和修改 tdrive 暴露的全部功能，并以 tdrive 进程的权限运行。",
+		ExpiresAt:      time.Now().Add(inspectionLifetime),
 	}
-	if current, err := manager.db.PluginByID(ctx, result.Manifest.ID); err == nil {
+	if current, err := manager.db.PluginByID(ctx, manifest.ID); err == nil {
 		inspection.IsUpdate = true
 		inspection.CurrentVersion = current.Version
 	}
@@ -361,31 +357,20 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 	defer os.RemoveAll(stagingDir)
 
 	manager.mu.RLock()
-	builder := manager.builder
+	fetcher := manager.fetcher
 	manager.mu.RUnlock()
-	if builder == nil {
-		return PluginStatus{}, errors.New("plugin builder is not configured")
+	if fetcher == nil {
+		return PluginStatus{}, errors.New("plugin installer is not configured")
 	}
-	result, err := builder.Build(ctx, BuilderRequest{
-		SourceURL:            inspection.SourceURL,
-		Ref:                  inspection.Ref,
-		ExpectedSourceDigest: inspection.SourceDigest,
-		PluginID:             inspection.Manifest.ID,
-		OutputPath:           stagingBinary,
-		GOOS:                 runtime.GOOS,
-		GOARCH:               runtime.GOARCH,
-	})
+	// The digest comes from the manifest the administrator confirmed, so the
+	// download either produces exactly those bytes or produces nothing.
+	binaryDigest, err := fetcher.Download(ctx,
+		tdriveplugin.Artifact{URL: inspection.BinaryURL, SHA256: inspection.BinaryDigest}, stagingBinary)
 	if err != nil {
 		return PluginStatus{}, err
 	}
-	if result.SourceDigest != inspection.SourceDigest || !manifestsMatch(result.Manifest, inspection.Manifest) {
-		return PluginStatus{}, errors.New("plugin source changed after inspection")
-	}
-	if result.BinaryDigest == "" {
-		return PluginStatus{}, errors.New("plugin builder returned no binary digest")
-	}
 
-	manifestJSON, err := json.Marshal(result.Manifest)
+	manifestJSON, err := json.Marshal(inspection.Manifest)
 	if err != nil {
 		return PluginStatus{}, fmt.Errorf("encode plugin manifest: %w", err)
 	}
@@ -442,21 +427,20 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 
 	now := time.Now()
 	record := database.PluginRecord{
-		ID:           result.Manifest.ID,
-		Name:         result.Manifest.Name,
-		Version:      result.Manifest.Version,
-		Author:       result.Manifest.Author,
-		Enabled:      true,
-		Status:       database.PluginStatusActive,
-		Source:       "source",
-		SourceURL:    inspection.SourceURL,
-		Ref:          inspection.Ref,
-		SourceDigest: result.SourceDigest,
-		BinaryDigest: result.BinaryDigest,
-		BinaryPath:   finalPath,
-		ManifestJSON: string(manifestJSON),
-		InstalledAt:  now,
-		UpdatedAt:    now,
+		ID:             inspection.Manifest.ID,
+		Name:           inspection.Manifest.Name,
+		Version:        inspection.Manifest.Version,
+		Author:         inspection.Manifest.Author,
+		Enabled:        true,
+		Status:         database.PluginStatusActive,
+		Source:         "release",
+		ManifestURL:    inspection.ManifestURL,
+		ManifestDigest: inspection.ManifestDigest,
+		BinaryDigest:   binaryDigest,
+		BinaryPath:     finalPath,
+		ManifestJSON:   string(manifestJSON),
+		InstalledAt:    now,
+		UpdatedAt:      now,
 	}
 	record.Status = database.PluginStatusStopped
 	if err := manager.db.UpsertPlugin(ctx, record); err != nil {
@@ -793,22 +777,28 @@ func (manager *Manager) toStatus(record database.PluginRecord) PluginStatus {
 		}
 	}
 	return PluginStatus{
-		ID:           record.ID,
-		Manifest:     manifest,
-		Enabled:      record.Enabled,
-		Status:       record.Status,
-		Source:       record.Source,
-		SourceURL:    record.SourceURL,
-		Ref:          record.Ref,
-		SourceDigest: record.SourceDigest,
-		BinaryDigest: record.BinaryDigest,
-		Error:        record.Error,
-		InstalledAt:  record.InstalledAt,
-		UpdatedAt:    record.UpdatedAt,
+		ID:             record.ID,
+		Manifest:       manifest,
+		Enabled:        record.Enabled,
+		Status:         record.Status,
+		Source:         record.Source,
+		ManifestURL:    record.ManifestURL,
+		ManifestDigest: record.ManifestDigest,
+		BinaryDigest:   record.BinaryDigest,
+		Error:          record.Error,
+		InstalledAt:    record.InstalledAt,
+		UpdatedAt:      record.UpdatedAt,
 	}
 }
 
+// manifestsMatch compares what a running plugin says about itself with the
+// manifest that was installed. Artifacts are excluded: they describe where the
+// executable was downloaded from, which a plugin cannot report about itself,
+// and the bytes are already pinned by the SHA-256 check at download time and
+// again by go-plugin's SecureConfig before exec.
 func manifestsMatch(left, right tdriveplugin.Manifest) bool {
+	left.Artifacts = nil
+	right.Artifacts = nil
 	leftJSON, leftErr := json.Marshal(left)
 	rightJSON, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)

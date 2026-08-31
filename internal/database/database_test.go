@@ -300,20 +300,20 @@ func TestPluginMetadataAndDataAreIndependentFromDriveIndex(t *testing.T) {
 	defer db.Close()
 
 	pluginRecord := PluginRecord{
-		ID:           "example",
-		Name:         "Example",
-		Version:      "1.0.0",
-		Author:       "tdrive",
-		Enabled:      true,
-		Status:       PluginStatusActive,
-		Source:       "source",
-		SourceURL:    "https://example.com/plugin",
-		SourceDigest: "source-digest",
-		BinaryDigest: "binary-digest",
-		BinaryPath:   "/plugins/example",
-		ManifestJSON: "{}",
-		InstalledAt:  time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:             "example",
+		Name:           "Example",
+		Version:        "1.0.0",
+		Author:         "tdrive",
+		Enabled:        true,
+		Status:         PluginStatusActive,
+		Source:         "release",
+		ManifestURL:    "https://example.com/tdrive.plugin.json",
+		ManifestDigest: "manifest-digest",
+		BinaryDigest:   "binary-digest",
+		BinaryPath:     "/plugins/example",
+		ManifestJSON:   "{}",
+		InstalledAt:    time.Now(),
+		UpdatedAt:      time.Now(),
 	}
 	if err := db.UpsertPlugin(ctx, pluginRecord); err != nil {
 		t.Fatalf("UpsertPlugin: %v", err)

@@ -10,6 +10,10 @@ type helloPlugin struct {
 	host tdriveplugin.Host
 }
 
+// Manifest describes the plugin at runtime. It deliberately omits Artifacts:
+// those live only in the published tdrive.plugin.json, because a binary cannot
+// contain the SHA-256 of itself. Every other field must match that file, or
+// tdrive refuses to start the plugin after installing it.
 func (plugin *helloPlugin) Manifest() tdriveplugin.Manifest {
 	return tdriveplugin.Manifest{
 		ID:               "hello",
@@ -42,7 +46,7 @@ func (plugin *helloPlugin) OnEvent(ctx context.Context, event tdriveplugin.Event
 
 func (plugin *helloPlugin) HandleHTTP(_ context.Context, _ tdriveplugin.HTTPRequest) (tdriveplugin.HTTPResponse, error) {
 	return tdriveplugin.HTTPResponse{
-		Status: 200,
+		Status:  200,
 		Headers: map[string][]string{"Content-Type": {"text/plain; charset=utf-8"}},
 		Body:    []byte("tdrive plugin is running\n"),
 	}, nil

@@ -92,10 +92,7 @@ TDRIVE_DATA_DIR=./data ./tdrive
 | `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | 单个下载允许的并发连接数 |
 | `TDRIVE_PLUGIN_DIR` | `<数据目录>/plugins` | 已安装插件二进制目录 |
 | `TDRIVE_PLUGIN_STORE_URL` | `https://raw.githubusercontent.com/dibin666/tdrive/main/plugins/index.json` | 插件商店索引 HTTPS 地址；留空关闭商店 |
-| `TDRIVE_PLUGIN_BUILDER_ADDRESS` | `<数据目录>/plugin-builder.sock` | 私有 builder Unix socket 或 loopback 地址 |
-| `TDRIVE_PLUGIN_BUILDER_COMMAND` | `tdrive-plugin-builder` | 非 Compose 部署时的 builder 命令 |
-| `TDRIVE_PLUGIN_SOURCE_MAX_BYTES` | `512MiB` | 获取插件源码的大小上限 |
-| `TDRIVE_PLUGIN_BUILD_TIMEOUT` | `10m` | 单次插件构建超时 |
+| `TDRIVE_PLUGIN_MAX_BINARY_BYTES` | `256MiB` | 下载插件二进制的大小上限 |
 
 使用管理员账号登录后，其余运行参数可在 WebUI 的“设置”中配置：
 
@@ -129,10 +126,9 @@ Telegram 上传分片只列出合法取值，存储分片滑杆的上限和步�
 
 ## 插件
 
-管理员可以在“设置 → 插件”中从商店或 HTTPS Git / 归档地址安装。源码会先检查，随后只需点击一次“确认安装”，构建、校验并立即启动。插件是全信任代码：不做能力授权，安装提示也不是安全沙箱。
+管理员可以在“设置 → 插件”中从商店安装，或粘贴已发布的 `tdrive.plugin.json` 的 HTTPS 地址。清单会先检查——这一步不下载也不执行任何二进制——随后只需点击一次“确认安装”，tdrive 下载与本机平台对应的二进制，核对清单声明的 SHA-256，然后立即启动。插件是全信任代码：不做能力授权，安装提示也不是安全沙箱。
 
-主程序镜像仍然是 distroless。Docker Compose 使用空闲的 Go/Git
-`tdrive-plugin-builder` 服务，只在检查或安装插件时获取和编译源码。插件 SDK、manifest、Host API、生命周期和商店提交要求见
+插件以预编译二进制分发，服务器上不编译任何东西。镜像保持 distroless（无 Go 工具链、无 Git、无 shell），**单个容器即可运行全部功能**。插件 SDK、manifest、Host API、生命周期和商店提交要求见
 [`docs/plugins.md`](docs/plugins.md)，默认空索引见 [`plugins/index.json`](plugins/index.json)。
 
 ## 多 Telegram 账号
@@ -208,7 +204,7 @@ rclone ls tdrive:
 
 ## 技术栈
 
-- **后端** — Go, [gotd/td](https://github.com/gotd/td)（MTProto）, [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite）, [go-plugin](https://github.com/hashicorp/go-plugin), [go-getter](https://github.com/hashicorp/go-getter)
+- **后端** — Go, [gotd/td](https://github.com/gotd/td)（MTProto）, [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite）, [go-plugin](https://github.com/hashicorp/go-plugin)
 - **前端** — React 19, Vite, Tailwind CSS 4, TypeScript；预览用 mediabunny / pdf.js / shiki / SheetJS 等，全部按需懒加载
 - **容器** — 多阶段 Dockerfile, distroless 基础镜像, GitHub Actions CI/CD
 

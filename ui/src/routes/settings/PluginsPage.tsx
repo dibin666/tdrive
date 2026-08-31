@@ -25,10 +25,9 @@ function uiRoute(plugin: PluginStatus): string | null {
 export function PluginsPage() {
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [loading, setLoading] = useState(true)
-  const [sourceOpen, setSourceOpen] = useState(false)
+  const [installOpen, setInstallOpen] = useState(false)
   const [storeOpen, setStoreOpen] = useState(false)
-  const [sourceUrl, setSourceUrl] = useState('')
-  const [sourceRef, setSourceRef] = useState('')
+  const [manifestUrl, setManifestUrl] = useState('')
   const [inspection, setInspection] = useState<PluginInspection | null>(null)
   const [inspecting, setInspecting] = useState(false)
   const [installing, setInstalling] = useState(false)
@@ -51,12 +50,12 @@ export function PluginsPage() {
     loadPlugins()
   }, [])
 
-  const inspectSource = async (item: { sourceUrl: string; ref?: string; sourceDigest?: string }) => {
+  const inspectManifest = async (item: { manifestUrl: string; manifestDigest?: string }) => {
     setInspecting(true)
     try {
       const result = await api.inspectPlugin(item)
       setInspection(result)
-      setSourceOpen(false)
+      setInstallOpen(false)
     } catch (error) {
       toast(errorMessage(error), 'error')
     } finally {
@@ -147,8 +146,8 @@ export function PluginsPage() {
             <Button icon={<PackageOpen size={15} />} onClick={() => setStoreOpen(true)}>
               商店
             </Button>
-            <Button variant="primary" icon={<Plus size={15} />} onClick={() => setSourceOpen(true)}>
-              源码安装
+            <Button variant="primary" icon={<Plus size={15} />} onClick={() => setInstallOpen(true)}>
+              安装插件
             </Button>
           </div>
         }
@@ -179,14 +178,12 @@ export function PluginsPage() {
         </IconButton>
       </div>
 
-      <SourceModal
-        open={sourceOpen}
-        onClose={() => setSourceOpen(false)}
-        sourceUrl={sourceUrl}
-        sourceRef={sourceRef}
-        onSourceUrlChange={setSourceUrl}
-        onSourceRefChange={setSourceRef}
-        onInspect={() => void inspectSource({ sourceUrl, ref: sourceRef || undefined })}
+      <InstallModal
+        open={installOpen}
+        onClose={() => setInstallOpen(false)}
+        manifestUrl={manifestUrl}
+        onManifestUrlChange={setManifestUrl}
+        onInspect={() => void inspectManifest({ manifestUrl })}
         loading={inspecting}
       />
 
@@ -201,7 +198,7 @@ export function PluginsPage() {
         open={storeOpen}
         onClose={() => setStoreOpen(false)}
         onInspect={(item) =>
-          void inspectSource({ sourceUrl: item.repositoryUrl, ref: item.ref, sourceDigest: item.sourceDigest })
+          void inspectManifest({ manifestUrl: item.manifestUrl, manifestDigest: item.manifestDigest })
         }
         loading={inspecting}
       />
@@ -332,22 +329,18 @@ function PluginRow({
   )
 }
 
-function SourceModal({
+function InstallModal({
   open,
   onClose,
-  sourceUrl,
-  sourceRef,
-  onSourceUrlChange,
-  onSourceRefChange,
+  manifestUrl,
+  onManifestUrlChange,
   onInspect,
   loading,
 }: {
   open: boolean
   onClose: () => void
-  sourceUrl: string
-  sourceRef: string
-  onSourceUrlChange: (value: string) => void
-  onSourceRefChange: (value: string) => void
+  manifestUrl: string
+  onManifestUrlChange: (value: string) => void
   onInspect: () => void
   loading: boolean
 }) {
@@ -355,30 +348,23 @@ function SourceModal({
     <Modal
       open={open}
       onClose={onClose}
-      title="源码安装"
+      title="安装插件"
       footer={
         <>
           <Button onClick={onClose}>取消</Button>
-          <Button variant="primary" loading={loading} disabled={!sourceUrl.trim()} onClick={onInspect}>
+          <Button variant="primary" loading={loading} disabled={!manifestUrl.trim()} onClick={onInspect}>
             检查
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <Field label="源码地址">
+        <Field label="插件清单地址" hint="插件发布的 tdrive.plugin.json，通常是 release 资产">
           <Input
-            value={sourceUrl}
-            onChange={(event) => onSourceUrlChange(event.target.value)}
-            placeholder="https://github.com/owner/plugin"
+            value={manifestUrl}
+            onChange={(event) => onManifestUrlChange(event.target.value)}
+            placeholder="https://github.com/owner/plugin/releases/download/v1.0.0/tdrive.plugin.json"
             autoComplete="url"
-          />
-        </Field>
-        <Field label="版本或提交" hint="留空使用默认分支">
-          <Input
-            value={sourceRef}
-            onChange={(event) => onSourceRefChange(event.target.value)}
-            placeholder="v1.0.0 或 commit"
             spellCheck={false}
           />
         </Field>
@@ -418,8 +404,8 @@ function InspectionModal({
           <div className="grid grid-cols-2 gap-3">
             <Info label="作者" value={manifest.author} />
             <Info label="许可证" value={manifest.license} />
-            <Info label="API" value={String(manifest.apiVersion)} />
-            <Info label="摘要" value={inspection.sourceDigest.slice(0, 16)} mono />
+            <Info label="平台" value={inspection.platform} mono />
+            <Info label="二进制摘要" value={inspection.binaryDigest.slice(0, 16)} mono />
           </div>
           {manifest.description && <p className="text-[var(--muted)]">{manifest.description}</p>}
           {manifest.capabilities && manifest.capabilities.length > 0 && (

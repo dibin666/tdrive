@@ -303,25 +303,25 @@ CREATE INDEX idx_audit_actor ON audit_log (actor_id);
 
 -- Installed plugins are local configuration, not Telegram index data. They are
 -- kept separate so an index rebuild can never enable, disable, or remove a
--- plugin. The manifest is stored as received and validated again before a
--- binary is started.
+-- plugin. manifest_url and manifest_digest identify the published manifest the
+-- administrator confirmed; the manifest itself is stored as received and
+-- validated again before a binary is started.
 CREATE TABLE plugins (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    version       TEXT NOT NULL,
-    author        TEXT NOT NULL,
-    enabled       INTEGER NOT NULL DEFAULT 1,
-    status        TEXT NOT NULL DEFAULT 'disabled',
-    source        TEXT NOT NULL,
-    source_url    TEXT NOT NULL,
-    ref           TEXT NOT NULL DEFAULT '',
-    source_digest TEXT NOT NULL,
-    binary_digest TEXT NOT NULL,
-    binary_path   TEXT NOT NULL,
-    manifest_json TEXT NOT NULL,
-    error         TEXT NOT NULL DEFAULT '',
-    installed_at  INTEGER NOT NULL,
-    updated_at    INTEGER NOT NULL
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    version         TEXT NOT NULL,
+    author          TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL DEFAULT 'disabled',
+    source          TEXT NOT NULL,
+    manifest_url    TEXT NOT NULL,
+    manifest_digest TEXT NOT NULL,
+    binary_digest   TEXT NOT NULL,
+    binary_path     TEXT NOT NULL,
+    manifest_json   TEXT NOT NULL,
+    error           TEXT NOT NULL DEFAULT '',
+    installed_at    INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
 );
 CREATE INDEX idx_plugins_enabled ON plugins (enabled);
 

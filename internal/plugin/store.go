@@ -2,14 +2,12 @@ package plugin
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,7 +15,7 @@ import (
 	tdriveplugin "github.com/dibin/tdrive/pkg/plugin"
 )
 
-const sha256HexLength = sha256.Size * 2
+var sha256HexPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Store downloads and filters the configured index. An empty store URL is a
 // valid disabled-store configuration and returns an empty list without any
@@ -26,27 +24,15 @@ func (manager *Manager) Store(ctx context.Context, query string) (StoreIndex, er
 	if strings.TrimSpace(manager.cfg.Plugins.StoreURL) == "" {
 		return StoreIndex{Plugins: []StorePlugin{}}, nil
 	}
-	if _, err := ValidateSourceURL(manager.cfg.Plugins.StoreURL); err != nil {
+	parsed, err := ValidateDownloadURL(manager.cfg.Plugins.StoreURL)
+	if err != nil {
 		return StoreIndex{}, fmt.Errorf("invalid plugin store URL: %w", err)
-	}
-	parsed, err := url.Parse(manager.cfg.Plugins.StoreURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
-		return StoreIndex{}, errors.New("plugin store URL must be an absolute HTTPS URL")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return StoreIndex{}, err
 	}
-	storeClient := &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(redirectRequest *http.Request, _ []*http.Request) error {
-			if _, err := ValidateSourceURL(redirectRequest.URL.String()); err != nil {
-				return fmt.Errorf("plugin store redirect is unsafe: %w", err)
-			}
-			return nil
-		},
-	}
-	response, err := storeClient.Do(request)
+	response, err := httpsClient(ValidateDownloadURL, 20*time.Second).Do(request)
 	if err != nil {
 		return StoreIndex{}, fmt.Errorf("fetch plugin store: %w", err)
 	}
@@ -83,9 +69,13 @@ func (manager *Manager) Store(ctx context.Context, query string) (StoreIndex, er
 }
 
 // Validate checks an index item before it reaches the install flow. The
-// installer still fetches and validates the source manifest itself; store
-// metadata is never trusted as a replacement for that check.
+// installer still fetches and validates the manifest itself; store metadata is
+// never trusted as a replacement for that check. What the index does
+// contribute is manifestDigest, which pins the manifest the curator reviewed.
 func (item StorePlugin) Validate() error {
+	// A store entry carries only discovery metadata, so the shared manifest
+	// rules are reused for the descriptive fields. The artifact table and SDK
+	// version live in the real manifest that the installer downloads.
 	manifest := tdriveplugin.Manifest{
 		ID:               item.ID,
 		Name:             item.Name,
@@ -96,27 +86,15 @@ func (item StorePlugin) Validate() error {
 		License:          item.License,
 		RepositoryURL:    item.RepositoryURL,
 		DocumentationURL: item.Documentation,
-		Entrypoint:       "./store",
 	}
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
-	if item.SourceURL != "" {
-		if _, err := ValidateSourceURL(item.SourceURL); err != nil {
-			return err
-		}
-	}
-	if err := ValidateRef(item.Ref); err != nil {
+	if _, err := ValidateDownloadURL(item.ManifestURL); err != nil {
 		return err
 	}
-	if len(item.SourceDigest) != sha256HexLength {
-		return errors.New("sourceDigest must be a SHA-256 hex digest")
-	}
-	if _, err := hex.DecodeString(item.SourceDigest); err != nil {
-		return errors.New("sourceDigest must be a SHA-256 hex digest")
-	}
-	if strings.TrimSpace(item.License) == "" {
-		return errors.New("plugin license is required")
+	if !sha256HexPattern.MatchString(item.ManifestDigest) {
+		return errors.New("manifestDigest must be 64 lowercase hexadecimal characters")
 	}
 	return nil
 }

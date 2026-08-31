@@ -6,7 +6,7 @@ import (
 )
 
 const pluginColumns = `id, name, version, author, enabled, status, source,
-	source_url, ref, source_digest, binary_digest, binary_path, manifest_json,
+	manifest_url, manifest_digest, binary_digest, binary_path, manifest_json,
 	error, installed_at, updated_at`
 
 func scanPlugin(row interface{ Scan(...any) error }) (PluginRecord, error) {
@@ -24,9 +24,8 @@ func scanPlugin(row interface{ Scan(...any) error }) (PluginRecord, error) {
 		&enabled,
 		&pluginRecord.Status,
 		&pluginRecord.Source,
-		&pluginRecord.SourceURL,
-		&pluginRecord.Ref,
-		&pluginRecord.SourceDigest,
+		&pluginRecord.ManifestURL,
+		&pluginRecord.ManifestDigest,
 		&pluginRecord.BinaryDigest,
 		&pluginRecord.BinaryPath,
 		&pluginRecord.ManifestJSON,
@@ -62,7 +61,7 @@ func (d *DB) ListPlugins(ctx context.Context) ([]PluginRecord, error) {
 }
 
 // ListEnabledPlugins is the only plugin query used during startup. It avoids
-// opening a source tree or spawning a process for disabled plugins.
+// spawning a process for disabled plugins.
 func (d *DB) ListEnabledPlugins(ctx context.Context) ([]PluginRecord, error) {
 	rows, err := d.read.QueryContext(ctx,
 		`SELECT `+pluginColumns+` FROM plugins WHERE enabled = 1 ORDER BY name, id`)
@@ -94,10 +93,10 @@ func (d *DB) PluginByID(ctx context.Context, id string) (PluginRecord, error) {
 func (d *DB) UpsertPlugin(ctx context.Context, pluginRecord PluginRecord) error {
 	_, err := d.write.ExecContext(ctx, `
 		INSERT INTO plugins (
-			id, name, version, author, enabled, status, source, source_url, ref,
-			source_digest, binary_digest, binary_path, manifest_json, error,
+			id, name, version, author, enabled, status, source, manifest_url,
+			manifest_digest, binary_digest, binary_path, manifest_json, error,
 			installed_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET
 			name = excluded.name,
 			version = excluded.version,
@@ -105,9 +104,8 @@ func (d *DB) UpsertPlugin(ctx context.Context, pluginRecord PluginRecord) error 
 			enabled = excluded.enabled,
 			status = excluded.status,
 			source = excluded.source,
-			source_url = excluded.source_url,
-			ref = excluded.ref,
-			source_digest = excluded.source_digest,
+			manifest_url = excluded.manifest_url,
+			manifest_digest = excluded.manifest_digest,
 			binary_digest = excluded.binary_digest,
 			binary_path = excluded.binary_path,
 			manifest_json = excluded.manifest_json,
@@ -120,9 +118,8 @@ func (d *DB) UpsertPlugin(ctx context.Context, pluginRecord PluginRecord) error 
 		boolInt(pluginRecord.Enabled),
 		pluginRecord.Status,
 		pluginRecord.Source,
-		pluginRecord.SourceURL,
-		pluginRecord.Ref,
-		pluginRecord.SourceDigest,
+		pluginRecord.ManifestURL,
+		pluginRecord.ManifestDigest,
 		pluginRecord.BinaryDigest,
 		pluginRecord.BinaryPath,
 		pluginRecord.ManifestJSON,

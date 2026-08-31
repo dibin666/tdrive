@@ -152,7 +152,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    needs: [version, build-binary, build-plugin-builder]
+    needs: [version, build-binary]
     runs-on: ubuntu-latest
 
     steps:
@@ -173,36 +173,3 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "$VERSION"
-
-  build-plugin-builder:
-    name: Build plugin builder ${{ matrix.goarch }} binary
-    needs: version
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        goarch: [amd64, arm64]
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.26'
-          cache: true
-
-      - name: Build plugin builder
-        env:
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
-            go build -trimpath -ldflags="-s -w" \
-            -o "release/tdrive-plugin-builder-linux-$GOARCH" ./cmd/tdrive-plugin-builder
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: tdrive-${{ needs.version.outputs.tag }}-plugin-builder-linux-${{ matrix.goarch }}
-          path: release/tdrive-plugin-builder-linux-${{ matrix.goarch }}
-          if-no-files-found: error

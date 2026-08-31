@@ -103,7 +103,7 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 
 // schemaVersion is what schema.sql describes. Anything older is brought up to
 // it by the steps in migrate.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // upgradeSteps are the statements that take an existing database from the
 // version keyed here to the next one. A fresh database skips all of them,
@@ -295,6 +295,17 @@ var upgradeSteps = map[int][]string{
 		) WITHOUT ROWID`,
 		`ALTER TABLE segments ADD COLUMN account_id TEXT NOT NULL DEFAULT ''`,
 	},
+	6: {
+		// Plugins are installed as prebuilt release binaries rather than built
+		// from source, so what is pinned is the published manifest instead of
+		// a source tree at a Git ref. Existing rows keep their binary and
+		// digest and go on running; only the provenance columns are renamed,
+		// and their old values now name a repository rather than a manifest.
+		`ALTER TABLE plugins RENAME COLUMN source_url TO manifest_url`,
+		`ALTER TABLE plugins RENAME COLUMN source_digest TO manifest_digest`,
+		`ALTER TABLE plugins DROP COLUMN ref`,
+		`UPDATE plugins SET source = 'release'`,
+	},
 }
 
 // migrate applies schema.sql once. The schema is versioned through SQLite's
@@ -339,20 +350,25 @@ func (d *DB) migrate(ctx context.Context) error {
 	return tx.Commit()
 }
 
-// isAlreadyApplied recognises the one way a re-run of an upgrade step fails
-// that is not a real error: adding a column the table already has.
+// isAlreadyApplied recognises the ways a re-run of a column-level upgrade step
+// fails that are not real errors: adding a column the table already has, or
+// renaming and dropping one that is already gone.
 //
 // The other steps lean on CREATE TABLE IF NOT EXISTS for this, but SQLite has
-// no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, and a database can genuinely
-// arrive at a step with the column present — one created from schema.sql, which
-// always describes the final shape, and then rolled back to an older
-// user_version. A failed statement does not poison the surrounding transaction,
-// so skipping it and carrying on is safe.
+// no ALTER TABLE ... ADD/RENAME/DROP COLUMN IF [NOT] EXISTS, and a database can
+// genuinely arrive at a step with the change present — one created from
+// schema.sql, which always describes the final shape, and then rolled back to an
+// older user_version. A failed statement does not poison the surrounding
+// transaction, so skipping it and carrying on is safe.
 func isAlreadyApplied(stmt string, err error) bool {
-	if !strings.Contains(strings.ToUpper(stmt), "ADD COLUMN") {
-		return false
+	upper := strings.ToUpper(stmt)
+	if strings.Contains(upper, "ADD COLUMN") {
+		return strings.Contains(err.Error(), "duplicate column name")
 	}
-	return strings.Contains(err.Error(), "duplicate column name")
+	if strings.Contains(upper, "RENAME COLUMN") || strings.Contains(upper, "DROP COLUMN") {
+		return strings.Contains(err.Error(), "no such column")
+	}
+	return false
 }
 
 // Read returns the multi-connection pool. Use it for anything that does not

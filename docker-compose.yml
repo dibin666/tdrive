@@ -6,14 +6,11 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # The SQLite index, the Telegram session and the upload spool. Losing
-      # this volume is recoverable — the drive rebuilds from the channel — but
-      # it means logging in to Telegram again.
+      # The SQLite index, the Telegram session, the upload spool and installed
+      # plugin binaries. Losing this volume is recoverable — the drive rebuilds
+      # from the channel — but it means logging in to Telegram again and
+      # reinstalling plugins.
       - tdrive-data:/data
-      # Plugin binaries are kept separate from the database and Telegram
-      # session. The builder can write this volume without seeing /data.
-      - tdrive-plugins:/plugins
-      - tdrive-plugin-socket:/run/tdrive-plugin-builder
       # Read-only VPS source directory. Set TDRIVE_LOCAL_PATH in .env only if
       # the host directory is not the default ./vps-files. The application-side
       # path is selected in WebUI Settings and defaults to /vps in this mount.
@@ -35,38 +32,10 @@ services:
       TDRIVE_CACHE_DIR: ${TDRIVE_CACHE_DIR:-/data/cache}
       TDRIVE_CACHE_LIMIT: ${TDRIVE_CACHE_LIMIT:-20GiB}
       TDRIVE_MAX_DOWNLOAD_CONNS: ${TDRIVE_MAX_DOWNLOAD_CONNS:-8}
-      TDRIVE_PLUGIN_DIR: /plugins
+      # Plugins are installed as prebuilt release binaries, so no compiler and
+      # no second container are involved.
       TDRIVE_PLUGIN_STORE_URL: ${TDRIVE_PLUGIN_STORE_URL:-}
-      TDRIVE_PLUGIN_BUILDER_ADDRESS: /run/tdrive-plugin-builder/plugin-builder.sock
-      # The main image is distroless and never starts a local builder. The
-      # sidecar below owns the Go/Git toolchain.
-      TDRIVE_PLUGIN_BUILDER_COMMAND: ""
-      TDRIVE_PLUGIN_SOURCE_MAX_BYTES: ${TDRIVE_PLUGIN_SOURCE_MAX_BYTES:-512MiB}
-      TDRIVE_PLUGIN_BUILD_TIMEOUT: ${TDRIVE_PLUGIN_BUILD_TIMEOUT:-10m}
-
-  tdrive-plugin-builder:
-    image: ghcr.io/dibin666/tdrive:builder
-    container_name: tdrive-plugin-builder
-    restart: unless-stopped
-    volumes:
-      - tdrive-plugins:/plugins
-      - tdrive-plugin-socket:/run/tdrive-plugin-builder
-    command:
-      - -socket
-      - /run/tdrive-plugin-builder/plugin-builder.sock
-      - -output-root
-      - /plugins
-      - -max-source-bytes
-      - ${TDRIVE_PLUGIN_SOURCE_MAX_BYTES:-536870912}
-      - -build-timeout
-      - ${TDRIVE_PLUGIN_BUILD_TIMEOUT:-10m}
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+      TDRIVE_PLUGIN_MAX_BINARY_BYTES: ${TDRIVE_PLUGIN_MAX_BINARY_BYTES:-256MiB}
 
 volumes:
   tdrive-data:
-  tdrive-plugins:
-  tdrive-plugin-socket:

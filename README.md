@@ -89,10 +89,7 @@ Visit `http://localhost:8080` after launch; a setup wizard will appear on first 
 | `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | Parallel connections one download may hold |
 | `TDRIVE_PLUGIN_DIR` | `<data dir>/plugins` | Installed plugin binaries |
 | `TDRIVE_PLUGIN_STORE_URL` | *(empty)* | HTTPS plugin store index; empty disables the store |
-| `TDRIVE_PLUGIN_BUILDER_ADDRESS` | `<data dir>/plugin-builder.sock` | Private builder Unix socket or loopback address |
-| `TDRIVE_PLUGIN_BUILDER_COMMAND` | `tdrive-plugin-builder` | Builder command for non-Compose deployments |
-| `TDRIVE_PLUGIN_SOURCE_MAX_BYTES` | `512MiB` | Maximum fetched plugin source size |
-| `TDRIVE_PLUGIN_BUILD_TIMEOUT` | `10m` | Maximum plugin build time |
+| `TDRIVE_PLUGIN_MAX_BINARY_BYTES` | `256MiB` | Maximum downloaded plugin binary size |
 
 After logging in as an administrator, configure the remaining runtime settings in **Settings**:
 
@@ -127,14 +124,15 @@ These settings are stored in the SQLite data directory and take effect without r
 
 ## Plugins
 
-Administrators can open **Settings → Plugins** and install from the configured store or an
-HTTPS Git/archive URL. The source is inspected first; one **Confirm install** action then fetches,
-rebuilds, verifies and starts it immediately. Plugins are full-trust code: no capability
-authorization is applied, and the installation warning is not a sandbox guarantee.
+Administrators can open **Settings → Plugins** and install from the configured store or from the
+HTTPS URL of a published `tdrive.plugin.json`. The manifest is inspected first — nothing is
+downloaded or executed at that point — and one **Confirm install** action then downloads the
+binary for this server's platform, checks it against the SHA-256 the manifest declares, and starts
+it. Plugins are full-trust code: no capability authorization is applied, and the installation
+warning is not a sandbox guarantee.
 
-The main image remains distroless. Docker Compose runs an idle Go/Git
-`tdrive-plugin-builder` sidecar; it only fetches or compiles source when plugin inspection or
-installation is requested.
+Plugins ship as prebuilt release binaries, so nothing is compiled on the server. The image stays
+distroless — no Go toolchain, no Git, no shell — and **one container runs everything**.
 Plugin SDK, manifest, Host API, lifecycle, and store submission requirements are documented in
 [`docs/plugins.md`](docs/plugins.md). The default empty store index is
 [`plugins/index.json`](plugins/index.json).
@@ -230,7 +228,7 @@ rclone ls tdrive:
 
 ## Tech Stack
 
-- **Backend** — Go, [gotd/td](https://github.com/gotd/td) (MTProto), [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) (pure Go SQLite), [go-plugin](https://github.com/hashicorp/go-plugin), [go-getter](https://github.com/hashicorp/go-getter)
+- **Backend** — Go, [gotd/td](https://github.com/gotd/td) (MTProto), [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) (pure Go SQLite), [go-plugin](https://github.com/hashicorp/go-plugin)
 - **Frontend** — React 19, Vite, Tailwind CSS 4, TypeScript; previews use mediabunny, pdf.js, shiki and SheetJS, all lazily loaded
 - **Container** — multi-stage Dockerfile, distroless base image, GitHub Actions CI/CD
 

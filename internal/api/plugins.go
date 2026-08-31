@@ -12,9 +12,11 @@ import (
 )
 
 type pluginInspectRequest struct {
-	SourceURL    string `json:"sourceUrl"`
-	Ref          string `json:"ref,omitempty"`
-	SourceDigest string `json:"sourceDigest,omitempty"`
+	ManifestURL string `json:"manifestUrl"`
+	// ManifestDigest is supplied by the store so the manifest tdrive fetches
+	// is the one the store curator reviewed. It is absent when an
+	// administrator pastes a URL directly.
+	ManifestDigest string `json:"manifestDigest,omitempty"`
 }
 
 type pluginInstallRequest struct {
@@ -68,12 +70,12 @@ func (s *Server) handleInspectPlugin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	inspection, err := s.plugins.Inspect(r.Context(), request.SourceURL, request.Ref, request.SourceDigest)
+	inspection, err := s.plugins.Inspect(r.Context(), request.ManifestURL, request.ManifestDigest)
 	if err != nil {
 		s.fail(w, err, "inspect plugin")
 		return
 	}
-	s.audit(r, database.AuditPluginInspect, inspection.Manifest.ID, request.SourceURL)
+	s.audit(r, database.AuditPluginInspect, inspection.Manifest.ID, request.ManifestURL)
 	writeJSON(w, http.StatusOK, inspection)
 }
 

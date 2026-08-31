@@ -266,24 +266,23 @@ type DownloadJob struct {
 
 // PluginRecord is the local installation metadata for one plugin. Unlike the
 // drive tree this data is not reconstructed from Telegram; it describes the
-// executable and source selected by the administrator on this host.
+// executable and manifest selected by the administrator on this host.
 type PluginRecord struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Version      string    `json:"version"`
-	Author       string    `json:"author"`
-	Enabled      bool      `json:"enabled"`
-	Status       string    `json:"status"`
-	Source       string    `json:"source"`
-	SourceURL    string    `json:"sourceUrl,omitempty"`
-	Ref          string    `json:"ref,omitempty"`
-	SourceDigest string    `json:"sourceDigest"`
-	BinaryDigest string    `json:"binaryDigest"`
-	BinaryPath   string    `json:"-"`
-	ManifestJSON string    `json:"-"`
-	Error        string    `json:"error,omitempty"`
-	InstalledAt  time.Time `json:"installedAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Version        string    `json:"version"`
+	Author         string    `json:"author"`
+	Enabled        bool      `json:"enabled"`
+	Status         string    `json:"status"`
+	Source         string    `json:"source"`
+	ManifestURL    string    `json:"manifestUrl,omitempty"`
+	ManifestDigest string    `json:"manifestDigest"`
+	BinaryDigest   string    `json:"binaryDigest"`
+	BinaryPath     string    `json:"-"`
+	ManifestJSON   string    `json:"-"`
+	Error          string    `json:"error,omitempty"`
+	InstalledAt    time.Time `json:"installedAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 const (

@@ -62,6 +62,10 @@ const (
 	DefaultCacheLimit int64 = 20 << 30
 	// DefaultCacheTTL is how long a staged copy survives once it is ready.
 	DefaultCacheTTL = 24 * time.Hour
+	// DefaultPluginBinaryLimit bounds a downloaded plugin executable. A Go
+	// binary with an embedded UI is tens of megabytes; this leaves generous
+	// room while still refusing to stream an unbounded body to disk.
+	DefaultPluginBinaryLimit int64 = 256 << 20
 	// DefaultMaxDownloadConns is how many parallel range requests one logical
 	// download may hold. Parallelism is the point of a reusable link; without
 	// a cap, one client could open enough sockets to starve everyone else.
@@ -220,23 +224,19 @@ type Local struct {
 	Root string
 }
 
-// Plugins contains deployment-level plugin settings. Plugin source trees and
-// builder processes are deliberately absent from the startup path unless an
+// Plugins contains deployment-level plugin settings. No plugin download
+// happens on the startup path: tdrive only reaches the network when an
 // administrator explicitly inspects or installs a plugin.
 type Plugins struct {
 	// Dir stores installed plugin binaries and staging files.
 	Dir string
 	// StoreURL is an optional HTTPS JSON index. An empty value disables the
-	// network store without disabling direct source installation.
+	// network store without disabling installation from a manifest URL.
 	StoreURL string
-	// BuilderAddress is a Unix socket path or a loopback HTTP address shared
-	// with the optional plugin builder sidecar.
-	BuilderAddress string
-	// BuilderCommand is used for standalone binary deployments when no builder
-	// sidecar is already listening.
-	BuilderCommand string
-	SourceMaxBytes int64
-	BuildTimeout   time.Duration
+	// MaxBinaryBytes caps a downloaded plugin executable. Zero selects
+	// DefaultPluginBinaryLimit, so a hand-built configuration still gets a
+	// bound rather than refusing every download.
+	MaxBinaryBytes int64
 }
 
 // Load reads the environment and returns a validated configuration.
@@ -311,10 +311,7 @@ func Load() (*Config, error) {
 		Plugins: Plugins{
 			Dir:            envStr("TDRIVE_PLUGIN_DIR", filepath.Join(dataDir, "plugins")),
 			StoreURL:       strings.TrimSuffix(envStrAllowEmpty("TDRIVE_PLUGIN_STORE_URL", "https://raw.githubusercontent.com/dibin666/tdrive/main/plugins/index.json"), "/"),
-			BuilderAddress: envStr("TDRIVE_PLUGIN_BUILDER_ADDRESS", filepath.Join(dataDir, "plugin-builder.sock")),
-			BuilderCommand: strings.TrimSpace(envStrAllowEmpty("TDRIVE_PLUGIN_BUILDER_COMMAND", "tdrive-plugin-builder")),
-			SourceMaxBytes: envSize("TDRIVE_PLUGIN_SOURCE_MAX_BYTES", 512<<20),
-			BuildTimeout:   envDur("TDRIVE_PLUGIN_BUILD_TIMEOUT", 10*time.Minute),
+			MaxBinaryBytes: envSize("TDRIVE_PLUGIN_MAX_BINARY_BYTES", DefaultPluginBinaryLimit),
 		},
 		LogLevel: envStr("TDRIVE_LOG_LEVEL", "info"),
 	}
@@ -367,14 +364,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("TDRIVE_ADMIN_PASSWORD must be at least 8 characters")
 	case c.Auth.BootstrapUser != "" && c.Auth.BootstrapPassword == "":
 		return fmt.Errorf("TDRIVE_ADMIN_USER was set without TDRIVE_ADMIN_PASSWORD")
-	case c.Plugins.SourceMaxBytes < 0:
-		return fmt.Errorf("plugin source size limit must not be negative, got %d", c.Plugins.SourceMaxBytes)
-	case c.Plugins.SourceMaxBytes > 4<<30:
-		return fmt.Errorf("plugin source size limit must not exceed 4GiB, got %d", c.Plugins.SourceMaxBytes)
-	case c.Plugins.BuildTimeout < 0:
-		return fmt.Errorf("plugin build timeout must not be negative, got %s", c.Plugins.BuildTimeout)
-	case c.Plugins.BuildTimeout > 24*time.Hour:
-		return fmt.Errorf("plugin build timeout must not exceed 24h, got %s", c.Plugins.BuildTimeout)
+	case c.Plugins.MaxBinaryBytes < 0:
+		return fmt.Errorf("plugin binary size limit must not be negative, got %d", c.Plugins.MaxBinaryBytes)
+	case c.Plugins.MaxBinaryBytes > 4<<30:
+		return fmt.Errorf("plugin binary size limit must not exceed 4GiB, got %d", c.Plugins.MaxBinaryBytes)
 	}
 	return nil
 }
