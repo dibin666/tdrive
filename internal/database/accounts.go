@@ -16,7 +16,7 @@ import (
 // hash for the requesting account and the value one account holds is
 // meaningless to another.
 
-const accountCols = `id, label, app_id, app_hash, session_file, enabled, is_primary,
+const accountCols = `id, label, app_id, app_hash, proxy_url, session_file, enabled, is_primary,
 	tg_user_id, username, phone, position, created_at`
 
 func scanAccount(row interface{ Scan(...any) error }) (TGAccount, error) {
@@ -26,7 +26,7 @@ func scanAccount(row interface{ Scan(...any) error }) (TGAccount, error) {
 		isPrimary int64
 		created   int64
 	)
-	err := row.Scan(&a.ID, &a.Label, &a.AppID, &a.AppHash, &a.SessionFile,
+	err := row.Scan(&a.ID, &a.Label, &a.AppID, &a.AppHash, &a.ProxyURL, &a.SessionFile,
 		&enabled, &isPrimary, &a.TGUserID, &a.Username, &a.Phone, &a.Position, &created)
 	if err != nil {
 		return TGAccount{}, Translate(err)
@@ -72,8 +72,8 @@ func (d *DB) PrimaryAccount(ctx context.Context) (TGAccount, error) {
 
 func (d *DB) InsertAccount(ctx context.Context, a TGAccount) error {
 	_, err := d.write.ExecContext(ctx,
-		`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.Label, a.AppID, a.AppHash, a.SessionFile, boolInt(a.Enabled),
+		`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.Label, a.AppID, a.AppHash, a.ProxyURL, a.SessionFile, boolInt(a.Enabled),
 		boolInt(a.IsPrimary), a.TGUserID, a.Username, a.Phone, a.Position, nowMS())
 	if err != nil {
 		return fmt.Errorf("insert telegram account: %w", Translate(err))
@@ -89,6 +89,16 @@ func (d *DB) UpdateAccountSettings(ctx context.Context, id, label string, appID 
 		`UPDATE tg_accounts SET label = ?, app_id = ?, app_hash = ?, enabled = ? WHERE id = ?`,
 		label, appID, appHash, boolInt(enabled), id)
 	return affectedOne(res, err, "update telegram account")
+}
+
+// SetAccountProxy points one account at an outbound proxy, or at nothing when
+// proxyURL is empty. It is separate from UpdateAccountSettings because changing
+// it means tearing down and redialling the Telegram connection, which the
+// caller has to do afterwards.
+func (d *DB) SetAccountProxy(ctx context.Context, id, proxyURL string) error {
+	res, err := d.write.ExecContext(ctx,
+		`UPDATE tg_accounts SET proxy_url = ? WHERE id = ?`, proxyURL, id)
+	return affectedOne(res, err, "set the proxy of a telegram account")
 }
 
 // SetAccountIdentity caches who an account signed in as, so the accounts list
@@ -156,8 +166,11 @@ func (d *DB) SeedPrimaryAccount(ctx context.Context, appID int, appHash, session
 		if n > 0 {
 			return errAlreadySeeded
 		}
+		// The literals are proxy_url, enabled, is_primary, tg_user_id,
+		// username, phone and position: an adopted account connects directly
+		// and has no cached identity until it next signs in.
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, ?, 1, 1, 0, '', '', 0, ?)`,
+			`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, '', ?, 1, 1, 0, '', '', 0, ?)`,
 			account.ID, account.Label, account.AppID, account.AppHash,
 			account.SessionFile, nowMS()); err != nil {
 			return Translate(err)
@@ -225,6 +238,16 @@ func (d *DB) ChannelAccessFor(ctx context.Context, channelID, accountID string) 
 	return scanChannelAccess(d.read.QueryRowContext(ctx,
 		`SELECT `+channelAccessCols+` FROM channel_accounts WHERE channel_id = ? AND account_id = ?`,
 		channelID, accountID))
+}
+
+// DeleteChannelAccess forgets a membership that Telegram no longer reports.
+// Keeping the row would make the settings page say "in channel" forever and
+// would let a later scheduler pass use an access hash for a removed account.
+func (d *DB) DeleteChannelAccess(ctx context.Context, channelID, accountID string) error {
+	_, err := d.write.ExecContext(ctx,
+		`DELETE FROM channel_accounts WHERE channel_id = ? AND account_id = ?`,
+		channelID, accountID)
+	return Translate(err)
 }
 
 // ChannelAccesses lists every account's view of one channel, used by the

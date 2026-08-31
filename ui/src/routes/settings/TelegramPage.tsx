@@ -54,6 +54,13 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
   const credentialState: StepState = hasCredentials ? 'done' : 'current'
   const loginState: StepState = signedIn ? 'done' : hasCredentials ? 'current' : 'todo'
   const channelState: StepState = hasChannel ? 'done' : signedIn ? 'current' : 'todo'
+  const channelSummary = hasChannel
+    ? status?.channelTitle
+      ? `「${status.channelTitle}」`
+      : '已选择存储频道'
+    : signedIn
+      ? '尚未选择频道'
+      : '需要先登录账号'
 
   return (
     <div className="space-y-4">
@@ -116,13 +123,14 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
         index={3}
         state={channelState}
         title="存储频道"
-        summary={hasChannel ? '已选择存储频道' : signedIn ? '尚未选择频道' : '需要先登录账号'}
+        summary={channelSummary}
         disabled={!signedIn}
       >
         {hasChannel ? (
           <div className="space-y-3">
             <p className="text-xs leading-relaxed text-[var(--muted)]">
-              新上传的文件会进入当前频道。更换频道后，已有文件仍留在原频道并可以正常读取。
+              新上传的文件会进入当前频道
+              {status?.channelTitle ? `「${status.channelTitle}」` : ''}。更换频道后，已有文件仍留在原频道并可以正常读取。
             </p>
             <Button icon={<Radio size={14} />} onClick={() => setShowChannel(true)}>
               更换存储频道

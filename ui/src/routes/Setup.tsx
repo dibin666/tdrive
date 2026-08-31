@@ -342,12 +342,18 @@ export function LoginStep({ onDone }: { onDone: () => Promise<void> }) {
   )
 }
 
-export function ChannelStep({ onDone }: { onDone: () => Promise<void> }) {
+export function ChannelStep({
+  onDone,
+  initialMode = 'create',
+}: {
+  onDone: () => Promise<void>
+  initialMode?: 'create' | 'existing'
+}) {
   const [options, setOptions] = useState<ChannelOption[] | null>(null)
   const [selected, setSelected] = useState<number>(0)
   const [title, setTitle] = useState('TDrive')
   const [busy, setBusy] = useState(false)
-  const [mode, setMode] = useState<'create' | 'existing'>('create')
+  const [mode, setMode] = useState<'create' | 'existing'>(initialMode)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {

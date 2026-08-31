@@ -71,6 +71,10 @@ CREATE TABLE tg_accounts (
     label        TEXT NOT NULL DEFAULT '',
     app_id       INTEGER NOT NULL,
     app_hash     TEXT NOT NULL,
+    -- Outbound proxy for this account alone, empty for a direct connection.
+    -- Telegram treats several accounts logging in from one address as related,
+    -- so giving each its own exit is what keeps them independent.
+    proxy_url    TEXT NOT NULL DEFAULT '',
     -- Relative to the data directory. The primary account keeps the historical
     -- session.json so an upgrade does not have to re-authenticate.
     session_file TEXT NOT NULL,

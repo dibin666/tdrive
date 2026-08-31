@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -25,6 +27,12 @@ type accountBody struct {
 	// polled by every open settings tab.
 	Enabled   bool `json:"enabled"`
 	IsPrimary bool `json:"isPrimary"`
+	// ProxyURL is deliberately masked. Proxy credentials are stored on the
+	// server, but must never be sent back to the browser in the accounts list.
+	ProxyURL string `json:"proxyUrl,omitempty"`
+	// ChannelTitle names the current global storage channel. InChannel and
+	// CanPost below say whether this account can actually use it.
+	ChannelTitle string `json:"channelTitle,omitempty"`
 
 	Status tgc.Status `json:"status"`
 	// CanPost is whether this account has been admitted to the storage channel
@@ -42,7 +50,19 @@ type accountBody struct {
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 
-	rows, err := s.db.ListAccounts(r.Context())
+	// Login completion normally triggers this check through Cluster.OnReady.
+	// Polling also kicks it here so an account added to the channel manually,
+	// or an account that was already running when the channel was changed,
+	// becomes usable without requiring a failed transfer first.
+	checkContext, cancelCheck := context.WithTimeout(
+		context.WithoutCancel(r.Context()), 20*time.Second,
+	)
+	go func() {
+		defer cancelCheck()
+		s.accounts.RefreshReadyChannels(checkContext)
+	}()
+
+	accountRows, err := s.db.ListAccounts(r.Context())
 	if err != nil {
 		s.fail(w, err, "list telegram accounts")
 		return
@@ -52,26 +72,30 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	// the default channel in hand. A drive with no channel yet simply reports
 	// every account as not admitted.
 	access := map[string]database.ChannelAccess{}
+	storageChannelTitle := ""
 	if channel, err := s.db.DefaultChannel(r.Context()); err == nil {
-		rows, err := s.db.ChannelAccesses(r.Context(), channel.ID)
+		storageChannelTitle = channel.Title
+		accessRows, err := s.db.ChannelAccesses(r.Context(), channel.ID)
 		if err != nil {
 			s.fail(w, err, "list telegram accounts")
 			return
 		}
-		for _, row := range rows {
+		for _, row := range accessRows {
 			access[row.AccountID] = row
 		}
 	}
 
 	upload, download := s.drive.ActiveTasksByAccount()
-	out := make([]accountBody, 0, len(rows))
-	for _, row := range rows {
+	out := make([]accountBody, 0, len(accountRows))
+	for _, row := range accountRows {
 		body := accountBody{
 			ID:              row.ID,
 			Label:           row.Label,
 			AppID:           row.AppID,
 			Enabled:         row.Enabled,
 			IsPrimary:       row.IsPrimary,
+			ProxyURL:        tgc.MaskProxyURL(row.ProxyURL),
+			ChannelTitle:    storageChannelTitle,
 			Status:          tgc.Status{State: tgc.StateUnconfigured},
 			ActiveUploads:   upload[row.ID],
 			ActiveDownloads: download[row.ID],
@@ -89,9 +113,10 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 type createAccountRequest struct {
-	Label   string `json:"label"`
-	AppID   int    `json:"appId"`
-	AppHash string `json:"appHash"`
+	Label    string `json:"label"`
+	AppID    int    `json:"appId"`
+	AppHash  string `json:"appHash"`
+	ProxyURL string `json:"proxyUrl"`
 }
 
 // handleCreateAccount registers another Telegram login. It is not usable yet:
@@ -110,7 +135,10 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	manager, err := s.accounts.Add(r.Context(), strings.TrimSpace(req.Label), req.AppID, strings.TrimSpace(req.AppHash))
+	manager, err := s.accounts.Add(
+		r.Context(), strings.TrimSpace(req.Label), req.AppID,
+		strings.TrimSpace(req.AppHash), strings.TrimSpace(req.ProxyURL),
+	)
 	if err != nil {
 		s.fail(w, err, "add telegram account")
 		return
@@ -119,6 +147,36 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":     manager.ID(),
 		"status": manager.Status(),
+	})
+}
+
+type setAccountProxyRequest struct {
+	ProxyURL string `json:"proxyUrl"`
+}
+
+// handleSetAccountProxy replaces one account's outbound proxy. An empty value
+// intentionally means "go direct". The cluster validates and tests the proxy,
+// persists it, then redials the account so the very next Telegram request uses
+// the new exit address.
+func (s *Server) handleSetAccountProxy(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req setAccountProxyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+
+	proxyURL, err := tgc.NormalizeProxyURL(strings.TrimSpace(req.ProxyURL))
+	if err != nil {
+		s.failAccount(w, err, "set telegram account proxy")
+		return
+	}
+	if err := s.accounts.SetProxy(r.Context(), id, proxyURL); err != nil {
+		s.failAccount(w, err, "set telegram account proxy")
+		return
+	}
+	s.audit(r, database.AuditSettingsUpdate, id, "updated a telegram account proxy")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"proxyUrl": tgc.MaskProxyURL(proxyURL),
 	})
 }
 
@@ -221,6 +279,28 @@ func (s *Server) handleAccountChannels(w http.ResponseWriter, r *http.Request) {
 			"tgId":  channel.TGID,
 			"title": channel.Title,
 		},
+	})
+}
+
+// handleAccountCheckChannel verifies the account's own access to the current
+// storage channel without inviting it or changing any membership. This is the
+// explicit check an administrator can run immediately after configuring an
+// account or changing its proxy.
+func (s *Server) handleAccountCheckChannel(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.accountFromPath(w, r)
+	if !ok {
+		return
+	}
+	info, err := s.accounts.CheckChannel(r.Context(), manager)
+	if err != nil {
+		s.failAccount(w, err, "check the storage channel for a telegram account")
+		return
+	}
+	s.audit(r, database.AuditSettingsUpdate, manager.ID(),
+		"checked a telegram account's storage channel access")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channel": info,
+		"usable":  info.CanPost,
 	})
 }
 

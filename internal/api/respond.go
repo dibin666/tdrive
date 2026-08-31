@@ -103,6 +103,9 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		})
 	case errors.Is(err, tgc.ErrInvalidSession):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, tgc.ErrBadProxy):
+		writeError(w, http.StatusBadRequest,
+			"代理地址不可用或格式不正确，请使用 socks5://host:port 或 http://host:port")
 	case errors.Is(err, tgc.ErrNotInChannel):
 		// The account is signed in but is not in the storage channel. That is a
 		// configuration gap somebody has to close, not an outage, so it must

@@ -217,11 +217,13 @@ func (s *Server) Routes() http.Handler {
 					r.Post("/", s.handleCreateAccount)
 					r.Patch("/{id}", s.handleUpdateAccount)
 					r.Delete("/{id}", s.handleDeleteAccount)
+					r.Put("/{id}/proxy", s.handleSetAccountProxy)
 					r.Post("/{id}/join-channel", s.handleAccountJoinChannel)
 					// The channels one account can see, and the pick that
 					// links it to the storage channel by hand when the
 					// automatic join cannot do it.
 					r.Get("/{id}/channels", s.handleAccountChannels)
+					r.Post("/{id}/channel/check", s.handleAccountCheckChannel)
 					r.Post("/{id}/channel", s.handleAccountLinkChannel)
 					r.Post("/{id}/login/code", s.handleAccountSendCode)
 					r.Post("/{id}/login/signin", s.handleAccountSignIn)
@@ -279,8 +281,9 @@ type statusBody struct {
 	Telegram   tgc.Status `json:"telegram"`
 	// HasChannel is false until a storage channel is chosen, which is the
 	// last step of the wizard.
-	HasChannel bool   `json:"hasChannel"`
-	Version    string `json:"version"`
+	HasChannel   bool   `json:"hasChannel"`
+	ChannelTitle string `json:"channelTitle,omitempty"`
+	Version      string `json:"version"`
 	// SegmentSize lets the browser slice a file on exactly the boundaries
 	// the server will store it on.
 	SegmentSize  int64  `json:"segmentSize"`
@@ -305,8 +308,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.RuntimeSettings().WebDAVEnabled {
 		body.WebDAVPath = s.cfg.WebDAV.Prefix
 	}
-	if _, err := s.db.DefaultChannel(r.Context()); err == nil {
+	if channel, err := s.db.DefaultChannel(r.Context()); err == nil {
 		body.HasChannel = true
+		body.ChannelTitle = channel.Title
 	}
 	writeJSON(w, http.StatusOK, body)
 }

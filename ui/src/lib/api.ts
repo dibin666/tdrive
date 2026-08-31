@@ -99,6 +99,8 @@ export interface TelegramStatus {
   /** How long Telegram has told this account to wait. Non-zero means new
    *  transfers are being routed to the other accounts. */
   cooldownMs?: number
+  channelReady: boolean
+  channelChecked: boolean
 }
 
 /**
@@ -110,6 +112,10 @@ export interface TelegramAccount {
   id: string
   label: string
   appId: number
+  /** A server-side masked proxy URL, never the proxy password itself. */
+  proxyUrl?: string
+  /** The current storage channel; canPost says whether this account can use it. */
+  channelTitle?: string
   enabled: boolean
   isPrimary: boolean
   status: TelegramStatus
@@ -133,6 +139,7 @@ export interface Status {
   needsSetup: boolean
   telegram: TelegramStatus
   hasChannel: boolean
+  channelTitle?: string
   version: string
   segmentSize: number
   localEnabled: boolean
@@ -756,7 +763,12 @@ export const api = {
 
   telegramAccounts: () =>
     request<{ accounts: TelegramAccount[] }>('/tg/accounts'),
-  addTelegramAccount: (body: { label: string; appId: number; appHash: string }) =>
+  addTelegramAccount: (body: {
+    label: string
+    appId: number
+    appHash: string
+    proxyUrl?: string
+  }) =>
     request<{ id: string; status: TelegramStatus }>('/tg/accounts', {
       method: 'POST',
       body: json(body),
@@ -765,6 +777,11 @@ export const api = {
     request<void>(`/tg/accounts/${id}`, { method: 'PATCH', body: json(body) }),
   deleteTelegramAccount: (id: string) =>
     request<void>(`/tg/accounts/${id}`, { method: 'DELETE' }),
+  setTelegramAccountProxy: (id: string, proxyUrl: string) =>
+    request<{ proxyUrl?: string }>(`/tg/accounts/${id}/proxy`, {
+      method: 'PUT',
+      body: json({ proxyUrl }),
+    }),
   joinStorageChannel: (id: string) =>
     request<{ canPost: boolean }>(`/tg/accounts/${id}/join-channel`, { method: 'POST' }),
   accountChannels: (id: string) =>
@@ -773,6 +790,10 @@ export const api = {
     request<{ canPost: boolean }>(`/tg/accounts/${id}/channel`, {
       method: 'POST',
       body: json({ tgId }),
+    }),
+  checkAccountChannel: (id: string) =>
+    request<{ channel: ChannelOption; usable: boolean }>(`/tg/accounts/${id}/channel/check`, {
+      method: 'POST',
     }),
   accountSendCode: (id: string, phone: string) =>
     request<{ delivery: string; codeLength?: number; alreadyAuthorized: boolean }>(

@@ -103,7 +103,7 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 
 // schemaVersion is what schema.sql describes. Anything older is brought up to
 // it by the steps in migrate.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // upgradeSteps are the statements that take an existing database from the
 // version keyed here to the next one. A fresh database skips all of them,
@@ -305,6 +305,12 @@ var upgradeSteps = map[int][]string{
 		`ALTER TABLE plugins RENAME COLUMN source_digest TO manifest_digest`,
 		`ALTER TABLE plugins DROP COLUMN ref`,
 		`UPDATE plugins SET source = 'release'`,
+	},
+	7: {
+		// A per-account outbound proxy. Empty keeps every existing account on
+		// the direct connection it already had, so an upgrade changes nothing
+		// until an administrator sets one.
+		`ALTER TABLE tg_accounts ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
 	},
 }
 

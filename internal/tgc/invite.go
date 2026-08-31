@@ -61,6 +61,16 @@ var ErrWrongChannel = errors.New("tgc: that is not this drive's storage channel"
 // It is safe to re-run: an account that is already a member and already an
 // admin ends up in the same state, with its access hash refreshed.
 func (c *Cluster) JoinChannel(ctx context.Context, joiner *Manager, channel database.Channel) error {
+	c.channelStateMu.Lock()
+	defer c.channelStateMu.Unlock()
+	return c.joinChannel(ctx, joiner, channel)
+}
+
+func (c *Cluster) joinChannel(ctx context.Context, joiner *Manager, channel database.Channel) error {
+	// The default channel may have changed since the last check. Do not leave
+	// the account schedulable for the old channel while this one is being
+	// resolved.
+	joiner.resetChannelCheck()
 	if !joiner.Ready() {
 		return fmt.Errorf("%w: sign this account in before adding it to the channel", ErrNotReady)
 	}
@@ -123,6 +133,9 @@ func (c *Cluster) JoinChannel(ctx context.Context, joiner *Manager, channel data
 // channel, because an account posting into some other channel would write files
 // nothing can read back.
 func (c *Cluster) LinkChannel(ctx context.Context, member *Manager, channel database.Channel, tgID int64) error {
+	c.channelStateMu.Lock()
+	defer c.channelStateMu.Unlock()
+	member.resetChannelCheck()
 	if !member.Ready() {
 		return fmt.Errorf("%w: sign this account in before adding it to the channel", ErrNotReady)
 	}
@@ -155,18 +168,25 @@ func (c *Cluster) recordMembership(
 	if isPrimary {
 		// The channel row carries the primary's access hash, and this is the
 		// freshest one there is.
-		c.rememberChannelAccessHash(ctx, channel, membership.AccessHash)
+		c.rememberChannelDetails(ctx, channel, membership.AccessHash, membership.Title)
 	}
 	if membership.CanPost {
-		return c.db.UpsertChannelAccess(ctx, channel.ID, member.ID(), membership.AccessHash, true)
+		if err := c.db.UpsertChannelAccess(ctx, channel.ID, member.ID(), membership.AccessHash, true); err != nil {
+			member.setChannelReady(false)
+			return err
+		}
+		member.setChannelReady(true)
+		return nil
 	}
 
 	// A member that cannot post is recorded either way: the accounts list
 	// distinguishes "not a member" from "a member that cannot store", and the
 	// scheduler leaves it alone until the rights are there.
 	if err := c.db.UpsertChannelAccess(ctx, channel.ID, member.ID(), membership.AccessHash, false); err != nil {
+		member.setChannelReady(false)
 		c.log.Warn("could not record a channel membership", zap.Error(err))
 	}
+	member.setChannelReady(false)
 	if isPrimary {
 		return fmt.Errorf("%w: %q", ErrNoPostRights, channel.Title)
 	}
@@ -182,7 +202,12 @@ func (c *Cluster) recordMembership(
 	if err := primary.promote(ctx, asPrimarySeesIt, self.GetID()); err != nil {
 		return err
 	}
-	return c.db.UpsertChannelAccess(ctx, channel.ID, member.ID(), membership.AccessHash, true)
+	if err := c.db.UpsertChannelAccess(ctx, channel.ID, member.ID(), membership.AccessHash, true); err != nil {
+		member.setChannelReady(false)
+		return err
+	}
+	member.setChannelReady(true)
+	return nil
 }
 
 // channelAsPrimarySeesIt returns the storage channel carrying an access hash
@@ -205,19 +230,33 @@ func (c *Cluster) channelAsPrimarySeesIt(ctx context.Context, channel database.C
 		}
 		return channel, err
 	}
-	c.rememberChannelAccessHash(ctx, channel, view.AccessHash)
+	c.rememberChannelDetails(ctx, channel, view.AccessHash, view.Title)
 	channel.AccessHash = view.AccessHash
 	return channel, nil
 }
 
-// rememberChannelAccessHash writes back an access hash the primary has just
-// proved works. Failing to store it is not fatal — the call that produced it
-// still goes through — so it is logged rather than returned.
-func (c *Cluster) rememberChannelAccessHash(ctx context.Context, channel database.Channel, accessHash int64) {
-	if accessHash == 0 || accessHash == channel.AccessHash {
+// rememberChannelDetails keeps the legacy/global row aligned with the primary
+// account's current view. The title matters as well as the access hash because
+// Telegram channel names can be changed outside tdrive.
+func (c *Cluster) rememberChannelDetails(
+	ctx context.Context,
+	channel database.Channel,
+	accessHash int64,
+	title string,
+) {
+	if accessHash == 0 {
+		if title == channel.Title {
+			return
+		}
+		accessHash = channel.AccessHash
+	}
+	if accessHash == channel.AccessHash && title == channel.Title {
 		return
 	}
-	if _, err := c.db.UpsertChannel(ctx, channel.TGID, accessHash, channel.Title); err != nil {
+	if title == "" {
+		title = channel.Title
+	}
+	if _, err := c.db.UpsertChannel(ctx, channel.TGID, accessHash, title); err != nil {
 		c.log.Warn("could not refresh the storage channel's access hash", zap.Error(err))
 	}
 }
@@ -227,9 +266,13 @@ func (c *Cluster) rememberChannelAccessHash(ctx context.Context, channel databas
 // exists. Individual failures are returned rather than aborting: one account
 // that cannot join must not stop the others.
 func (c *Cluster) JoinAll(ctx context.Context, channel database.Channel) map[string]error {
+	c.channelStateMu.Lock()
+	defer c.channelStateMu.Unlock()
+
 	failures := make(map[string]error)
 	for _, manager := range c.All() {
-		if err := c.JoinChannel(ctx, manager, channel); err != nil {
+		manager.resetChannelCheck()
+		if err := c.joinChannel(ctx, manager, channel); err != nil {
 			failures[manager.ID()] = err
 			c.log.Warn("could not admit a telegram account to the storage channel",
 				zap.String("account", manager.ID()), zap.Error(err))

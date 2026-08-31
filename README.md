@@ -150,7 +150,7 @@ authorization on the same budget. It buys no speed and makes the account more li
 
 Adding an account is three steps, which the Web UI walks through:
 
-1. Enter the api_id / api_hash that number registered at my.telegram.org.
+1. Enter the api_id / api_hash that number registered at my.telegram.org; optionally provide a SOCKS5 / HTTP proxy dedicated to this account.
 2. Sign in with that phone number (code, plus the 2FA password if it has one).
 3. Join the storage channel — the primary account exports an invite, the new account joins, and the
    primary promotes it with **post, edit and delete** rights. Edit and delete are not optional:
@@ -158,6 +158,11 @@ Adding an account is three steps, which the Web UI walks through:
 
 Step 3 checks first whether the account is **already in the channel** — including one somebody added
 by hand in a Telegram client — and simply records it when it is, without exporting any invite.
+
+After an account is configured, the settings page automatically checks its login, channel
+membership and posting rights, shows the current storage channel name on the account card, and
+offers a **Check channel** action for an immediate recheck. The drive-wide storage channel can be
+changed with **Switch channel**; existing files remain in their original channel.
 
 If the primary account did not create the channel, or was migrated to a different Telegram account,
 it may not be allowed to export an invite or grant admin rights, and the automatic join fails with a
@@ -168,7 +173,11 @@ choose the row marked as the storage channel. That route does not involve the pr
 ### Isolation and scheduling
 
 Accounts share nothing: separate `session-*.json`, separate MTProto pools, separate rate limiters,
-separate task budgets.
+separate task budgets. Each account can also have its own SOCKS5 or HTTP proxy from the **Proxy**
+button on its account card; it applies from login through uploads and downloads. Proxy credentials
+stay on the server and the account list only shows a masked address. Use different proxy exit IPs
+for different accounts where possible. A proxy separates network exits, but it is not a way around
+Telegram's anti-abuse or account limits.
 
 - **The tuning knobs are per account.** "One upload at a time" with two accounts runs two uploads at
   once, one per login. Pool size and request interval work the same way. The settings page shows the

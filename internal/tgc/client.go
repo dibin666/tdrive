@@ -80,6 +80,11 @@ type Status struct {
 	// sending more requests. Non-zero means the scheduler is routing new work
 	// to the other accounts.
 	CooldownMs int64 `json:"cooldownMs,omitempty"`
+	// ChannelReady and ChannelChecked let the settings page distinguish a
+	// signed-in account that is still being checked from one that failed the
+	// membership or permission check.
+	ChannelReady   bool `json:"channelReady"`
+	ChannelChecked bool `json:"channelChecked"`
 }
 
 // Manager owns one Telegram account's connection.
@@ -95,6 +100,16 @@ type Manager struct {
 	client *telegram.Client
 	pool   Pool
 	self   *tg.User
+
+	// channelReady means this account can currently use the configured
+	// storage channel with posting rights. It starts false and is refreshed
+	// after login, so a newly configured account cannot be scheduled before
+	// its channel membership has been checked.
+	channelReady atomic.Bool
+	// channelCheckedAt throttles background membership probes. Explicit actions
+	// such as "加入存储频道" still check immediately; passive account polling
+	// does not send a Telegram request every few seconds.
+	channelCheckedAt atomic.Int64
 
 	// coolUntil is a Unix-milli deadline set by the health middleware when
 	// Telegram answers with FLOOD_WAIT. It is read without the mutex on every
@@ -187,7 +202,33 @@ func (m *Manager) Cooldown() time.Duration {
 // Available reports whether the scheduler may hand this account new work: it
 // is signed in and not sitting out a FLOOD_WAIT.
 func (m *Manager) Available() bool {
-	return m.Ready() && m.Cooldown() == 0
+	return m.Ready() && m.channelReady.Load() && m.Cooldown() == 0
+}
+
+// ChannelReady reports whether this account has recently been confirmed as a
+// member of the configured storage channel with posting rights. It is kept
+// separate from Ready because a signed-in Telegram account may still be
+// outside the drive's channel.
+func (m *Manager) ChannelReady() bool {
+	return m.channelReady.Load()
+}
+
+func (m *Manager) setChannelReady(ready bool) {
+	m.channelReady.Store(ready)
+}
+
+func (m *Manager) channelCheckDue(now time.Time, interval time.Duration) bool {
+	lastCheckedAt := m.channelCheckedAt.Load()
+	return lastCheckedAt == 0 || now.Sub(time.UnixMilli(lastCheckedAt)) >= interval
+}
+
+func (m *Manager) markChannelChecked(at time.Time) {
+	m.channelCheckedAt.Store(at.UnixMilli())
+}
+
+func (m *Manager) resetChannelCheck() {
+	m.channelCheckedAt.Store(0)
+	m.channelReady.Store(false)
 }
 
 // markFlood records a FLOOD_WAIT so the scheduler stops choosing this account
@@ -224,11 +265,27 @@ func (m *Manager) Start(ctx context.Context) error {
 
 func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	m.Stop()
+	m.resetChannelCheck()
 	settings := m.cfg.RuntimeSettings()
 	sessionFile := m.SessionPath()
 
 	if err := os.MkdirAll(filepath.Dir(sessionFile), 0o750); err != nil {
 		return fmt.Errorf("create session directory: %w", err)
+	}
+
+	// This account's own exit. A nil resolver leaves gotd on its normal default
+	// dialer, including any environment-level proxy behavior gotd supports.
+	m.mu.RLock()
+	proxyURL := m.acct.ProxyURL
+	m.mu.RUnlock()
+	resolver, err := proxyResolver(proxyURL)
+	if err != nil {
+		m.setState(StateError, err)
+		return err
+	}
+	if resolver != nil {
+		m.log.Info("connecting to telegram through a proxy",
+			zap.String("proxy", MaskProxyURL(proxyURL)))
 	}
 
 	// Rate limiting smooths bursts so Telegram is less likely to answer with
@@ -252,6 +309,10 @@ func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	client := telegram.NewClient(appID, appHash, telegram.Options{
 		SessionStorage: &session.FileStorage{Path: sessionFile},
 		Middlewares:    middlewares,
+		// Resolver decides how each datacenter connection is dialled, so
+		// setting it here routes the whole account — including its login —
+		// through its proxy. Nil keeps gotd's default dialer.
+		Resolver: resolver,
 		Device: telegram.DeviceConfig{
 			DeviceModel:   "tdrive",
 			SystemVersion: "linux",
@@ -286,6 +347,7 @@ func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 		})
 		if err != nil && !errors.Is(err, context.Canceled) {
 			m.log.Error("telegram run loop stopped", zap.Error(err))
+			m.channelReady.Store(false)
 			m.setState(StateError, err)
 			select {
 			case connected <- err:
@@ -350,6 +412,7 @@ func (m *Manager) refreshAuth(ctx context.Context) {
 			zap.String("username", status.User.Username))
 	} else {
 		m.self = nil
+		m.channelReady.Store(false)
 		m.state = StateUnauthorized
 	}
 	self := m.self
@@ -419,6 +482,7 @@ func (m *Manager) Reload(ctx context.Context) error {
 // Stop closes the pool and ends the run loop. It is safe to call when nothing
 // is running.
 func (m *Manager) Stop() {
+	m.resetChannelCheck()
 	m.mu.Lock()
 	cancel, done, p := m.cancel, m.done, m.pool
 	m.cancel, m.done, m.pool, m.client, m.self = nil, nil, nil, nil, nil
@@ -512,6 +576,8 @@ func (m *Manager) Status() Status {
 		s.DC = m.client.Config().ThisDC
 	}
 	s.CooldownMs = m.Cooldown().Milliseconds()
+	s.ChannelReady = m.channelReady.Load()
+	s.ChannelChecked = m.channelCheckedAt.Load() != 0
 	return s
 }
 
@@ -524,6 +590,9 @@ func (m *Manager) Self() *tg.User {
 }
 
 func (m *Manager) setState(s State, err error) {
+	if s != StateReady {
+		m.channelReady.Store(false)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state, m.runErr = s, err

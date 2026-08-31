@@ -61,7 +61,8 @@ type Account interface {
 	ID() string
 
 	// Available reports whether the scheduler should hand this account new
-	// work: signed in, and not sitting out a FLOOD_WAIT.
+	// work: signed in, admitted to the storage channel, and not sitting out a
+	// FLOOD_WAIT.
 	Available() bool
 
 	// ChannelRef resolves this account's own coordinates for a stored channel.
@@ -87,7 +88,11 @@ type Cluster interface {
 
 // ChannelRef identifies a storage channel, as seen by one particular account.
 type ChannelRef struct {
-	TGID int64
+	// ChannelID is the local database row. Telegram does not need it, but it
+	// lets a backend persist a freshly resolved access hash after Telegram
+	// rejects a stale one.
+	ChannelID string
+	TGID      int64
 	// AccessHash is minted per account. Using one account's value with another
 	// account's connection fails with CHANNEL_INVALID.
 	AccessHash int64

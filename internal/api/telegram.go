@@ -35,7 +35,7 @@ func (s *Server) handleTelegramConfigure(w http.ResponseWriter, r *http.Request)
 	// create the primary one. Afterwards this endpoint edits it in place.
 	manager, err := s.primary()
 	if errors.Is(err, tgc.ErrNoAccounts) {
-		if _, err := s.accounts.Add(r.Context(), primaryAccountLabel, req.AppID, req.AppHash); err != nil {
+		if _, err := s.accounts.Add(r.Context(), primaryAccountLabel, req.AppID, req.AppHash, ""); err != nil {
 			s.fail(w, err, "configure telegram")
 			return
 		}

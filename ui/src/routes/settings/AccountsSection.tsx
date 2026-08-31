@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { Check, Hash, Plus, Radio, RefreshCw, Trash2, UserPlus } from 'lucide-react'
-import { api, type AccountChannels, type TelegramAccount } from '../../lib/api'
+import { Check, Globe, Hash, Plus, Radio, RefreshCw, Trash2, UserPlus } from 'lucide-react'
+import { ApiError, api, type AccountChannels, type TelegramAccount } from '../../lib/api'
 import { Button, Field, Input, Modal, Spinner, toast } from '../../components/primitives'
 import { Section, StatusDot } from './shared'
 
@@ -27,15 +27,19 @@ import { Section, StatusDot } from './shared'
 export function AccountsSection({
   hasChannel,
   onChanged,
+  onSwitchChannel,
 }: {
   hasChannel: boolean
   onChanged: () => Promise<void>
+  onSwitchChannel?: () => void
 }) {
   const [accounts, setAccounts] = useState<TelegramAccount[] | null>(null)
   const [adding, setAdding] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
   // The account whose channel list is open, if any.
   const [picking, setPicking] = useState<TelegramAccount | null>(null)
+  // The account whose outbound proxy editor is open, if any.
+  const [proxyAccount, setProxyAccount] = useState<TelegramAccount | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -80,9 +84,16 @@ export function AccountsSection({
           : '再加一个账号可以让上传和下载的额度翻倍。注意：必须是另一个手机号——Telegram 的限流是按账号算的，同一个号申请多个 api_id 没有任何作用。'
       }
       actions={
-        <Button icon={<Plus size={14} />} onClick={() => setAdding(true)}>
-          添加账号
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {hasChannel && onSwitchChannel && (
+            <Button icon={<Radio size={14} />} onClick={onSwitchChannel}>
+              切换频道
+            </Button>
+          )}
+          <Button icon={<Plus size={14} />} onClick={() => setAdding(true)}>
+            添加账号
+          </Button>
+        </div>
       }
     >
       {accounts === null ? (
@@ -99,6 +110,10 @@ export function AccountsSection({
                 void act(account.id, '已加入存储频道', () => api.joinStorageChannel(account.id))
               }
               onPickChannel={() => setPicking(account)}
+              onCheck={() =>
+                void act(account.id, '频道检测完成', () => api.checkAccountChannel(account.id))
+              }
+              onProxy={() => setProxyAccount(account)}
               onToggle={() =>
                 void act(
                   account.id,
@@ -156,6 +171,25 @@ export function AccountsSection({
           />
         )}
       </Modal>
+
+      <Modal
+        open={proxyAccount !== null}
+        onClose={() => setProxyAccount(null)}
+        title="设置账号代理"
+        description={`只影响「${proxyAccount?.label || '这个账号'}」的 Telegram 连接。`}
+        width="max-w-lg"
+      >
+        {proxyAccount && (
+          <ProxyEditor
+            account={proxyAccount}
+            onSaved={async () => {
+              setProxyAccount(null)
+              await reload()
+              await onChanged()
+            }}
+          />
+        )}
+      </Modal>
     </Section>
   )
 }
@@ -166,6 +200,8 @@ function AccountCard({
   busy,
   onJoin,
   onPickChannel,
+  onCheck,
+  onProxy,
   onToggle,
   onRemove,
 }: {
@@ -174,6 +210,8 @@ function AccountCard({
   busy: boolean
   onJoin: () => void
   onPickChannel: () => void
+  onCheck: () => void
+  onProxy: () => void
   onToggle: () => void
   onRemove: () => void
 }) {
@@ -208,6 +246,8 @@ function AccountCard({
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted)]">
             {account.status.phone && <span>{account.status.phone}</span>}
             {account.status.dc ? <span>DC{account.status.dc}</span> : null}
+            {account.channelTitle && <span>频道「{account.channelTitle}」</span>}
+            {account.proxyUrl && <span>代理 {account.proxyUrl}</span>}
             <span>
               占用 上传 {account.activeUploads} / 下载 {account.activeDownloads}
             </span>
@@ -215,6 +255,14 @@ function AccountCard({
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2">
+          <Button icon={<Globe size={14} />} disabled={busy} onClick={onProxy}>
+            代理
+          </Button>
+          {hasChannel && account.status.state === 'ready' && (
+            <Button icon={<RefreshCw size={14} />} loading={busy} onClick={onCheck}>
+              检测频道
+            </Button>
+          )}
           {needsChannel && (
             <>
               <Button icon={<Radio size={14} />} loading={busy} onClick={onJoin}>
@@ -240,6 +288,77 @@ function AccountCard({
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Edits one account's outbound Telegram proxy.
+ *
+ * The current value is shown only in masked form. The input is intentionally
+ * empty when an editor opens: putting the masked password back into a URL would
+ * silently replace a real credential with a string of asterisks. Leaving the
+ * field empty and saving clears the proxy and returns the account to a direct
+ * connection.
+ */
+function ProxyEditor({
+  account,
+  onSaved,
+}: {
+  account: TelegramAccount
+  onSaved: () => Promise<void>
+}) {
+  const [proxyUrl, setProxyUrl] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const save = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await api.setTelegramAccountProxy(account.id, proxyUrl.trim())
+      toast(proxyUrl.trim() ? '账号代理已更新' : '已清除账号代理', 'success')
+      await onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
+        每个 Telegram 账号可以使用不同的代理出口，建议不要让多个账号共享同一个出口 IP。
+        支持 SOCKS5 和 HTTP 代理；代理密码只保存在服务器，不会返回到浏览器。
+      </p>
+
+      {account.proxyUrl ? (
+        <p className="text-xs text-[var(--muted)]">
+          当前代理：<span className="font-[family-name:var(--font-mono)]">{account.proxyUrl}</span>
+        </p>
+      ) : (
+        <p className="text-xs text-[var(--muted)]">当前未设置代理，账号使用服务器直连。</p>
+      )}
+
+      <Field
+        label="代理地址"
+        hint="例如 socks5://user:password@127.0.0.1:1080 或 http://user:password@proxy.example:8080；留空表示直连"
+        error={error ?? undefined}
+      >
+        <Input
+          value={proxyUrl}
+          onChange={(event) => setProxyUrl(event.target.value)}
+          placeholder="socks5://127.0.0.1:1080"
+          autoFocus
+          autoComplete="off"
+          className="font-[family-name:var(--font-mono)] text-xs"
+        />
+      </Field>
+
+      <Button variant="primary" className="w-full" loading={busy} onClick={() => void save()}>
+        保存并重新连接
+      </Button>
     </div>
   )
 }
@@ -304,7 +423,7 @@ function ChannelPicker({
     <div className="space-y-4">
       <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
         下面是这个账号自己能看到的频道。选中标着「存储频道」的那个就行——它必须已经加入该频道，
-        并且拥有发消息、编辑消息和删除消息的权限。
+        并且拥有发消息、编辑消息和删除消息的权限。要把网盘切换到另一个频道，请使用账号列表上方的「切换频道」。
       </p>
 
       {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
@@ -324,8 +443,8 @@ function ChannelPicker({
             return (
               <button
                 key={channel.tgId}
-                disabled={linkingTgId !== null}
-                onClick={() => void link(channel.tgId)}
+                disabled={!isStorage || linkingTgId !== null}
+                onClick={isStorage ? () => void link(channel.tgId) : undefined}
                 className="row w-full justify-between disabled:cursor-not-allowed disabled:opacity-45"
                 data-selected={isStorage}
               >
@@ -384,8 +503,8 @@ function describe(
     return {
       tone: 'warn',
       label: account.inChannel
-        ? '在存储频道里但没有发消息权限，还不能存文件'
-        : '还没加入存储频道，暂时不参与传输',
+        ? `在频道「${account.channelTitle || '存储频道'}」里但没有发消息权限，还不能存文件`
+        : `还没加入频道「${account.channelTitle || '存储频道'}」，暂时不参与传输`,
     }
   }
   if (cooldownSeconds > 0) {
@@ -413,6 +532,7 @@ function AddAccountFlow({
   const [label, setLabel] = useState('')
   const [appId, setAppId] = useState('')
   const [appHash, setAppHash] = useState('')
+  const [proxyUrl, setProxyUrl] = useState('')
   const [phone, setPhone] = useState('')
   const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
@@ -440,6 +560,21 @@ function AddAccountFlow({
       await onDone()
       return
     }
+
+    // Check first so an account that was already added in Telegram is marked
+    // usable without asking the operator to press the automatic join button.
+    // A 409 means the normal next step is to join or manually select it; other
+    // failures should remain visible because they usually indicate a broken
+    // connection or proxy.
+    try {
+      const result = await api.checkAccountChannel(accountId)
+      if (result.usable) {
+        await onDone()
+        return
+      }
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 409) throw err
+    }
     setStage('channel')
   }
 
@@ -461,7 +596,7 @@ function AddAccountFlow({
             placeholder="1234567"
           />
         </Field>
-        <Field label="api_hash" error={error ?? undefined}>
+        <Field label="api_hash">
           <Input
             value={appHash}
             onChange={(e) => setAppHash(e.target.value)}
@@ -469,6 +604,19 @@ function AddAccountFlow({
             placeholder="0123456789abcdef0123456789abcdef"
           />
         </Field>
+        <Field
+          label="代理地址（可选）"
+          hint="支持 socks5://host:port 或 http://host:port，也支持 user:password@；建议每个账号使用不同的出口 IP"
+        >
+          <Input
+            value={proxyUrl}
+            onChange={(event) => setProxyUrl(event.target.value)}
+            placeholder="socks5://127.0.0.1:1080"
+            autoComplete="off"
+            className="font-[family-name:var(--font-mono)] text-xs"
+          />
+        </Field>
+        {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
         <Button
           variant="primary"
           className="w-full"
@@ -483,6 +631,7 @@ function AddAccountFlow({
                 label: label.trim(),
                 appId: id,
                 appHash: appHash.trim(),
+                proxyUrl: proxyUrl.trim() || undefined,
               })
               setAccountId(created.id)
               setStage('phone')

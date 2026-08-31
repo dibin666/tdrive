@@ -96,6 +96,15 @@ type TGAccount struct {
 	// AppHash is a credential and is only exposed to administrators, so it
 	// rides along here and is stripped by the API layer where appropriate.
 	AppHash string `json:"appHash"`
+	// ProxyURL routes this account's Telegram traffic through a SOCKS5 or HTTP
+	// proxy, empty meaning a direct connection. It is per account because that
+	// is the point: Telegram associates logins that share an exit address, so
+	// several accounts behind one IP invite exactly the risk control that a
+	// second account was added to avoid.
+	//
+	// It may embed a password, so it is never serialised directly; the API
+	// layer publishes a masked form instead.
+	ProxyURL string `json:"-"`
 	// SessionFile is relative to the data directory.
 	SessionFile string `json:"-"`
 	Enabled     bool   `json:"enabled"`

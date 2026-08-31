@@ -89,6 +89,89 @@ func TestSeedPrimaryAccountIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestAccountProxyPersistsAndCanBeCleared(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	account := TGAccount{
+		ID:          NewID(),
+		Label:       "backup",
+		AppID:       1234567,
+		AppHash:     "hash",
+		ProxyURL:    "socks5://proxy.example:1080",
+		SessionFile: "session-backup.json",
+		Enabled:     true,
+		Position:    1,
+	}
+	if err := db.InsertAccount(ctx, account); err != nil {
+		t.Fatalf("InsertAccount: %v", err)
+	}
+
+	stored, err := db.AccountByID(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("AccountByID: %v", err)
+	}
+	if stored.ProxyURL != account.ProxyURL {
+		t.Fatalf("stored proxy = %q, want %q", stored.ProxyURL, account.ProxyURL)
+	}
+
+	if err := db.SetAccountProxy(ctx, account.ID, ""); err != nil {
+		t.Fatalf("clear account proxy: %v", err)
+	}
+	cleared, err := db.AccountByID(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("AccountByID after clear: %v", err)
+	}
+	if cleared.ProxyURL != "" {
+		t.Fatalf("cleared proxy = %q, want empty", cleared.ProxyURL)
+	}
+}
+
+func TestAccountProxyColumnMigratesFromPreviousSchema(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "accounts.db")
+	db, err := Open(ctx, databasePath)
+	if err != nil {
+		t.Fatalf("Open initial database: %v", err)
+	}
+	if _, err := db.Write().ExecContext(ctx, `ALTER TABLE tg_accounts DROP COLUMN proxy_url`); err != nil {
+		db.Close()
+		t.Fatalf("remove proxy column from the previous schema: %v", err)
+	}
+	if _, err := db.Write().ExecContext(ctx, `PRAGMA user_version = 7`); err != nil {
+		db.Close()
+		t.Fatalf("mark database as the previous schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close previous database: %v", err)
+	}
+
+	migrated, err := Open(ctx, databasePath)
+	if err != nil {
+		t.Fatalf("Open migrated database: %v", err)
+	}
+	t.Cleanup(func() { migrated.Close() })
+
+	account := TGAccount{
+		ID:          NewID(),
+		Label:       "migrated",
+		AppID:       1234567,
+		AppHash:     "hash",
+		ProxyURL:    "http://proxy.example:8080",
+		SessionFile: "session-migrated.json",
+		Enabled:     true,
+	}
+	if err := migrated.InsertAccount(ctx, account); err != nil {
+		t.Fatalf("InsertAccount after migration: %v", err)
+	}
+	stored, err := migrated.AccountByID(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("AccountByID after migration: %v", err)
+	}
+	if stored.ProxyURL != account.ProxyURL {
+		t.Fatalf("migrated proxy = %q, want %q", stored.ProxyURL, account.ProxyURL)
+	}
+}
+
 // A fresh install has no credentials anywhere. Inventing an account row for it
 // would only produce one that can never connect.
 func TestSeedPrimaryAccountSkipsAFreshInstall(t *testing.T) {
