@@ -108,3 +108,4 @@ jobs:
           minor="${VERSION%.*}"
           for tag in latest "$VERSION" "$minor"; do
             docker buildx imagetools inspect "${IMAGE}:${tag}"
+          done
