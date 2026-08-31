@@ -36,6 +36,26 @@ type releaseFetcher interface {
 	Download(ctx context.Context, artifact tdriveplugin.Artifact, destPath string) (string, error)
 }
 
+// executableName returns the file name a plugin executable is stored under on
+// the given GOOS.
+//
+// Windows must have the .exe suffix, and not merely by convention. os/exec
+// resolves an absolute path through lookExtensions, which delegates to
+// findExecutable; that function only stats the path as given when it already
+// has an extension. For an extension-less path it tries the path plus each
+// PATHEXT entry and never stats the bare file at all, so exec.Command sets
+// cmd.Err = ErrNotFound and Start fails before CreateProcess is reached — even
+// though the file exists and is a valid executable image.
+//
+// goos is a parameter rather than a direct runtime.GOOS read so the naming
+// rule can be tested from any build platform.
+func executableName(name, goos string) string {
+	if goos == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
 // urlValidator decides whether the fetcher may request a URL. Production
 // always uses ValidateDownloadURL; the package tests substitute a permissive
 // one so they can serve a loopback test server, which ValidateDownloadURL

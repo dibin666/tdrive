@@ -353,7 +353,7 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 		return PluginStatus{}, fmt.Errorf("create plugin directory: %w", err)
 	}
 	stagingDir := filepath.Join(manager.cfg.Plugins.Dir, ".staging", inspection.Manifest.ID+"-"+database.NewID())
-	stagingBinary := filepath.Join(stagingDir, "plugin")
+	stagingBinary := filepath.Join(stagingDir, executableName("plugin", runtime.GOOS))
 	defer os.RemoveAll(stagingDir)
 
 	manager.mu.RLock()
@@ -374,7 +374,7 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 	if err != nil {
 		return PluginStatus{}, fmt.Errorf("encode plugin manifest: %w", err)
 	}
-	finalPath := filepath.Join(manager.cfg.Plugins.Dir, inspection.Manifest.ID)
+	finalPath := filepath.Join(manager.cfg.Plugins.Dir, executableName(inspection.Manifest.ID, runtime.GOOS))
 	oldRecord, oldRecordErr := manager.db.PluginByID(ctx, inspection.Manifest.ID)
 	if oldRecordErr != nil && !errors.Is(oldRecordErr, database.ErrNotFound) {
 		return PluginStatus{}, fmt.Errorf("read existing plugin metadata: %w", oldRecordErr)
@@ -465,6 +465,16 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 	manager.refreshDriveHooks()
 	if hadOldBinary {
 		_ = os.Remove(backupPath)
+	}
+	// An upgrade whose predecessor was installed under a different file name
+	// leaves that file behind, because the backup dance above only knows about
+	// finalPath. This happens when the naming rule itself changed — a Windows
+	// plugin installed before the .exe suffix was added.
+	if oldRecordErr == nil && oldRecord.BinaryPath != "" && oldRecord.BinaryPath != finalPath {
+		if err := os.Remove(oldRecord.BinaryPath); err != nil && !os.IsNotExist(err) {
+			manager.log.Warn("could not remove the previously installed plugin binary",
+				zap.String("plugin", record.ID), zap.String("path", oldRecord.BinaryPath), zap.Error(err))
+		}
 	}
 	manager.startEventBridge(ctx)
 	return manager.toStatus(record), nil

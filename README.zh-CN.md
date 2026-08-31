@@ -128,7 +128,7 @@ Telegram 上传分片只列出合法取值，存储分片滑杆的上限和步�
 
 管理员可以在“设置 → 插件”中从商店安装，或粘贴已发布的 `tdrive.plugin.json` 的 HTTPS 地址。清单会先检查——这一步不下载也不执行任何二进制——随后只需点击一次“确认安装”，tdrive 下载与本机平台对应的二进制，核对清单声明的 SHA-256，然后立即启动。插件是全信任代码：不做能力授权，安装提示也不是安全沙箱。
 
-插件以预编译二进制分发，服务器上不编译任何东西。镜像保持 distroless（无 Go 工具链、无 Git、无 shell），**单个容器即可运行全部功能**。插件 SDK、manifest、Host API、生命周期和商店提交要求见
+插件以预编译二进制分发，服务器上不编译任何东西。镜像保持 distroless（无 Go 工具链、无 Git、无 shell），**单个容器即可运行全部功能**。清单按 `goos/goarch` 分别声明二进制，因此插件在 Windows 版 tdrive 上同样可用。插件 SDK、manifest、Host API、生命周期和商店提交要求见
 [`docs/plugins.md`](docs/plugins.md)，默认空索引见 [`plugins/index.json`](plugins/index.json)。
 
 ## 多 Telegram 账号

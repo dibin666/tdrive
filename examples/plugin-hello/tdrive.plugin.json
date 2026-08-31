@@ -18,6 +18,10 @@
     "linux/arm64": {
       "url": "https://github.com/dibin666/tdrive/releases/download/plugin-hello-v0.1.0/plugin-hello-linux-arm64",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "windows/amd64": {
+      "url": "https://github.com/dibin666/tdrive/releases/download/plugin-hello-v0.1.0/plugin-hello-windows-amd64.exe",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     }
   },
   "capabilities": ["events", "http"],

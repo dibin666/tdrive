@@ -17,6 +17,27 @@ import (
 	tdriveplugin "github.com/dibin/tdrive/pkg/plugin"
 )
 
+// A plugin installed without the .exe suffix is unreachable on Windows:
+// os/exec's findExecutable never stats an extension-less path, it only tries
+// that path plus each PATHEXT entry, so Start fails with ErrNotFound before
+// CreateProcess is reached.
+func TestExecutableNameSuffixesWindowsBinaries(t *testing.T) {
+	tests := []struct {
+		name, goos, want string
+	}{
+		{"hello", "windows", "hello.exe"},
+		{"plugin", "windows", "plugin.exe"},
+		{"hello", "linux", "hello"},
+		{"hello", "darwin", "hello"},
+		{"hello", "freebsd", "hello"},
+	}
+	for _, test := range tests {
+		if got := executableName(test.name, test.goos); got != test.want {
+			t.Errorf("executableName(%q, %q) = %q, want %q", test.name, test.goos, got, test.want)
+		}
+	}
+}
+
 func TestValidateDownloadURL(t *testing.T) {
 	valid := []string{
 		"https://github.com/example/tdrive-plugin/releases/download/v1/tdrive.plugin.json",

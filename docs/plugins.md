@@ -121,12 +121,23 @@ SHA-256：
   "linux/arm64": {
     "url": "https://github.com/owner/my-plugin/releases/download/v1.2.0/my-plugin-linux-arm64",
     "sha256": "9c04…"
+  },
+  "windows/amd64": {
+    "url": "https://github.com/owner/my-plugin/releases/download/v1.2.0/my-plugin-windows-amd64.exe",
+    "sha256": "7ae2…"
   }
 }
 ```
 
 tdrive 只查找与自己 `GOOS/GOARCH` 完全一致的那一项。缺少对应平台时安装会失败，并在
 错误里列出该插件实际发布了哪些平台。
+
+tdrive 主程序发布 Linux 和 Windows 版本，插件两边都支持，`windows/amd64` 和
+`windows/arm64` 是合法的平台 key。**release 资产叫什么名字都行**：tdrive 下载后会
+按自己的规则重命名成 `<插件目录>/<id>`，在 Windows 上是 `<插件目录>/<id>.exe`。
+`.exe` 后缀不是习惯问题——Go 的 `os/exec` 解析绝对路径时，对没有扩展名的路径根本
+不会去 stat 它本身，只会尝试路径加上各个 `PATHEXT` 后缀，因此少了后缀会在
+`CreateProcess` 之前就以 `ErrNotFound` 失败。
 
 **`artifacts` 只写在 JSON 文件里，不要写进 Go 代码的 `Manifest()`。** 二进制不可能
 包含自身的 SHA-256——把摘要填进源码会改变被哈希的字节，永远算不出不动点。因此
@@ -216,12 +227,14 @@ upload download index telegram tree
 `sha256sum` 的结果填回 `artifacts`：
 
 ```bash
-for arch in amd64 arm64; do
-  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+for platform in linux/amd64 linux/arm64 windows/amd64; do
+  os="${platform%/*}"; arch="${platform#*/}"
+  suffix=""; [ "$os" = windows ] && suffix=.exe
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
     go build -trimpath -buildvcs=false \
-    -o "my-plugin-linux-$arch" ./cmd/my-plugin
+    -o "my-plugin-$os-$arch$suffix" ./cmd/my-plugin
 done
-sha256sum my-plugin-linux-*
+sha256sum my-plugin-*
 ```
 
 把二进制和填好摘要的 `tdrive.plugin.json` 一起作为 release 资产上传。管理员安装时
@@ -229,7 +242,8 @@ sha256sum my-plugin-linux-*
 
 ```bash
 gh release create v1.2.0 \
-  my-plugin-linux-amd64 my-plugin-linux-arm64 tdrive.plugin.json
+  my-plugin-linux-amd64 my-plugin-linux-arm64 my-plugin-windows-amd64.exe \
+  tdrive.plugin.json
 ```
 
 同样的事情在 GitHub Actions 里：
@@ -243,20 +257,21 @@ gh release create v1.2.0 \
     GH_TOKEN: ${{ github.token }}
   run: |
     set -euo pipefail
-    for arch in amd64 arm64; do
-      CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-        go build -trimpath -buildvcs=false \
-        -o "my-plugin-linux-$arch" ./cmd/my-plugin
-    done
-    # 用实际摘要替换 manifest 中的占位值。
-    for arch in amd64 arm64; do
-      digest="$(sha256sum "my-plugin-linux-$arch" | cut -d' ' -f1)"
-      jq --arg a "linux/$arch" --arg d "$digest" \
+    assets=()
+    for platform in linux/amd64 linux/arm64 windows/amd64; do
+      os="${platform%/*}"; arch="${platform#*/}"
+      suffix=""; [ "$os" = windows ] && suffix=.exe
+      asset="my-plugin-$os-$arch$suffix"
+      CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+        go build -trimpath -buildvcs=false -o "$asset" ./cmd/my-plugin
+      # 用实际摘要替换 manifest 中的占位值。
+      digest="$(sha256sum "$asset" | cut -d' ' -f1)"
+      jq --arg a "$platform" --arg d "$digest" \
         '.artifacts[$a].sha256 = $d' tdrive.plugin.json > tmp.json
       mv tmp.json tdrive.plugin.json
+      assets+=("$asset")
     done
-    gh release create "$GITHUB_REF_NAME" \
-      my-plugin-linux-amd64 my-plugin-linux-arm64 tdrive.plugin.json
+    gh release create "$GITHUB_REF_NAME" "${assets[@]}" tdrive.plugin.json
 ```
 
 本地调试示例插件：
@@ -342,7 +357,7 @@ HTTPS JSON 文件，格式如下：
 - 源码、文档、清单和二进制地址都使用公开 HTTPS；禁止把 token、密码、私钥或 Telegram 凭据提交到仓库。
 - `manifestUrl` 指向不可变地址（release 资产，或带 tag 的 raw 地址），不能指向分支。
 - `manifestDigest` 是该清单文件的 SHA-256，安装时仍会重新核对。
-- 清单的 `artifacts` 至少覆盖 Linux `amd64` 和 `arm64`，二进制以 `CGO_ENABLED=0`、`-trimpath` 构建；如果项目只支持其中一个架构，必须在条目中明确说明。
+- 清单的 `artifacts` 至少覆盖 `linux/amd64` 和 `linux/arm64`，二进制以 `CGO_ENABLED=0`、`-trimpath` 构建；建议同时提供 `windows/amd64`。只支持部分平台时必须在条目中明确说明。
 - 每个 `artifacts` 条目的 `sha256` 与实际发布的二进制一致，且发布后不再替换同名资产。
 - manifest 提供作者、许可证、源码仓库和文档地址；建议同时提供安全联系方式。
 - README 说明功能、Hook、外部服务、数据处理和已知风险，并提供可运行测试。

@@ -132,7 +132,9 @@ it. Plugins are full-trust code: no capability authorization is applied, and the
 warning is not a sandbox guarantee.
 
 Plugins ship as prebuilt release binaries, so nothing is compiled on the server. The image stays
-distroless — no Go toolchain, no Git, no shell — and **one container runs everything**.
+distroless — no Go toolchain, no Git, no shell — and **one container runs everything**. A manifest
+declares one binary per `goos/goarch`, so plugins work on the Windows builds of tdrive as well as
+the Linux ones.
 Plugin SDK, manifest, Host API, lifecycle, and store submission requirements are documented in
 [`docs/plugins.md`](docs/plugins.md). The default empty store index is
 [`plugins/index.json`](plugins/index.json).
