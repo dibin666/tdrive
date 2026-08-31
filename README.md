@@ -156,9 +156,14 @@ Adding an account is three steps, which the Web UI walks through:
    primary promotes it with **post, edit and delete** rights. Edit and delete are not optional:
    renaming, moving and deleting a file rewrite messages other accounts wrote.
 
-If the primary account did not create the channel it may not be allowed to grant admin rights, and
-that step fails with a message saying so. Promote the account by hand in a Telegram client, ticking
-those same three rights.
+Step 3 checks first whether the account is **already in the channel** — including one somebody added
+by hand in a Telegram client — and simply records it when it is, without exporting any invite.
+
+If the primary account did not create the channel, or was migrated to a different Telegram account,
+it may not be allowed to export an invite or grant admin rights, and the automatic join fails with a
+message saying so. Use **pick the channel by hand** (手动选择频道) on the account's card instead: add the
+account to the storage channel in a Telegram client, promote it with those same three rights, then
+choose the row marked as the storage channel. That route does not involve the primary account at all.
 
 ### Isolation and scheduling
 

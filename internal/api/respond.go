@@ -103,6 +103,11 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		})
 	case errors.Is(err, tgc.ErrInvalidSession):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, tgc.ErrNotInChannel):
+		// The account is signed in but is not in the storage channel. That is a
+		// configuration gap somebody has to close, not an outage, so it must
+		// not read as a server fault.
+		writeJSON(w, http.StatusConflict, errorBody{Error: err.Error(), Code: "not_in_channel"})
 	default:
 		var pathErr *drive.PathError
 		if errors.As(err, &pathErr) {

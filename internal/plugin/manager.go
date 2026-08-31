@@ -435,6 +435,17 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 	if oldRecordErr == nil {
 		oldRecord = manager.normalizePluginRecord(oldRecord)
 	}
+	// #region DEBUG H4 plugin update filesystem paths
+	writePluginDebugLog("H4", "internal/plugin/manager.go:440", "plugin update paths resolved", map[string]any{
+		"pluginID":      inspection.Manifest.ID,
+		"isUpdate":      oldRecordErr == nil,
+		"finalPath":     finalPath,
+		"finalPresent":  fileExists(finalPath),
+		"oldBinaryPath": oldRecord.BinaryPath,
+		"oldPresent":    oldRecordErr == nil && fileExists(oldRecord.BinaryPath),
+		"stagingBinary": stagingBinary,
+	})
+	// #endregion
 	oldActive := manager.takeActive(inspection.Manifest.ID)
 	if oldActive != nil {
 		manager.stopRuntime(ctx, oldActive)
@@ -518,6 +529,15 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 	manager.mu.Lock()
 	manager.active[record.ID] = loaded
 	manager.mu.Unlock()
+	// #region DEBUG H4 plugin update runtime installed
+	writePluginDebugLog("H4", "internal/plugin/manager.go:506", "plugin runtime replaced after install", map[string]any{
+		"pluginID":       record.ID,
+		"finalPath":      finalPath,
+		"pluginDataDir":  manager.pluginDataDir(record),
+		"binaryPresent":  fileExists(finalPath),
+		"oldActiveFound": oldActive != nil,
+	})
+	// #endregion
 	manager.refreshDriveHooks()
 	if hadOldBinary {
 		_ = os.Remove(backupPath)
@@ -713,7 +733,18 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	originalBinaryPath := record.BinaryPath
 	record = manager.normalizePluginRecord(record)
+	// #region DEBUG H1/H4 plugin record path normalization
+	writePluginDebugLog("H1", "internal/plugin/manager.go:710", "plugin record path normalized", map[string]any{
+		"pluginID":             record.ID,
+		"originalBinaryPath":   originalBinaryPath,
+		"normalizedBinaryPath": record.BinaryPath,
+		"pathChanged":          originalBinaryPath != record.BinaryPath,
+		"pluginDir":             manager.cfg.Plugins.Dir,
+		"serverDataDir":         manager.cfg.Server.DataDir,
+	})
+	// #endregion
 	if record.BinaryPath == "" {
 		return nil, errors.New("plugin binary path is empty")
 	}
@@ -733,8 +764,22 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 	if manifest.ID != record.ID {
 		return nil, fmt.Errorf("plugin manifest id %q does not match installed id %q", manifest.ID, record.ID)
 	}
-	if _, err := os.Stat(record.BinaryPath); err != nil {
-		return nil, fmt.Errorf("stat plugin binary: %w", err)
+	binaryInfo, binaryStatErr := os.Stat(record.BinaryPath)
+	// #region DEBUG H4 plugin executable filesystem check
+	writePluginDebugLog("H4", "internal/plugin/manager.go:737", "plugin executable filesystem check", map[string]any{
+		"pluginID":   record.ID,
+		"binaryPath": record.BinaryPath,
+		"statOK":     binaryStatErr == nil,
+		"notFound":   os.IsNotExist(binaryStatErr),
+		"isDirectory": binaryStatErr == nil && binaryInfo.IsDir(),
+		"size":       pluginBinarySize(binaryInfo),
+	})
+	// #endregion
+	if binaryStatErr != nil {
+		return nil, fmt.Errorf("stat plugin binary: %w", binaryStatErr)
+	}
+	if binaryInfo.IsDir() {
+		return nil, fmt.Errorf("plugin binary path is a directory: %s", record.BinaryPath)
 	}
 	checksum, err := hex.DecodeString(record.BinaryDigest)
 	if err != nil || len(checksum) != sha256.Size {
@@ -749,6 +794,15 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create plugin data directory: %w", err)
 	}
+	// #region DEBUG H1/H4 plugin child data directory
+	writePluginDebugLog("H1", "internal/plugin/manager.go:764", "plugin child data directory resolved", map[string]any{
+		"pluginID":       record.ID,
+		"binaryPath":     record.BinaryPath,
+		"pluginDataDir":  dataDir,
+		"dataDirExists":  directoryExists(dataDir),
+		"dataDirEnvKey":  pluginDataDirEnv,
+	})
+	// #endregion
 
 	command := exec.Command(record.BinaryPath)
 	command.Env = pluginEnvironment(dataDir)
@@ -767,6 +821,13 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 	})
 	protocol, err := process.Client()
 	if err != nil {
+		// #region DEBUG H4 plugin child connection failed
+		writePluginDebugLog("H4", "internal/plugin/manager.go:794", "plugin child connection failed", map[string]any{
+			"pluginID":   record.ID,
+			"binaryPath": record.BinaryPath,
+			"dataDir":    dataDir,
+		})
+		// #endregion
 		process.Kill()
 		return nil, fmt.Errorf("connect plugin process: %w", err)
 	}
@@ -799,7 +860,34 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 		process.Kill()
 		return nil, fmt.Errorf("initialize plugin: %w", err)
 	}
+	// #region DEBUG H4 plugin child initialized
+	writePluginDebugLog("H4", "internal/plugin/manager.go:829", "plugin child initialized", map[string]any{
+		"pluginID":      record.ID,
+		"binaryPath":    record.BinaryPath,
+		"pluginDataDir": dataDir,
+	})
+	// #endregion
 	return &activePlugin{record: record, manifest: manifest, process: process, protocol: protocol, client: client}, nil
+}
+
+func pluginBinarySize(info os.FileInfo) int64 {
+	if info == nil {
+		return -1
+	}
+	return info.Size()
+}
+
+func directoryExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func (manager *Manager) normalizePluginRecord(record database.PluginRecord) database.PluginRecord {
@@ -895,13 +983,22 @@ func (manager *Manager) pluginDataDir(record database.PluginRecord) string {
 // depend on the host process environment.
 func pluginEnvironment(dataDir string) []string {
 	env := make([]string, 0, len(os.Environ())+1)
+	removedOverrideCount := 0
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.EqualFold(key, pluginDataDirEnv) {
+			removedOverrideCount++
 			continue
 		}
 		env = append(env, entry)
 	}
+	// #region DEBUG H1 child environment construction
+	writePluginDebugLog("H1", "internal/plugin/manager.go:882", "plugin child environment constructed", map[string]any{
+		"dataDir":              dataDir,
+		"removedInheritedKeys": removedOverrideCount,
+		"appendedOverride":     true,
+	})
+	// #endregion
 	return append(env, pluginDataDirEnv+"="+dataDir)
 }
 

@@ -468,6 +468,14 @@ export interface ChannelOption {
   participants?: number
 }
 
+/** What one Telegram account can see, next to the channel this drive actually
+ *  stores into — enough for the picker to point at the right row instead of
+ *  asking someone to recognise a channel by name. */
+export interface AccountChannels {
+  channels: ChannelOption[]
+  storage: { tgId: number; title: string }
+}
+
 export interface Stats {
   dirs: number
   files: number
@@ -759,6 +767,13 @@ export const api = {
     request<void>(`/tg/accounts/${id}`, { method: 'DELETE' }),
   joinStorageChannel: (id: string) =>
     request<{ canPost: boolean }>(`/tg/accounts/${id}/join-channel`, { method: 'POST' }),
+  accountChannels: (id: string) =>
+    request<AccountChannels>(`/tg/accounts/${id}/channels`),
+  linkAccountChannel: (id: string, tgId: number) =>
+    request<{ canPost: boolean }>(`/tg/accounts/${id}/channel`, {
+      method: 'POST',
+      body: json({ tgId }),
+    }),
   accountSendCode: (id: string, phone: string) =>
     request<{ delivery: string; codeLength?: number; alreadyAuthorized: boolean }>(
       `/tg/accounts/${id}/login/code`,

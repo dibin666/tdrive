@@ -52,6 +52,10 @@ func (m *Manager) ChannelRef(ctx context.Context, channelID string) (drive.Chann
 // ErrNotInChannel marks an account that cannot reach the storage channel,
 // which is a configuration problem rather than a transient failure: the
 // account has to be invited and given posting rights before it can be used.
+//
+// It is raised both here, from the drive's own bookkeeping, and by FindChannel,
+// which asks Telegram itself. The two agree on what it means: this account is
+// not in that channel.
 var ErrNotInChannel = errors.New("tgc: account is not a member of the storage channel")
 
 // Upload streams one document into a channel.

@@ -168,6 +168,10 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 // handleAccountJoinChannel admits an account to the storage channel and gives
 // it the rights the drive needs. It is the step between "signed in" and
 // "actually carrying transfers".
+//
+// An account that was already added by hand in a Telegram client is detected
+// here rather than invited again, so pressing this after doing it manually is
+// the supported way to finish the job.
 func (s *Server) handleAccountJoinChannel(w http.ResponseWriter, r *http.Request) {
 	manager, ok := s.accounts.Manager(chi.URLParam(r, "id"))
 	if !ok {
@@ -184,6 +188,69 @@ func (s *Server) handleAccountJoinChannel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.audit(r, database.AuditSettingsUpdate, manager.ID(), "admitted a telegram account to the storage channel")
+	writeJSON(w, http.StatusOK, map[string]any{"canPost": true})
+}
+
+// handleAccountChannels lists the channels this account can see from its own
+// session, so the storage channel can be pointed at by hand when the automatic
+// join cannot work — a primary that may not export invites, or an account that
+// was added to the channel manually.
+func (s *Server) handleAccountChannels(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+
+	manager, ok := s.accountFromPath(w, r)
+	if !ok {
+		return
+	}
+	channel, err := s.db.DefaultChannel(r.Context())
+	if err != nil {
+		s.fail(w, err, "list the channels of a telegram account")
+		return
+	}
+	channels, err := manager.ListChannels(r.Context())
+	if err != nil {
+		s.failAccount(w, err, "list the channels of a telegram account")
+		return
+	}
+
+	// The storage channel is sent along so the picker can point at the right
+	// row instead of asking someone to recognise a channel by name.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channels": channels,
+		"storage": map[string]any{
+			"tgId":  channel.TGID,
+			"title": channel.Title,
+		},
+	})
+}
+
+type linkAccountChannelRequest struct {
+	TGID int64 `json:"tgId"`
+}
+
+// handleAccountLinkChannel adopts a channel the operator picked as this
+// account's view of the storage channel. The account must already be in it;
+// this only records what its own session sees.
+func (s *Server) handleAccountLinkChannel(w http.ResponseWriter, r *http.Request) {
+	manager, ok := s.accountFromPath(w, r)
+	if !ok {
+		return
+	}
+	var req linkAccountChannelRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	channel, err := s.db.DefaultChannel(r.Context())
+	if err != nil {
+		s.fail(w, err, "link the storage channel to a telegram account")
+		return
+	}
+	if err := s.accounts.LinkChannel(r.Context(), manager, channel, req.TGID); err != nil {
+		s.failAccount(w, err, "link the storage channel to a telegram account")
+		return
+	}
+	s.audit(r, database.AuditSettingsUpdate, manager.ID(),
+		"linked a telegram account to the storage channel by hand")
 	writeJSON(w, http.StatusOK, map[string]any{"canPost": true})
 }
 
@@ -262,6 +329,20 @@ func (s *Server) failAccount(w http.ResponseWriter, err error, action string) {
 				"请在 Telegram 客户端里手动把这个账号设为管理员，并勾选发消息、编辑消息和删除消息。")
 	case errors.Is(err, tgc.ErrNotReady):
 		writeError(w, http.StatusConflict, "请先让这个账号登录 Telegram，再把它加入存储频道")
+	case errors.Is(err, tgc.ErrPrimaryNotInChannel):
+		writeError(w, http.StatusConflict,
+			"主账号看不到存储频道，所以没法自动邀请别的账号进去（通常是主账号换过号、或者被移出了频道）。"+
+				"请用这个账号在 Telegram 客户端里加入该频道，然后用「手动选择频道」把它对上。")
+	case errors.Is(err, tgc.ErrNotInChannel):
+		writeError(w, http.StatusConflict,
+			"这个账号还不在存储频道里。请先在 Telegram 客户端里用它加入频道，再回来点一次——加入之后这里会自动认出来。")
+	case errors.Is(err, tgc.ErrNoPostRights):
+		writeError(w, http.StatusConflict,
+			"这个账号在频道里，但没有发消息权限。请在 Telegram 客户端里把它设为管理员，"+
+				"并勾选发消息、编辑消息和删除消息。")
+	case errors.Is(err, tgc.ErrWrongChannel):
+		writeError(w, http.StatusBadRequest,
+			"选中的频道不是这个网盘正在使用的存储频道，请选列表里标着「存储频道」的那个。")
 	default:
 		s.fail(w, err, action)
 	}

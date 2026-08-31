@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // A tdrive drive lives in one Telegram channel. A private broadcast channel is
@@ -217,7 +218,52 @@ func (m *Manager) ResolveChannel(ctx context.Context, tgID, accessHash int64) (C
 			CanPost:    ch.Creator || ch.AdminRights.PostMessages,
 		}, nil
 	}
-	return ChannelInfo{}, fmt.Errorf("channel %d is not reachable from this account", tgID)
+	return ChannelInfo{}, fmt.Errorf("%w: channel %d is not reachable from this account", ErrNotInChannel, tgID)
+}
+
+// FindChannel returns this account's own view of a channel: first through the
+// access hash it was given, and failing that by looking the channel up in the
+// account's own channel list.
+//
+// The fallback is what makes membership detectable at all. An access hash is
+// minted for one account, so the one stored on the channel row — whichever
+// account resolved it last — means nothing to a second account, and Telegram
+// rejects it with CHANNEL_INVALID. That failure says nothing about whether this
+// account is in the channel, and an account that joined by hand in a Telegram
+// client is found here without any invite being exported.
+func (m *Manager) FindChannel(ctx context.Context, tgID, accessHash int64) (ChannelInfo, error) {
+	if !m.Ready() {
+		return ChannelInfo{}, ErrNotReady
+	}
+
+	if accessHash != 0 {
+		info, err := m.ResolveChannel(ctx, tgID, accessHash)
+		if err == nil {
+			return info, nil
+		}
+		if !isChannelUnreachable(err) {
+			return ChannelInfo{}, err
+		}
+	}
+
+	channels, err := m.ListChannels(ctx)
+	if err != nil {
+		return ChannelInfo{}, err
+	}
+	for _, info := range channels {
+		if info.TGID == tgID {
+			return info, nil
+		}
+	}
+	return ChannelInfo{}, fmt.Errorf("%w (channel %d)", ErrNotInChannel, tgID)
+}
+
+// isChannelUnreachable reports whether an error only means "this account cannot
+// use that channel reference", which is worth retrying through the dialog list
+// rather than reporting as a failure.
+func isChannelUnreachable(err error) bool {
+	return errors.Is(err, ErrNotInChannel) ||
+		tgerr.Is(err, "CHANNEL_INVALID", "CHANNEL_PRIVATE", "PEER_ID_INVALID", "CHAT_ID_INVALID")
 }
 
 // InputChannel builds the peer reference used by every message call.

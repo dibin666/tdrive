@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { Plus, Radio, RefreshCw, Trash2, UserPlus } from 'lucide-react'
-import { api, type TelegramAccount } from '../../lib/api'
+import { Check, Hash, Plus, Radio, RefreshCw, Trash2, UserPlus } from 'lucide-react'
+import { api, type AccountChannels, type TelegramAccount } from '../../lib/api'
 import { Button, Field, Input, Modal, Spinner, toast } from '../../components/primitives'
 import { Section, StatusDot } from './shared'
 
@@ -17,6 +17,11 @@ import { Section, StatusDot } from './shared'
  * The second thing is that an account is not useful until it is both signed in
  * and admitted to the storage channel, so every card says plainly which of
  * those it is still missing.
+ *
+ * Admission itself comes in two flavours. "加入存储频道" lets the server do it,
+ * which also detects an account somebody already added by hand. When that
+ * cannot work — a primary that may not export invites — the channel is picked
+ * directly out of the account's own channel list instead.
  */
 
 export function AccountsSection({
@@ -29,6 +34,8 @@ export function AccountsSection({
   const [accounts, setAccounts] = useState<TelegramAccount[] | null>(null)
   const [adding, setAdding] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+  // The account whose channel list is open, if any.
+  const [picking, setPicking] = useState<TelegramAccount | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -91,6 +98,7 @@ export function AccountsSection({
               onJoin={() =>
                 void act(account.id, '已加入存储频道', () => api.joinStorageChannel(account.id))
               }
+              onPickChannel={() => setPicking(account)}
               onToggle={() =>
                 void act(
                   account.id,
@@ -129,6 +137,25 @@ export function AccountsSection({
           }}
         />
       </Modal>
+
+      <Modal
+        open={picking !== null}
+        onClose={() => setPicking(null)}
+        title="手动选择存储频道"
+        description={`挑出「${picking?.label || '这个账号'}」看到的存储频道，把它对上。`}
+        width="max-w-lg"
+      >
+        {picking && (
+          <ChannelPicker
+            accountId={picking.id}
+            onLinked={async () => {
+              setPicking(null)
+              await reload()
+              await onChanged()
+            }}
+          />
+        )}
+      </Modal>
     </Section>
   )
 }
@@ -138,6 +165,7 @@ function AccountCard({
   hasChannel,
   busy,
   onJoin,
+  onPickChannel,
   onToggle,
   onRemove,
 }: {
@@ -145,11 +173,13 @@ function AccountCard({
   hasChannel: boolean
   busy: boolean
   onJoin: () => void
+  onPickChannel: () => void
   onToggle: () => void
   onRemove: () => void
 }) {
   const cooldown = Math.ceil((account.status.cooldownMs ?? 0) / 1000)
   const { tone, label } = describe(account, cooldown)
+  const needsChannel = hasChannel && account.status.state === 'ready' && !account.canPost
 
   return (
     <div
@@ -185,10 +215,18 @@ function AccountCard({
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2">
-          {hasChannel && account.status.state === 'ready' && !account.canPost && (
-            <Button icon={<Radio size={14} />} loading={busy} onClick={onJoin}>
-              加入存储频道
-            </Button>
+          {needsChannel && (
+            <>
+              <Button icon={<Radio size={14} />} loading={busy} onClick={onJoin}>
+                加入存储频道
+              </Button>
+              {/* The way out when the automatic join cannot work, and the way
+                  in for an account somebody already added in a Telegram
+                  client. */}
+              <Button icon={<Hash size={14} />} disabled={busy} onClick={onPickChannel}>
+                手动选择频道
+              </Button>
+            </>
           )}
           {!account.isPrimary && (
             <>
@@ -202,6 +240,125 @@ function AccountCard({
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Pointing one account at the storage channel by hand.
+ *
+ * The list is what that account's own Telegram session can see, so the storage
+ * channel appears in it the moment somebody adds the account to the channel in
+ * a Telegram client — which is the whole point: no invite is exported, and the
+ * primary account is not involved at all.
+ *
+ * Rows other than the storage channel stay clickable rather than being hidden.
+ * Picking one is refused by the server with a plain explanation, which is much
+ * easier to act on than a list that silently omits what someone is looking for.
+ */
+function ChannelPicker({
+  accountId,
+  onLinked,
+}: {
+  accountId: string
+  onLinked: () => Promise<void>
+}) {
+  const [data, setData] = useState<AccountChannels | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [linkingTgId, setLinkingTgId] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setData(await api.accountChannels(accountId))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [accountId])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const link = async (tgId: number) => {
+    setLinkingTgId(tgId)
+    setError(null)
+    try {
+      await api.linkAccountChannel(accountId, tgId)
+      toast('已对上存储频道', 'success')
+      await onLinked()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLinkingTgId(null)
+    }
+  }
+
+  const storageChannelFound = data?.channels.some((c) => c.tgId === data.storage.tgId) ?? false
+
+  return (
+    <div className="space-y-4">
+      <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
+        下面是这个账号自己能看到的频道。选中标着「存储频道」的那个就行——它必须已经加入该频道，
+        并且拥有发消息、编辑消息和删除消息的权限。
+      </p>
+
+      {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
+
+      {loading && data === null ? (
+        <div className="flex justify-center py-8">
+          <Spinner />
+        </div>
+      ) : data === null ? null : data.channels.length === 0 ? (
+        <p className="py-6 text-center text-sm text-[var(--muted)]">
+          这个账号一个频道都看不到。请先在 Telegram 客户端里用它加入「{data.storage.title}」。
+        </p>
+      ) : (
+        <div className="max-h-64 space-y-1 overflow-y-auto">
+          {data.channels.map((channel) => {
+            const isStorage = channel.tgId === data.storage.tgId
+            return (
+              <button
+                key={channel.tgId}
+                disabled={linkingTgId !== null}
+                onClick={() => void link(channel.tgId)}
+                className="row w-full justify-between disabled:cursor-not-allowed disabled:opacity-45"
+                data-selected={isStorage}
+              >
+                <span className="min-w-0 truncate text-sm">{channel.title}</span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                  {!channel.canPost && <span className="chip">只读</span>}
+                  {isStorage && (
+                    <span className="chip inline-flex items-center gap-1">
+                      <Check size={12} />
+                      存储频道
+                    </span>
+                  )}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {data !== null && !storageChannelFound && data.channels.length > 0 && (
+        <p className="text-xs leading-relaxed text-[var(--muted)]">
+          列表里没有「{data.storage.title}」。请先在 Telegram 客户端里用这个账号加入该频道，再点下面的刷新。
+        </p>
+      )}
+
+      <Button
+        icon={<RefreshCw size={14} />}
+        className="w-full"
+        loading={loading}
+        onClick={() => void load()}
+      >
+        刷新频道列表
+      </Button>
     </div>
   )
 }
@@ -262,6 +419,7 @@ function AddAccountFlow({
   const [hint, setHint] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pickingChannel, setPickingChannel] = useState(false)
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true)
@@ -437,6 +595,27 @@ function AddAccountFlow({
     )
   }
 
+  // Picking the channel by hand takes over the step entirely, because the two
+  // routes ask for different things and showing both at once reads as if the
+  // channel had to be joined twice.
+  if (pickingChannel) {
+    return (
+      <div className="space-y-4">
+        <p className="text-xs leading-relaxed text-[var(--muted)]">
+          自动加入没成功。用这个账号在 Telegram 客户端里加入存储频道（并给它管理员权限），
+          然后在下面把频道对上。
+        </p>
+        <ChannelPicker accountId={accountId} onLinked={onDone} />
+        <button
+          onClick={() => setPickingChannel(false)}
+          className="w-full text-xs text-[var(--muted)] transition-colors hover:text-[var(--ink)]"
+        >
+          返回，再试一次自动加入
+        </button>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-4">
       <p className="text-xs leading-relaxed text-[var(--muted)]">
@@ -457,6 +636,14 @@ function AddAccountFlow({
         }
       >
         加入存储频道
+      </Button>
+      <Button
+        icon={<Hash size={14} />}
+        className="w-full"
+        disabled={busy}
+        onClick={() => setPickingChannel(true)}
+      >
+        手动选择频道
       </Button>
       <button
         onClick={() => void onDone()}

@@ -293,9 +293,15 @@ type selectChannelRequest struct {
 	AccessHash int64 `json:"accessHash"`
 }
 
-// handleSelectChannel adopts an existing channel. The channel is re-resolved
-// first: a stale access hash would let the selection succeed and then break
-// every subsequent upload and download.
+// handleSelectChannel adopts an existing channel. The channel is looked up
+// again first: a stale access hash would let the selection succeed and then
+// break every subsequent upload and download.
+//
+// The lookup goes through FindChannel rather than a bare resolve because the
+// channel list the picker was drawn from carries no access hashes — they are
+// credentials of a sort, and are deliberately not sent to the browser — so the
+// channel is recognised by its id and its hash is read from the account's own
+// session.
 func (s *Server) handleSelectChannel(w http.ResponseWriter, r *http.Request) {
 	var req selectChannelRequest
 	if !decodeJSON(w, r, &req) {
@@ -307,7 +313,7 @@ func (s *Server) handleSelectChannel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "select channel")
 		return
 	}
-	info, err := manager.ResolveChannel(r.Context(), req.TGID, req.AccessHash)
+	info, err := manager.FindChannel(r.Context(), req.TGID, req.AccessHash)
 	if err != nil {
 		s.fail(w, err, "select channel")
 		return

@@ -218,6 +218,11 @@ func (s *Server) Routes() http.Handler {
 					r.Patch("/{id}", s.handleUpdateAccount)
 					r.Delete("/{id}", s.handleDeleteAccount)
 					r.Post("/{id}/join-channel", s.handleAccountJoinChannel)
+					// The channels one account can see, and the pick that
+					// links it to the storage channel by hand when the
+					// automatic join cannot do it.
+					r.Get("/{id}/channels", s.handleAccountChannels)
+					r.Post("/{id}/channel", s.handleAccountLinkChannel)
 					r.Post("/{id}/login/code", s.handleAccountSendCode)
 					r.Post("/{id}/login/signin", s.handleAccountSignIn)
 					r.Post("/{id}/login/password", s.handleAccountPassword)
