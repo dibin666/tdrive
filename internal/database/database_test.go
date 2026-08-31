@@ -336,6 +336,16 @@ func TestPluginMetadataAndDataAreIndependentFromDriveIndex(t *testing.T) {
 	if updated.Enabled || updated.Status != PluginStatusDisabled {
 		t.Fatalf("plugin state was not updated: %+v", updated)
 	}
+	updated, err = db.UpdatePluginStatus(ctx, pluginRecord.ID, PluginStatusError, "temporary failure")
+	if err != nil {
+		t.Fatalf("UpdatePluginStatus: %v", err)
+	}
+	if updated.Enabled || updated.Status != PluginStatusError || updated.Error != "temporary failure" {
+		t.Fatalf("status update changed the wrong fields: %+v", updated)
+	}
+	if _, err := db.UpdatePluginStatusIfEnabled(ctx, pluginRecord.ID, PluginStatusActive, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("UpdatePluginStatusIfEnabled on disabled plugin = %v, want ErrNotFound", err)
+	}
 	plugins, err := db.ListPlugins(ctx)
 	if err != nil || len(plugins) != 1 {
 		t.Fatalf("ListPlugins = %#v, %v", plugins, err)

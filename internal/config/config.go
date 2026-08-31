@@ -255,6 +255,11 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	pluginDir := envStr("TDRIVE_PLUGIN_DIR", filepath.Join(dataDir, "plugins"))
+	pluginDir, err = filepath.Abs(pluginDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve plugin dir %q: %w", pluginDir, err)
+	}
 
 	cfg := &Config{
 		Server: Server{
@@ -309,7 +314,7 @@ func Load() (*Config, error) {
 			Root: localRoot,
 		},
 		Plugins: Plugins{
-			Dir:            envStr("TDRIVE_PLUGIN_DIR", filepath.Join(dataDir, "plugins")),
+			Dir:            pluginDir,
 			StoreURL:       strings.TrimSuffix(envStrAllowEmpty("TDRIVE_PLUGIN_STORE_URL", "https://raw.githubusercontent.com/dibin666/tdrive/main/plugins/index.json"), "/"),
 			MaxBinaryBytes: envSize("TDRIVE_PLUGIN_MAX_BINARY_BYTES", DefaultPluginBinaryLimit),
 		},

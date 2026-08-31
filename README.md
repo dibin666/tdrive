@@ -87,7 +87,7 @@ Visit `http://localhost:8080` after launch; a setup wizard will appear on first 
 | `TDRIVE_CACHE_DIR` | `<data dir>/cache` | Where staged downloads are assembled |
 | `TDRIVE_CACHE_LIMIT` | `20GiB` | Disk the staging cache may hold; 0 disables staging |
 | `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | Parallel connections one download may hold |
-| `TDRIVE_PLUGIN_DIR` | `<data dir>/plugins` | Installed plugin binaries |
+| `TDRIVE_PLUGIN_DIR` | `<data dir>/plugins` | Installed plugin binaries and temporary files; plugin private data is kept under `<data dir>/plugin-data/<plugin id>` |
 | `TDRIVE_PLUGIN_STORE_URL` | *(empty)* | HTTPS plugin store index; empty disables the store |
 | `TDRIVE_PLUGIN_MAX_BINARY_BYTES` | `256MiB` | Maximum downloaded plugin binary size |
 

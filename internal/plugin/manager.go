@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ import (
 const (
 	inspectionLifetime = 10 * time.Minute
 	pluginCallTimeout  = 30 * time.Second
+	pluginDataDirEnv   = "TDRIVE_PLUGIN_DATA_DIR"
 )
 
 // Inspection is the one-time manifest review shown by the WebUI before an
@@ -96,7 +98,23 @@ type activePlugin struct {
 	manifest tdriveplugin.Manifest
 	process  *goPlugin.Client
 	protocol goPlugin.ClientProtocol
-	client   *tdriveplugin.Client
+	client   pluginRuntimeClient
+	// failed keeps the public route declared while excluding an unavailable
+	// child from core hooks and event delivery. A dead plugin must not make
+	// unrelated file operations fail while it is being restarted.
+	failed bool
+}
+
+// pluginRuntimeClient is the part of the SDK client used after a plugin has
+// been started. Keeping the small interface here makes the failure/recovery
+// path testable without starting a child process, and more importantly keeps
+// the active route alive while a dead child is being replaced.
+type pluginRuntimeClient interface {
+	Before(context.Context, tdriveplugin.Operation) (tdriveplugin.OperationResult, error)
+	After(context.Context, tdriveplugin.Operation) error
+	OnEvent(context.Context, tdriveplugin.Event) error
+	HandleHTTP(context.Context, tdriveplugin.HTTPRequest) (tdriveplugin.HTTPResponse, error)
+	Shutdown(context.Context) error
 }
 
 type pendingInspection struct {
@@ -122,6 +140,10 @@ type Manager struct {
 	mu           sync.RWMutex
 	hooksEnabled atomic.Bool
 	active       map[string]*activePlugin
+	recovering   map[string]bool
+	recoveryCtx  context.Context
+	recoveryStop context.CancelFunc
+	recoveryWG   sync.WaitGroup
 	inspections  map[string]pendingInspection
 	eventsStop   context.CancelFunc
 	closed       bool
@@ -150,17 +172,21 @@ func New(
 	if log == nil {
 		log = zap.NewNop()
 	}
+	recoveryCtx, recoveryStop := context.WithCancel(context.Background())
 	return &Manager{
-		cfg:         cfg,
-		db:          db,
-		auth:        authSvc,
-		drive:       driveSvc,
-		tg:          tgm,
-		broker:      broker,
-		log:         log,
-		fetcher:     newHTTPFetcher(cfg.Plugins.MaxBinaryBytes),
-		active:      make(map[string]*activePlugin),
-		inspections: make(map[string]pendingInspection),
+		cfg:          cfg,
+		db:           db,
+		auth:         authSvc,
+		drive:        driveSvc,
+		tg:           tgm,
+		broker:       broker,
+		log:          log,
+		fetcher:      newHTTPFetcher(cfg.Plugins.MaxBinaryBytes),
+		active:       make(map[string]*activePlugin),
+		recovering:   make(map[string]bool),
+		recoveryCtx:  recoveryCtx,
+		recoveryStop: recoveryStop,
+		inspections:  make(map[string]pendingInspection),
 	}
 }
 
@@ -187,6 +213,14 @@ func (manager *Manager) Start(ctx context.Context) error {
 			if _, stateErr := manager.db.UpdatePluginState(ctx, record.ID, true, database.PluginStatusError, err.Error()); stateErr != nil {
 				manager.log.Warn("could not record plugin startup failure", zap.String("plugin", record.ID), zap.Error(stateErr))
 			}
+			if placeholder := unavailableRuntime(record, err); placeholder != nil {
+				manager.mu.Lock()
+				if !manager.closed {
+					manager.active[record.ID] = placeholder
+				}
+				manager.mu.Unlock()
+				manager.scheduleRestart(placeholder, err)
+			}
 			continue
 		}
 		manager.mu.Lock()
@@ -204,6 +238,9 @@ func (manager *Manager) Start(ctx context.Context) error {
 // Close gracefully stops the plugin children. It is deliberately idempotent so
 // shutdown paths can defer it.
 func (manager *Manager) Close(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	manager.mu.Lock()
 	if manager.closed {
 		manager.mu.Unlock()
@@ -219,6 +256,9 @@ func (manager *Manager) Close(ctx context.Context) error {
 	}
 	manager.mu.Unlock()
 	manager.refreshDriveHooks()
+	if manager.recoveryStop != nil {
+		manager.recoveryStop()
+	}
 
 	if stopEvents != nil {
 		stopEvents()
@@ -226,6 +266,7 @@ func (manager *Manager) Close(ctx context.Context) error {
 	for _, plugin := range plugins {
 		manager.stopRuntime(ctx, plugin)
 	}
+	manager.waitRecoveries(ctx)
 	return nil
 }
 
@@ -234,7 +275,16 @@ func (manager *Manager) Close(ctx context.Context) error {
 func (manager *Manager) HasHooks() bool {
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
-	return len(manager.active) > 0
+	return manager.hasReadyPluginLocked()
+}
+
+func (manager *Manager) hasReadyPluginLocked() bool {
+	for _, active := range manager.active {
+		if active != nil && !active.failed {
+			return true
+		}
+	}
+	return false
 }
 
 // Before chains active plugins in installation order. A plugin may reject the
@@ -247,7 +297,7 @@ func (manager *Manager) Before(ctx context.Context, operation tdriveplugin.Opera
 	result := tdriveplugin.OperationResult{Allowed: true, Payload: operation.Payload}
 	for _, active := range plugins {
 		operation.Payload = result.Payload
-		callCtx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
+		callCtx, cancel := pluginCallContext(ctx)
 		pluginResult, err := active.client.Before(callCtx, operation)
 		cancel()
 		if err != nil {
@@ -273,7 +323,7 @@ func (manager *Manager) Before(ctx context.Context, operation tdriveplugin.Opera
 // connection.
 func (manager *Manager) After(ctx context.Context, operation tdriveplugin.Operation) {
 	for _, active := range manager.snapshotActive() {
-		callCtx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
+		callCtx, cancel := pluginCallContext(ctx)
 		err := active.client.After(callCtx, operation)
 		cancel()
 		if err != nil {
@@ -378,6 +428,9 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 	oldRecord, oldRecordErr := manager.db.PluginByID(ctx, inspection.Manifest.ID)
 	if oldRecordErr != nil && !errors.Is(oldRecordErr, database.ErrNotFound) {
 		return PluginStatus{}, fmt.Errorf("read existing plugin metadata: %w", oldRecordErr)
+	}
+	if oldRecordErr == nil {
+		oldRecord = manager.normalizePluginRecord(oldRecord)
 	}
 	oldActive := manager.takeActive(inspection.Manifest.ID)
 	if oldActive != nil {
@@ -532,11 +585,25 @@ func (manager *Manager) SetEnabled(ctx context.Context, id string, enabled bool)
 		if err != nil {
 			return PluginStatus{}, err
 		}
+		if active.failed {
+			manager.scheduleRestart(active, errors.New("管理员请求重新启动插件"))
+			if current, readErr := manager.db.PluginByID(context.Background(), id); readErr == nil {
+				return manager.toStatus(current), nil
+			}
+		}
 		return manager.toStatus(updated), nil
 	}
 	loaded, err := manager.startRuntime(ctx, record)
 	if err != nil {
 		_, _ = manager.db.UpdatePluginState(ctx, id, true, database.PluginStatusError, err.Error())
+		if placeholder := unavailableRuntime(record, err); placeholder != nil {
+			manager.mu.Lock()
+			if !manager.closed {
+				manager.active[id] = placeholder
+			}
+			manager.mu.Unlock()
+			manager.scheduleRestart(placeholder, err)
+		}
 		return PluginStatus{}, err
 	}
 	manager.mu.Lock()
@@ -560,6 +627,7 @@ func (manager *Manager) Uninstall(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	record = manager.normalizePluginRecord(record)
 	active := manager.takeActive(id)
 	if active != nil {
 		manager.stopRuntime(ctx, active)
@@ -634,6 +702,10 @@ func (manager *Manager) UpdateSettings(ctx context.Context, id string, value jso
 }
 
 func (manager *Manager) startRuntime(ctx context.Context, record database.PluginRecord) (*activePlugin, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	record = manager.normalizePluginRecord(record)
 	if record.BinaryPath == "" {
 		return nil, errors.New("plugin binary path is empty")
 	}
@@ -650,6 +722,9 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 	if manifest.APIVersion != tdriveplugin.APIVersion {
 		return nil, fmt.Errorf("plugin API version %d is not supported", manifest.APIVersion)
 	}
+	if manifest.ID != record.ID {
+		return nil, fmt.Errorf("plugin manifest id %q does not match installed id %q", manifest.ID, record.ID)
+	}
 	if _, err := os.Stat(record.BinaryPath); err != nil {
 		return nil, fmt.Errorf("stat plugin binary: %w", err)
 	}
@@ -657,13 +732,28 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 	if err != nil || len(checksum) != sha256.Size {
 		return nil, errors.New("stored plugin binary digest is invalid")
 	}
+	// The plugin executable may be replaced during an upgrade. Its private
+	// state must therefore live under the deployment data volume, not be
+	// inferred from whichever copy of the executable happened to be launched.
+	// The child gets this path explicitly so a plugin update, restart, or
+	// recovery cannot silently move its own downloaded tools to another tree.
+	dataDir := manager.pluginDataDir(record)
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return nil, fmt.Errorf("create plugin data directory: %w", err)
+	}
 
+	command := exec.Command(record.BinaryPath)
+	command.Env = pluginEnvironment(dataDir)
 	process := goPlugin.NewClient(&goPlugin.ClientConfig{
 		HandshakeConfig: tdriveplugin.HandshakeConfig,
 		Plugins: goPlugin.PluginSet{
 			tdriveplugin.PluginName: &tdriveplugin.RPCPlugin{},
 		},
-		Cmd:          exec.Command(record.BinaryPath),
+		Cmd: command,
+		// command.Env already contains the complete parent environment plus the
+		// stable plugin-data override. go-plugin otherwise appends os.Environ a
+		// second time, which would create duplicate data-dir keys.
+		SkipHostEnv:  true,
 		SecureConfig: &goPlugin.SecureConfig{Checksum: checksum, Hash: sha256.New()},
 		Logger:       hclog.NewNullLogger(),
 	})
@@ -682,7 +772,7 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 		process.Kill()
 		return nil, errors.New("plugin returned an unexpected RPC client")
 	}
-	callCtx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
+	callCtx, cancel := pluginCallContext(ctx)
 	remoteManifest, err := client.Manifest(callCtx)
 	cancel()
 	if err != nil {
@@ -694,7 +784,7 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 		return nil, errors.New("compiled plugin manifest does not match installed manifest")
 	}
 	host := &managerHost{manager: manager, pluginID: record.ID}
-	callCtx, cancel = context.WithTimeout(ctx, pluginCallTimeout)
+	callCtx, cancel = pluginCallContext(ctx)
 	err = client.AttachHost(callCtx, host)
 	cancel()
 	if err != nil {
@@ -704,16 +794,133 @@ func (manager *Manager) startRuntime(ctx context.Context, record database.Plugin
 	return &activePlugin{record: record, manifest: manifest, process: process, protocol: protocol, client: client}, nil
 }
 
+func (manager *Manager) normalizePluginRecord(record database.PluginRecord) database.PluginRecord {
+	if record.BinaryPath == "" || filepath.IsAbs(record.BinaryPath) || manager.cfg == nil {
+		return record
+	}
+	if pluginDir := strings.TrimSpace(manager.cfg.Plugins.Dir); pluginDir != "" {
+		record.BinaryPath = filepath.Join(pluginDir, filepath.Base(record.BinaryPath))
+	}
+	return record
+}
+
+// unavailableRuntime keeps a valid route visible when a plugin cannot be
+// started at boot (for example, its executable is temporarily missing). The
+// placeholder never participates in hooks; HTTP callers receive 502 while the
+// manager retries the real child in the background.
+func unavailableRuntime(record database.PluginRecord, cause error) *activePlugin {
+	var manifest tdriveplugin.Manifest
+	if err := json.Unmarshal([]byte(record.ManifestJSON), &manifest); err != nil {
+		return nil
+	}
+	if err := manifest.Validate(); err != nil || manifest.APIVersion != tdriveplugin.APIVersion || manifest.ID != record.ID {
+		return nil
+	}
+	if cause == nil {
+		cause = errors.New("plugin runtime unavailable")
+	}
+	return &activePlugin{
+		record:   record,
+		manifest: manifest,
+		client:   unavailablePluginClient{cause: cause},
+		failed:   true,
+	}
+}
+
+type unavailablePluginClient struct{ cause error }
+
+func (client unavailablePluginClient) err() error {
+	if client.cause == nil {
+		return errors.New("plugin runtime unavailable")
+	}
+	return client.cause
+}
+
+func (client unavailablePluginClient) Before(context.Context, tdriveplugin.Operation) (tdriveplugin.OperationResult, error) {
+	return tdriveplugin.OperationResult{}, client.err()
+}
+
+func (client unavailablePluginClient) After(context.Context, tdriveplugin.Operation) error {
+	return client.err()
+}
+
+func (client unavailablePluginClient) OnEvent(context.Context, tdriveplugin.Event) error {
+	return client.err()
+}
+
+func (client unavailablePluginClient) HandleHTTP(context.Context, tdriveplugin.HTTPRequest) (tdriveplugin.HTTPResponse, error) {
+	return tdriveplugin.HTTPResponse{}, client.err()
+}
+
+func (unavailablePluginClient) Shutdown(context.Context) error { return nil }
+
+// pluginDataDir gives every installed plugin a stable private directory. The
+// server data directory is the persistence contract for the deployment; the
+// plugin directory is only a fallback for package-level tests and older
+// programmatic configurations that did not fill Server.DataDir.
+func (manager *Manager) pluginDataDir(record database.PluginRecord) string {
+	root := ""
+	if manager.cfg != nil {
+		if dataRoot := strings.TrimSpace(manager.cfg.Server.DataDir); dataRoot != "" {
+			if absolute, err := filepath.Abs(dataRoot); err == nil {
+				dataRoot = absolute
+			}
+			return filepath.Join(dataRoot, "plugin-data", record.ID)
+		}
+		root = strings.TrimSpace(manager.cfg.Plugins.Dir)
+	}
+	if root == "" {
+		root = filepath.Dir(record.BinaryPath)
+	}
+	if absolute, err := filepath.Abs(root); err == nil {
+		root = absolute
+	}
+	// This is also the path used by the first host implementation, which had
+	// no Server.DataDir in its in-memory test/development configuration. Keep
+	// it stable so those installations do not need a data migration.
+	return filepath.Join(root, record.ID+"-data")
+}
+
+// pluginEnvironment replaces a possibly inherited value rather than adding a
+// duplicate. On Unix duplicate environment keys are legal but which one a
+// child observes is implementation-dependent; that would make persistence
+// depend on the host process environment.
+func pluginEnvironment(dataDir string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, pluginDataDirEnv) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, pluginDataDirEnv+"="+dataDir)
+}
+
 func (manager *Manager) stopRuntime(ctx context.Context, active *activePlugin) {
 	if active == nil {
 		return
 	}
-	callCtx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
-	if err := active.client.Shutdown(callCtx); err != nil {
-		manager.log.Debug("plugin shutdown returned an error", zap.String("plugin", active.record.ID), zap.Error(err))
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	cancel()
-	active.process.Kill()
+	if active.client != nil {
+		callCtx, cancel := pluginCallContext(ctx)
+		if err := active.client.Shutdown(callCtx); err != nil {
+			manager.log.Debug("plugin shutdown returned an error", zap.String("plugin", active.record.ID), zap.Error(err))
+		}
+		cancel()
+	}
+	if active.process != nil {
+		active.process.Kill()
+	}
+}
+
+func pluginCallContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, pluginCallTimeout)
 }
 
 func (manager *Manager) snapshotActive() []*activePlugin {
@@ -721,8 +928,17 @@ func (manager *Manager) snapshotActive() []*activePlugin {
 	defer manager.mu.RUnlock()
 	plugins := make([]*activePlugin, 0, len(manager.active))
 	for _, active := range manager.active {
+		if active == nil || active.failed {
+			continue
+		}
 		plugins = append(plugins, active)
 	}
+	sort.SliceStable(plugins, func(left, right int) bool {
+		if plugins[left].record.InstalledAt.Equal(plugins[right].record.InstalledAt) {
+			return plugins[left].record.ID < plugins[right].record.ID
+		}
+		return plugins[left].record.InstalledAt.Before(plugins[right].record.InstalledAt)
+	})
 	return plugins
 }
 
@@ -764,16 +980,148 @@ func (manager *Manager) refreshDriveHooks() {
 }
 
 func (manager *Manager) handlePluginFailure(id string, cause error) {
-	active := manager.takeActive(id)
-	if active != nil {
-		manager.stopRuntime(context.Background(), active)
+	if cause == nil {
+		cause = errors.New("plugin runtime failed")
 	}
-	manager.refreshDriveHooks()
-	manager.stopEventBridgeIfEmpty()
-	if _, err := manager.db.UpdatePluginState(context.Background(), id, true, database.PluginStatusError, cause.Error()); err != nil {
+	active := manager.getActive(id)
+	if active == nil {
+		// A concurrent disable/uninstall already removed the runtime. Do not
+		// write an error using an old callback and accidentally re-enable that
+		// plugin in the database.
+		return
+	}
+	manager.scheduleRestart(active, cause)
+}
+
+// recordPluginFailure records the failure without changing whether the
+// administrator enabled the plugin. A transient RPC error must not turn an
+// enabled plugin into a permanently unreachable route.
+func (manager *Manager) recordPluginFailure(id string, cause error) {
+	if _, err := manager.db.UpdatePluginStatus(context.Background(), id, database.PluginStatusError, cause.Error()); err != nil {
 		manager.log.Warn("could not record plugin failure", zap.String("plugin", id), zap.Error(err))
 	}
+}
+
+// scheduleRestart replaces a failed child in the background. The failed
+// activePlugin deliberately remains in manager.active until a replacement is
+// ready, so a browser sees a temporary 502 rather than a misleading 404. The
+// recovering guard also prevents concurrent HTTP polls, hooks and event
+// deliveries from starting several copies of the same plugin.
+func (manager *Manager) scheduleRestart(failed *activePlugin, cause error) {
+	if failed == nil {
+		return
+	}
+	if cause == nil {
+		cause = errors.New("plugin runtime failed")
+	}
+	id := failed.record.ID
+	manager.mu.Lock()
+	if manager.closed || manager.active[id] != failed || manager.recovering[id] {
+		manager.mu.Unlock()
+		return
+	}
+	failed.failed = true
+	manager.recovering[id] = true
+	manager.recoveryWG.Add(1)
+	manager.mu.Unlock()
+
+	// Disable core hook interception immediately. The failed route remains in
+	// manager.active for HTTP/502 and recovery, but unrelated core requests
+	// should proceed while the child is being replaced.
+	manager.refreshDriveHooks()
+	manager.stopEventBridgeIfEmpty()
+	manager.recordPluginFailure(id, cause)
+	go func() {
+		defer manager.recoveryWG.Done()
+		manager.restart(failed)
+	}()
+}
+
+func (manager *Manager) restart(failed *activePlugin) {
+	id := failed.record.ID
+	baseCtx := manager.recoveryContext()
+	stopCtx, stopCancel := context.WithTimeout(baseCtx, pluginCallTimeout)
+	manager.stopRuntime(stopCtx, failed)
+	stopCancel()
+
+	startCtx, startCancel := context.WithTimeout(baseCtx, pluginCallTimeout)
+	record, err := manager.db.PluginByID(startCtx, id)
+	disabled := false
+	if err == nil && !record.Enabled {
+		disabled = true
+		err = errors.New("plugin was disabled while it was recovering")
+	}
+	var replacement *activePlugin
+	if err == nil {
+		replacement, err = manager.startRuntime(startCtx, record)
+	}
+	startCancel()
+
+	manager.mu.Lock()
+	current := manager.active[id]
+	canReplace := err == nil && current == failed && !manager.closed && record.Enabled
+	if canReplace {
+		manager.active[id] = replacement
+	}
+	if current == failed && err != nil && !disabled {
+		// Keep the failed placeholder in the map. It still makes the declared
+		// route reachable and a later request can trigger another recovery.
+		manager.active[id] = failed
+	}
+	if current == failed && disabled {
+		delete(manager.active, id)
+	}
+	if err != nil && current != failed {
+		// Management code won the race and removed/replaced the child.
+		canReplace = false
+	}
+	delete(manager.recovering, id)
+	manager.mu.Unlock()
+
+	if replacement != nil && !canReplace {
+		manager.stopRuntime(context.Background(), replacement)
+	}
+	if err != nil {
+		manager.log.Warn("could not recover plugin", zap.String("plugin", id), zap.Error(err))
+		manager.refreshDriveHooks()
+		return
+	}
+	if !canReplace {
+		// A management operation, uninstall/disable, or shutdown won the race
+		// while the replacement was starting. That operation owns the database
+		// state; do not write "active" back over its result.
+		manager.refreshDriveHooks()
+		return
+	}
+	manager.refreshDriveHooks()
 	manager.startEventBridge(context.Background())
+	if _, stateErr := manager.db.UpdatePluginStatusIfEnabled(context.Background(), id, database.PluginStatusActive, ""); stateErr != nil && !errors.Is(stateErr, database.ErrNotFound) {
+		manager.log.Warn("could not record recovered plugin", zap.String("plugin", id), zap.Error(stateErr))
+	}
+}
+
+func (manager *Manager) recoveryContext() context.Context {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	if manager.recoveryCtx == nil {
+		return context.Background()
+	}
+	return manager.recoveryCtx
+}
+
+func (manager *Manager) waitRecoveries(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		manager.recoveryWG.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 func (manager *Manager) toStatus(record database.PluginRecord) PluginStatus {
@@ -815,8 +1163,13 @@ func manifestsMatch(left, right tdriveplugin.Manifest) bool {
 }
 
 func (manager *Manager) startEventBridge(parent context.Context) {
+	// Management calls arrive with short-lived HTTP contexts. The event
+	// subscription must belong to the manager lifetime instead, or it would
+	// stop as soon as an install/enable response is returned.
+	_ = parent
+	parent = manager.recoveryContext()
 	manager.mu.Lock()
-	if manager.eventsStop != nil || len(manager.active) == 0 || manager.broker == nil || manager.closed {
+	if manager.eventsStop != nil || !manager.hasReadyPluginLocked() || manager.broker == nil || manager.closed {
 		manager.mu.Unlock()
 		return
 	}
@@ -843,7 +1196,7 @@ func (manager *Manager) startEventBridge(parent context.Context) {
 
 func (manager *Manager) stopEventBridgeIfEmpty() {
 	manager.mu.Lock()
-	if len(manager.active) != 0 {
+	if manager.hasReadyPluginLocked() {
 		manager.mu.Unlock()
 		return
 	}

@@ -47,8 +47,9 @@ FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 
 COPY --from=build /out/tdrive /usr/local/bin/tdrive
 
-# The data directory holds the SQLite index, the Telegram session and the
-# upload spool. It is the only thing that needs to persist.
+# The data directory holds the SQLite index, the Telegram session, the upload
+# spool, plugin metadata and plugin-private data (including downloaded helper
+# binaries). It is the only thing that needs to persist.
 VOLUME ["/data"]
 ENV TDRIVE_DATA_DIR=/data \
     TDRIVE_LISTEN=:8080

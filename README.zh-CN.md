@@ -90,7 +90,7 @@ TDRIVE_DATA_DIR=./data ./tdrive
 | `TDRIVE_CACHE_DIR` | `<数据目录>/cache` | 下载暂存目录 |
 | `TDRIVE_CACHE_LIMIT` | `20GiB` | 下载暂存磁盘上限，设为 0 关闭暂存功能 |
 | `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | 单个下载允许的并发连接数 |
-| `TDRIVE_PLUGIN_DIR` | `<数据目录>/plugins` | 已安装插件二进制目录 |
+| `TDRIVE_PLUGIN_DIR` | `<数据目录>/plugins` | 已安装插件二进制和临时目录；插件私有数据固定保存在 `<数据目录>/plugin-data/<插件 ID>` |
 | `TDRIVE_PLUGIN_STORE_URL` | `https://raw.githubusercontent.com/dibin666/tdrive/main/plugins/index.json` | 插件商店索引 HTTPS 地址；留空关闭商店 |
 | `TDRIVE_PLUGIN_MAX_BINARY_BYTES` | `256MiB` | 下载插件二进制的大小上限 |
 

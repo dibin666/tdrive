@@ -311,13 +311,18 @@ go build -trimpath -o plugin-hello ./cmd/plugin-hello
 
 | 环境变量 | 默认值 | 用途 |
 |---|---|---|
-| `TDRIVE_PLUGIN_DIR` | `<data dir>/plugins` | 插件二进制和临时目录 |
+| `TDRIVE_PLUGIN_DIR` | `<data dir>/plugins` | 插件二进制和临时目录；插件私有数据固定保存在 `<data dir>/plugin-data/<插件 ID>` |
 | `TDRIVE_PLUGIN_STORE_URL` | 空 | 插件商店 `index.json` 的 HTTPS 地址；空值关闭商店 |
 | `TDRIVE_PLUGIN_MAX_BINARY_BYTES` | `256MiB` | 单个插件二进制大小上限 |
 
 Docker Compose 只有一个 `tdrive` 服务和一个数据卷。插件目录默认在 `/data/plugins`，
-和数据库、Telegram 会话同卷，所以插件随数据卷一起备份。非 Docker 二进制部署不需要
+插件私有数据在 `/data/plugin-data/<插件 ID>`，都和数据库、Telegram 会话同卷，所以插件
+及其下载的运行时二进制会随数据卷一起备份。非 Docker 二进制部署不需要
 任何额外组件：安装插件只用到 HTTPS 出站访问。
+
+启动插件进程时，tdrive 会通过 `TDRIVE_PLUGIN_DATA_DIR` 传入该插件的绝对持久化目录。
+插件应把登录凭据、缓存和运行时下载的二进制放在这个目录中，不要根据自身可执行文件的
+位置推导数据目录；插件更新时可执行文件会被原子替换，但这个目录保持不变。
 
 tdrive 只在管理员主动检查或安装插件时访问网络。启动路径不会下载任何东西，也不会
 为已停用的插件启动进程。

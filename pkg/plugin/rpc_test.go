@@ -5,10 +5,39 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"testing"
+	"time"
 
 	goPlugin "github.com/hashicorp/go-plugin"
 )
+
+type deadlineHTTPPlugin struct{}
+
+func (deadlineHTTPPlugin) Manifest() Manifest { return Manifest{} }
+
+func (deadlineHTTPPlugin) Initialize(context.Context, Host) error { return nil }
+
+func (deadlineHTTPPlugin) HandleHTTP(ctx context.Context, _ HTTPRequest) (HTTPResponse, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		return HTTPResponse{}, errors.New("request deadline was not propagated")
+	}
+	return HTTPResponse{Status: http.StatusNoContent}, nil
+}
+
+func TestRPCServerPropagatesHTTPDeadline(t *testing.T) {
+	server := &RPCServer{Impl: deadlineHTTPPlugin{}}
+	response := HTTPResponse{}
+	deadline := time.Now().Add(time.Second)
+	if err := server.HandleHTTP(HTTPRequest{
+		Method: http.MethodGet, Path: "/", DeadlineUnixMilli: deadline.UnixMilli(),
+	}, &response); err != nil {
+		t.Fatalf("HandleHTTP: %v", err)
+	}
+	if response.Status != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.Status)
+	}
+}
 
 type rpcTestPlugin struct {
 	host Host

@@ -144,6 +144,33 @@ func (d *DB) UpdatePluginState(ctx context.Context, id string, enabled bool, sta
 	return d.PluginByID(ctx, id)
 }
 
+// UpdatePluginStatus changes only lifecycle information. In particular, it
+// never changes enabled: a runtime failure must not turn an administrator's
+// concurrent disable into an enabled plugin again.
+func (d *DB) UpdatePluginStatus(ctx context.Context, id, status, message string) (PluginRecord, error) {
+	result, err := d.write.ExecContext(ctx, `
+		UPDATE plugins SET status = ?, error = ?, updated_at = ?
+		WHERE id = ?`, status, message, nowMS(), id)
+	if err := affectedOne(result, err, "update plugin status"); err != nil {
+		return PluginRecord{}, err
+	}
+	return d.PluginByID(ctx, id)
+}
+
+// UpdatePluginStatusIfEnabled is the recovery counterpart to
+// UpdatePluginStatus. A plugin that was disabled or uninstalled while its
+// replacement was starting must not be made active by the stale recovery
+// goroutine.
+func (d *DB) UpdatePluginStatusIfEnabled(ctx context.Context, id, status, message string) (PluginRecord, error) {
+	result, err := d.write.ExecContext(ctx, `
+		UPDATE plugins SET status = ?, error = ?, updated_at = ?
+		WHERE id = ? AND enabled = 1`, status, message, nowMS(), id)
+	if err := affectedOne(result, err, "update enabled plugin status"); err != nil {
+		return PluginRecord{}, err
+	}
+	return d.PluginByID(ctx, id)
+}
+
 // DeletePlugin removes metadata and namespaced state after the manager has
 // stopped the child process and removed its binary.
 func (d *DB) DeletePlugin(ctx context.Context, id string) error {

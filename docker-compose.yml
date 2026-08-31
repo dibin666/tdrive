@@ -6,8 +6,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # The SQLite index, the Telegram session, the upload spool and installed
-      # plugin binaries. Losing this volume is recoverable — the drive rebuilds
+      # The SQLite index, the Telegram session, the upload spool, installed
+      # plugin binaries and plugin-private data. Losing this volume is recoverable — the drive rebuilds
       # from the channel — but it means logging in to Telegram again and
       # reinstalling plugins.
       - tdrive-data:/data
