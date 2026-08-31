@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -168,28 +169,46 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cancelling an upload has to stop the segments that are already in flight.
+	// Aborting the browser's request only closes one direction: the bytes it
+	// already handed over would still be pushed into Telegram against a job the
+	// panel shows as stopped. Watching the job gives the cancellation something
+	// to interrupt on this side too.
+	ctx, release := s.drive.WatchUploadJob(r.Context(), job.ID)
+	defer release()
+
 	// A browser upload is one task even though its segments are sent by
 	// multiple HTTP requests at once. The job lease makes those requests share
 	// one global upload slot while still allowing the segments to run in
 	// parallel inside that task.
 	// The lease also fixes which Telegram account the job runs on, so every
 	// segment of this upload lands through the same login.
-	_, releaseRequest, err := s.drive.AcquireUploadJob(r.Context(), job.ID)
+	_, releaseRequest, err := s.drive.AcquireUploadJob(ctx, job.ID)
 	if err != nil {
 		s.fail(w, err, "put segment")
 		return
 	}
 	defer releaseRequest()
 
-	if err := s.db.SetJobStatus(r.Context(), job.ID, database.JobRunning, ""); err != nil {
+	// Waiting for a slot is exactly when a transfer gets cancelled, so this
+	// transition is conditional: a job that stopped while it queued must not be
+	// put back into a running state by the request that was waiting.
+	started, err := s.db.SetJobStatusIf(ctx, job.ID, database.JobRunning, "",
+		database.JobPending, database.JobRunning)
+	if err != nil {
 		s.drive.ReleaseUploadJob(job.ID)
 		s.fail(w, err, "put segment")
+		return
+	}
+	if !started {
+		s.drive.ReleaseUploadJob(job.ID)
+		s.fail(w, fmt.Errorf("%w: %q", database.ErrJobFinished, job.Name), "put segment")
 		return
 	}
 
 	base := int64(index-1) * file.SegmentSize
 	throttle := newProgressThrottle()
-	err = s.drive.PutSegment(r.Context(), job, index, r.Body, want, func(uploaded, _ int64) {
+	err = s.drive.PutSegment(ctx, job, index, r.Body, want, func(uploaded, _ int64) {
 		s.progress.update(job.ID, base+uploaded, file.Size, database.JobRunning)
 		if !throttle.ready() {
 			return
@@ -209,13 +228,20 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.drive.ReleaseUploadJob(job.ID)
 		s.progress.clear(job.ID)
+		// A segment that stopped because the transfer was cancelled is not a
+		// failure, and announcing one would contradict the cancellation the
+		// browser has already been told about.
+		status, message := database.JobFailed, err.Error()
+		if ctx.Err() != nil || errors.Is(err, database.ErrJobFinished) {
+			status, message = database.JobCancelled, ""
+		}
 		s.events.Publish(events.Event{
 			Type:   events.TypeUpload,
 			UserID: job.UserID,
 			Data: events.UploadProgress{
 				JobID: job.ID, Name: file.Name, Segment: index,
 				SegmentCount: file.SegmentCount,
-				Status:       string(database.JobFailed), Error: err.Error(),
+				Status:       string(status), Error: message,
 			},
 		})
 		s.fail(w, err, "put segment")
@@ -277,7 +303,11 @@ func (s *Server) handleCancelUpload(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err, "cancel upload")
 		return
 	}
-	if err := s.drive.Abort(r.Context(), job.ID, "cancelled", database.JobCancelled); err != nil {
+	// CancelUpload rather than Abort: the record is only half the job. The
+	// segments already in flight — from this browser, from a server-side worker,
+	// from a plugin streaming its own upload — have to be interrupted too, or
+	// the transfer keeps running behind a row that says it stopped.
+	if err := s.drive.CancelUpload(r.Context(), job.ID); err != nil {
 		s.fail(w, err, "cancel upload")
 		return
 	}

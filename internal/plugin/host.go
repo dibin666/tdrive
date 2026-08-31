@@ -386,9 +386,15 @@ func (host *managerHost) OpenStream(ctx context.Context, method string, request 
 		if err != nil {
 			return nil, err
 		}
+		// A plugin drives its upload from its own goroutine, so cancelling the
+		// transfer in the WebUI has nothing to interrupt unless the segment is
+		// registered against the job. Without this the plugin kept pushing bytes
+		// into a transfer the panel had already recorded as cancelled.
+		segmentCtx, release := host.manager.drive.WatchUploadJob(ctx, input.JobID)
 		stream := newUploadStream()
 		go func() {
-			err := host.manager.drive.PutSegment(ctx, job, input.Index, stream.reader(), input.Size, nil)
+			defer release()
+			err := host.manager.drive.PutSegment(segmentCtx, job, input.Index, stream.reader(), input.Size, nil)
 			stream.finish(err)
 		}()
 		return stream, nil

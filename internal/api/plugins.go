@@ -37,6 +37,7 @@ func (s *Server) pluginRoutes(r chi.Router) {
 	}
 	r.Route("/plugins", func(r chi.Router) {
 		r.Get("/", s.handleListPlugins)
+		r.Get("/updates", s.handlePluginUpdates)
 		r.Get("/store", s.handlePluginStore)
 		r.Post("/inspect", s.handleInspectPlugin)
 		r.Post("/install", s.handleInstallPlugin)
@@ -54,6 +55,21 @@ func (s *Server) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, plugins)
+}
+
+// handlePluginUpdates reports which installed plugins have a newer release.
+//
+// It only reports. Installing what it finds goes back through inspect and
+// install, so an update is reviewed and confirmed exactly like a first
+// installation — the plugin trust model does not soften because the plugin is
+// already there. refresh=1 bypasses the cached answer.
+func (s *Server) handlePluginUpdates(w http.ResponseWriter, r *http.Request) {
+	report, err := s.plugins.CheckUpdates(r.Context(), r.URL.Query().Get("refresh") == "1")
+	if err != nil {
+		s.fail(w, err, "check plugin updates")
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) handlePluginStore(w http.ResponseWriter, r *http.Request) {

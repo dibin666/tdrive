@@ -98,6 +98,15 @@ type Service struct {
 	jobRunMu sync.Mutex
 	jobRuns  map[string]struct{}
 
+	// jobCancels holds a cancel function for everything currently pushing bytes
+	// on behalf of an upload job: a browser's segment request, a server-side
+	// fetch worker, a plugin's segment stream. Cancelling a transfer has to
+	// reach all of them. Marking the row cancelled and stopping there is what
+	// left an upload running against a job the panel already showed as stopped.
+	jobCancelMu sync.Mutex
+	jobCancels  map[string]map[uint64]context.CancelFunc
+	jobCancelID atomic.Uint64
+
 	// stageMu serialises the decide-then-insert of a staged download, so two
 	// requests for the same file cannot both conclude they are the first one.
 	stageMu       sync.Mutex
@@ -122,6 +131,7 @@ func New(cfg *config.Config, db *database.DB, cluster Cluster, log *zap.Logger) 
 		clientDownloads:  make(map[string]*clientDownload),
 		clientJobs:       make(map[string]*clientDownload),
 		jobRuns:          make(map[string]struct{}),
+		jobCancels:       make(map[string]map[uint64]context.CancelFunc),
 		stageRuns:        make(map[string]struct{}),
 		stageCancels:     make(map[string]context.CancelFunc),
 	}

@@ -18,14 +18,19 @@ export function Section({
   className?: string
 }) {
   return (
-    <section className={clsx('panel p-5', className)}>
-      <header className="mb-4 flex items-start gap-2.5">
-        {icon && <span className="mt-0.5 text-[var(--faint)]">{icon}</span>}
-        <div className="min-w-0 flex-1">
-          <h2 className="display text-base">{title}</h2>
-          {description && (
-            <p className="mt-0.5 text-xs leading-relaxed text-[var(--muted)]">{description}</p>
-          )}
+    <section className={clsx('panel p-4 sm:p-5', className)}>
+      {/* On a phone the actions drop below the title. Kept on the same line and
+          told not to shrink, a pair of buttons squeezed the heading down to one
+          character per line and still overflowed the card. */}
+      <header className="mb-4 flex flex-col gap-2.5 sm:flex-row sm:items-start">
+        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+          {icon && <span className="mt-0.5 shrink-0 text-[var(--faint)]">{icon}</span>}
+          <div className="min-w-0 flex-1">
+            <h2 className="display text-base">{title}</h2>
+            {description && (
+              <p className="mt-0.5 text-xs leading-relaxed text-[var(--muted)]">{description}</p>
+            )}
+          </div>
         </div>
         {actions && <div className="shrink-0">{actions}</div>}
       </header>

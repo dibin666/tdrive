@@ -72,12 +72,37 @@ class UploadManager {
     this.emit()
   }
 
-  cancel(id: string) {
+  /**
+   * cancel stops a transfer this browser is driving.
+   *
+   * Both halves are needed. Aborting the request only stops what has not been
+   * sent yet: the server is still pushing whatever it already holds into
+   * Telegram, so a transfer cancelled here used to keep running there and the
+   * two views of it disagreed until it finished. The server call is awaited
+   * rather than fired and forgotten, because a cancellation that silently fails
+   * leaves a row that can never be stopped or deleted.
+   */
+  async cancel(id: string): Promise<void> {
+    const transfer = this.transfers.get(id)
+    if (!transfer || transfer.state === 'complete' || transfer.state === 'cancelled') return
+
     this.aborts.get(id)?.abort()
-    const t = this.transfers.get(id)
-    if (t && t.state !== 'complete') {
-      this.update(id, { state: 'cancelled' })
-      void api.cancelUpload(id).catch(() => {})
+    this.update(id, { state: 'cancelled', speed: 0 })
+
+    // A transfer whose job was never created only exists in this panel.
+    if (id.startsWith('local-')) return
+
+    try {
+      await api.cancelUpload(id)
+    } catch (err) {
+      // The one refusal worth acting on: it finished between the click and the
+      // request. Leaving it marked cancelled would be the same disagreement the
+      // cancellation was supposed to remove.
+      if (err instanceof ApiError && err.code === 'transfer_finished') {
+        this.update(id, { state: 'complete', uploaded: transfer.size, speed: 0 })
+        return
+      }
+      throw err
     }
   }
 
@@ -191,6 +216,14 @@ class UploadManager {
         this.update(id, { state: 'cancelled', speed: 0 })
         return
       }
+      // The server refuses further segments once a transfer has been stopped,
+      // which happens when it was cancelled from the transfer panel or another
+      // tab rather than from here. That is a cancellation, and reporting it as
+      // an upload failure was the visible half of the two sides disagreeing.
+      if (err instanceof ApiError && err.code === 'transfer_finished') {
+        this.update(id, { state: 'cancelled', speed: 0 })
+        return
+      }
       const message = err instanceof Error ? err.message : String(err)
       this.update(id, { state: 'failed', speed: 0, error: message })
       throw err
@@ -235,23 +268,25 @@ class UploadManager {
           if (xhr.status >= 200 && xhr.status < 300) return resolve()
 
           let message = xhr.statusText
+          let code: string | undefined
           try {
             const body = JSON.parse(xhr.responseText)
             if (body?.error) message = body.error
+            code = body?.code
           } catch {
             /* leave the status text */
           }
           // A rejected segment is not worth retrying: the request itself is
           // wrong, and re-sending it would fail identically.
           if (xhr.status >= 400 && xhr.status < 500 && xhr.status !== 429) {
-            return reject(new ApiError(xhr.status, message))
+            return reject(new ApiError(xhr.status, message, code))
           }
           if (remaining > 0) {
             const backoff = (SEGMENT_RETRIES - remaining + 1) * 1000
             setTimeout(() => attempt(remaining - 1).then(resolve, reject), backoff)
             return
           }
-          reject(new ApiError(xhr.status, message))
+          reject(new ApiError(xhr.status, message, code))
         }
 
         xhr.onerror = () => {

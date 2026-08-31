@@ -43,9 +43,10 @@ import { formatBytes, formatDate, isPreviewable, kindOf, naturalCompare } from '
 import { uploads } from '../lib/uploads'
 import { downloads } from '../lib/downloads'
 import { useSelection, useMarquee } from '../lib/selection'
-import { useEdgeSwipe, useLongPress, usePullToRefresh } from '../lib/gestures'
+import { useEdgeSwipe, useLongPress, usePullToRefresh, useSwipe } from '../lib/gestures'
 import {
   Button,
+  Checkbox,
   EmptyState,
   Field,
   IconButton,
@@ -922,6 +923,10 @@ type RowShared = {
   onInfo: (entry: Entry) => void
 }
 
+/** The one place the list grid is written down, so the header and every row
+ *  keep the same columns: checkbox, name, size, modified, actions. */
+const LIST_COLUMNS = 'sm:grid-cols-[1.75rem_1fr_7rem_9rem_2rem]'
+
 function ListView({
   entries,
   selection,
@@ -945,9 +950,35 @@ function ListView({
   canDownload: boolean
   canDelete: boolean
 }) {
+  const allSelected = entries.length > 0 && selection.size === entries.length
   return (
     <div className="pt-2">
-      <div className="hidden select-none px-3 pb-1.5 text-[11px] font-medium tracking-wide text-[var(--faint)] sm:grid sm:grid-cols-[1fr_7rem_9rem_2rem] sm:gap-3">
+      {/* On a phone the header row is replaced by a select-all strip: there are
+          no columns to label, but there is still a whole page to select. */}
+      <div className="flex items-center gap-2 px-2 pb-1 sm:hidden">
+        <Checkbox
+          checked={allSelected}
+          indeterminate={selection.size > 0 && !allSelected}
+          onChange={(next) => (next ? selection.selectAll() : selection.clear())}
+          label={allSelected ? '取消全选' : '全选'}
+        />
+        <span className="text-[11px] text-[var(--faint)]">
+          {selection.size > 0 ? `已选 ${selection.size} / ${entries.length} 项` : `${entries.length} 项`}
+        </span>
+      </div>
+
+      <div
+        className={clsx(
+          'hidden select-none items-center px-3 pb-1.5 text-[11px] font-medium tracking-wide text-[var(--faint)] sm:grid sm:gap-3',
+          LIST_COLUMNS,
+        )}
+      >
+        <Checkbox
+          checked={allSelected}
+          indeterminate={selection.size > 0 && !allSelected}
+          onChange={(next) => (next ? selection.selectAll() : selection.clear())}
+          label={allSelected ? '取消全选' : '全选'}
+        />
         <SortHeader label="名称" field="name" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
         <SortHeader label="大小" field="size" sortField={sortField} sortOrder={sortOrder} onSort={onSort} align="end" />
         <SortHeader label="修改时间" field="time" sortField={sortField} sortOrder={sortOrder} onSort={onSort} />
@@ -1007,8 +1038,39 @@ function SortHeader({
   )
 }
 
-/** FileRow carries the whole interaction surface for one entry: click
- *  selection, double-click open, right-click menu, long-press menu and a
+/** Width of one swipe action, matching the w-14 buttons below. */
+const SWIPE_ACTION_WIDTH = 56
+
+/**
+ * useTapGesture records how the current interaction started, so one row can
+ * behave like a desktop list under a mouse and like a phone under a finger.
+ *
+ * It exists because the two are genuinely different. With a mouse, a click
+ * selects and a double-click opens, which is what every file manager does and
+ * what marquee and Shift-click depend on. On a phone the checkbox now owns
+ * selection, so a tap has nothing else to mean but "open" — and asking someone
+ * to double-tap a folder was the reason the listing felt unusable there.
+ */
+function useTapGesture() {
+  const state = useRef({ type: 'mouse', x: 0, y: 0, moved: false })
+  return {
+    onPointerDown: (e: React.PointerEvent) => {
+      state.current = { type: e.pointerType, x: e.clientX, y: e.clientY, moved: false }
+    },
+    onPointerMove: (e: React.PointerEvent) => {
+      if (Math.abs(e.clientX - state.current.x) > 8 || Math.abs(e.clientY - state.current.y) > 8) {
+        state.current.moved = true
+      }
+    },
+    /** True when the click about to arrive is a finger tap that stayed put, and
+     *  so should open rather than select. A drag is a swipe or a scroll. */
+    isTap: () =>
+      (state.current.type === 'touch' || state.current.type === 'pen') && !state.current.moved,
+  }
+}
+
+/** FileRow carries the whole interaction surface for one entry: a checkbox,
+ *  click selection, double-click open, right-click menu, long-press menu and a
  *  left-swipe action drawer on touch. */
 function FileRow({
   entry,
@@ -1031,20 +1093,107 @@ function FileRow({
     onLongPress: ({ clientX, clientY }) => onContextMenu(entry, { x: clientX, y: clientY }),
   })
 
+  const actions = (!entry.isDir && canDownload ? 1 : 0) + (canDelete ? 1 : 0)
+  // The drawer was drawn beside the row and never covered, so on a phone every
+  // row carried a permanent red delete button across its own text. It is a
+  // drawer again: hidden underneath, and revealed only by dragging the row off
+  // it.
+  const { swipe, close, handlers: swipeHandlers } = useSwipe({
+    enabled: actions > 0,
+    width: actions * SWIPE_ACTION_WIDTH,
+  })
+
   const selected = selection.isSelected(entry.path)
   const isCursor = selection.cursor === entry.path
 
+  // Both gestures watch the same pointer, so their handlers are composed rather
+  // than one of them winning by being spread last.
+  const tap = useTapGesture()
+  const pointer = {
+    onPointerDown: (e: React.PointerEvent) => {
+      tap.onPointerDown(e)
+      longPress.onPointerDown(e)
+      swipeHandlers.onPointerDown(e)
+    },
+    onPointerMove: (e: React.PointerEvent) => {
+      tap.onPointerMove(e)
+      longPress.onPointerMove(e)
+      swipeHandlers.onPointerMove(e)
+    },
+    onPointerUp: (e: React.PointerEvent) => {
+      longPress.onPointerUp(e)
+      swipeHandlers.onPointerUp()
+    },
+    onPointerCancel: () => {
+      longPress.onPointerCancel()
+      swipeHandlers.onPointerCancel()
+    },
+  }
+
+  const runAction = (action: () => void) => {
+    close()
+    action()
+  }
+
   return (
-    <div className="relative overflow-hidden rounded-[var(--radius-control)]">
+    <div className="group/row relative overflow-hidden rounded-[var(--radius-control)]">
+      {/* Touch-only quick actions, existing only while the row is off them.
+          Kept mounted underneath, the corner of the top button showed through
+          the row's own rounded corner on every row of the list. */}
+      {actions > 0 && swipe.offset !== 0 && (
+        <div className="absolute inset-y-0 right-0 flex items-stretch sm:hidden">
+          {!entry.isDir && canDownload && (
+            <button
+              className="flex w-14 items-center justify-center bg-[var(--sunk)] text-[var(--muted)]"
+              onClick={() => runAction(() => onDownload(entry))}
+              aria-label="下载"
+            >
+              <Download size={16} />
+            </button>
+          )}
+          {canDelete && (
+            <button
+              className="flex w-14 items-center justify-center bg-[var(--color-danger)] text-white"
+              onClick={() => runAction(() => onDelete(entry))}
+              aria-label="删除"
+            >
+              <Trash2 size={16} />
+            </button>
+          )}
+        </div>
+      )}
+
       <div
         data-selectable={entry.path}
         data-selected={selected}
         tabIndex={0}
+        style={{
+          transform: swipe.offset ? `translateX(${swipe.offset}px)` : undefined,
+          // Snapping back is animated; following a finger is not, or the row
+          // lags behind the drag.
+          transition: swipe.offset === 0 ? 'transform 180ms var(--ease-out-soft)' : undefined,
+        }}
         className={clsx(
-          'row relative cursor-pointer sm:grid sm:grid-cols-[1fr_7rem_9rem_2rem] sm:items-center sm:gap-3',
+          // An opaque background is what makes it a drawer rather than a layer
+          // painted over the row's own text.
+          'row relative cursor-pointer bg-[var(--bg)] py-2.5 sm:grid sm:items-center sm:gap-3 sm:py-2',
+          LIST_COLUMNS,
           isCursor && !selected && 'ring-1 ring-inset ring-[var(--line-strong)]',
         )}
-        onClick={(e) => selection.click(entry.path, e)}
+        onClick={(e) => {
+          if (swipe.open) {
+            close()
+            return
+          }
+          // The long press already showed a menu; the click that follows it is
+          // an artefact of the same gesture.
+          if (longPress.consumedRef.current) return
+          if (tap.isTap()) {
+            onOpen(entry)
+            return
+          }
+          selection.click(entry.path, e)
+        }}
         onDoubleClick={() => onOpen(entry)}
         onContextMenu={(e) => {
           e.preventDefault()
@@ -1053,14 +1202,37 @@ function FileRow({
         onKeyDown={(e) => {
           if (e.key === 'Enter') onOpen(entry)
         }}
-        {...longPress}
+        {...pointer}
       >
-        <div className="flex min-w-0 items-center gap-2.5">
+        <Checkbox
+          checked={selected}
+          onChange={() => selection.toggle(entry.path)}
+          label={selected ? `取消选择 ${entry.name}` : `选择 ${entry.name}`}
+          // Always there under a finger, which has no hover to reveal it with;
+          // on a pointer it stays out of the way until it is wanted.
+          className={clsx(
+            'transition-opacity sm:opacity-0 sm:group-hover/row:opacity-100 sm:group-focus-within/row:opacity-100',
+            selected && 'sm:!opacity-100',
+          )}
+        />
+
+        <div className="flex min-w-0 flex-1 items-center gap-2.5 sm:flex-none">
           <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} />
-          <span className="truncate text-sm">{entry.name}</span>
-          <SegmentBadge entry={entry} />
-          <BrokenBadge entry={entry} />
+          {/* Stacked on a phone. Side by side, a long folder name pushed the
+              size and date into a second column that wrapped mid-word. */}
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-sm">{entry.name}</span>
+              <SegmentBadge entry={entry} />
+              <BrokenBadge entry={entry} />
+            </div>
+            <span className="mt-0.5 block truncate text-xs text-[var(--faint)] sm:hidden">
+              {entry.isDir ? `文件夹 · ${formatBytes(entry.size)}` : formatBytes(entry.size)} ·{' '}
+              {formatDate(entry.modifiedAt)}
+            </span>
+          </div>
         </div>
+
         <span
           className="hidden text-right text-xs tabular-nums text-[var(--muted)] sm:block"
           title={entry.isDir ? '文件夹内所有文件的总大小' : undefined}
@@ -1083,32 +1255,6 @@ function FileRow({
             </IconButton>
           )}
         </div>
-        <span className="text-xs text-[var(--faint)] sm:hidden">
-          {entry.isDir ? `文件夹 · ${formatBytes(entry.size)}` : formatBytes(entry.size)} ·{' '}
-          {formatDate(entry.modifiedAt)}
-        </span>
-      </div>
-
-      {/* Touch-only quick actions, revealed by a left swipe. */}
-      <div className="pointer-events-none absolute inset-y-0 right-0 flex items-stretch sm:hidden">
-        {!entry.isDir && canDownload && (
-          <button
-            className="pointer-events-auto flex w-14 items-center justify-center bg-[var(--sunk)] text-[var(--muted)]"
-            onClick={() => onDownload(entry)}
-            aria-label="下载"
-          >
-            <Download size={16} />
-          </button>
-        )}
-        {canDelete && (
-          <button
-            className="pointer-events-auto flex w-14 items-center justify-center bg-[var(--color-danger)] text-white"
-            onClick={() => onDelete(entry)}
-            aria-label="删除"
-          >
-            <Trash2 size={16} />
-          </button>
-        )}
       </div>
     </div>
   )
@@ -1144,27 +1290,58 @@ function GridTile({
   const longPress = useLongPress({
     onLongPress: ({ clientX, clientY }) => onContextMenu(entry, { x: clientX, y: clientY }),
   })
+  const tap = useTapGesture()
+  const selected = selection.isSelected(entry.path)
 
   return (
-    <button
+    <div
       data-selectable={entry.path}
-      data-selected={selection.isSelected(entry.path)}
-      onClick={(e) => selection.click(entry.path, e)}
+      data-selected={selected}
+      role="button"
+      tabIndex={0}
+      onClick={(e) => {
+        if (longPress.consumedRef.current) return
+        if (tap.isTap()) {
+          onOpen(entry)
+          return
+        }
+        selection.click(entry.path, e)
+      }}
       onDoubleClick={() => onOpen(entry)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') onOpen(entry)
+      }}
       onContextMenu={(e) => {
         e.preventDefault()
         onContextMenu(entry, { x: e.clientX, y: e.clientY })
       }}
       {...longPress}
-      className="surface flex flex-col items-start gap-2 p-3 text-left transition-colors hover:border-[var(--line-strong)] data-[selected=true]:border-[var(--color-clay)] data-[selected=true]:bg-[var(--clay-soft)]"
+      onPointerDown={(e) => {
+        tap.onPointerDown(e)
+        longPress.onPointerDown(e)
+      }}
+      onPointerMove={(e) => {
+        tap.onPointerMove(e)
+        longPress.onPointerMove(e)
+      }}
+      className="surface group/tile relative flex cursor-pointer flex-col items-start gap-2 p-3 text-left transition-colors hover:border-[var(--line-strong)] data-[selected=true]:border-[var(--color-clay)] data-[selected=true]:bg-[var(--clay-soft)]"
     >
+      <Checkbox
+        checked={selected}
+        onChange={() => selection.toggle(entry.path)}
+        label={selected ? `取消选择 ${entry.name}` : `选择 ${entry.name}`}
+        className={clsx(
+          'absolute right-0.5 top-0.5 transition-opacity sm:opacity-0 sm:group-hover/tile:opacity-100 sm:group-focus-within/tile:opacity-100',
+          selected && 'sm:!opacity-100',
+        )}
+      />
       <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} size={22} />
-      <span className="line-clamp-2 w-full break-all text-sm leading-snug">{entry.name}</span>
+      <span className="line-clamp-2 w-full break-all pr-6 text-sm leading-snug">{entry.name}</span>
       <span className="flex items-center gap-1.5 text-[11px] text-[var(--faint)]">
         {entry.isDir ? `文件夹 · ${formatBytes(entry.size)}` : formatBytes(entry.size)}
         <SegmentBadge entry={entry} />
       </span>
-    </button>
+    </div>
   )
 }
 
@@ -1201,7 +1378,9 @@ function SelectionBar({
 }) {
   const files = entries.filter((e) => !e.isDir)
   return (
-    <div className="fixed inset-x-0 bottom-6 z-30 mx-auto flex w-fit max-w-[92vw] items-center gap-1.5 rounded-full border border-[var(--line-strong)] bg-[var(--surface)]/95 px-4 py-2 shadow-lg backdrop-blur-md rise-in">
+    // Above the phone's tab bar, not behind it: at bottom-6 the two overlapped
+    // and the delete button sat on top of the 设置 tab.
+    <div className="fixed inset-x-0 bottom-[calc(4.25rem+env(safe-area-inset-bottom))] z-30 mx-auto flex w-fit max-w-[94vw] items-center gap-1.5 overflow-x-auto rounded-full border border-[var(--line-strong)] bg-[var(--surface)]/95 px-4 py-2 shadow-lg backdrop-blur-md rise-in md:bottom-6">
       <span className="mr-1 shrink-0 text-xs font-medium text-[var(--ink)]">已选 {count} 项</span>
       <div className="h-4 w-px bg-[var(--line)]" />
       <button onClick={onSelectAll} className="btn btn-ghost !px-2 !py-1 text-xs">
@@ -1599,6 +1778,12 @@ function UploadModal({
 
   const parentPath = localPath === '/' ? '/' : localPath.slice(0, localPath.lastIndexOf('/')) || '/'
   const selectedCount = selected.size
+  // Only files are uploadable; a folder in this list is somewhere to go, so
+  // "select all" means all the files here rather than everything visible.
+  const files = listing?.entries.filter((entry) => !entry.isDir) ?? []
+  const allFilesSelected = files.length > 0 && files.every((entry) => selected.has(entry.path))
+  const selectAllFiles = (next: boolean) =>
+    setSelected(next ? new Set(files.map((entry) => entry.path)) : new Set())
 
   return (
     <Modal
@@ -1699,24 +1884,53 @@ function UploadModal({
                 </div>
               ) : listing && listing.entries.length > 0 ? (
                 <div className="max-h-64 overflow-y-auto p-1.5">
+                  {files.length > 0 && (
+                    <div className="flex items-center gap-2 px-1.5 pb-1">
+                      <Checkbox
+                        checked={allFilesSelected}
+                        indeterminate={selectedCount > 0 && !allFilesSelected}
+                        onChange={selectAllFiles}
+                        label={allFilesSelected ? '取消全选' : '全选本目录文件'}
+                      />
+                      <span className="text-[11px] text-[var(--faint)]">
+                        {selectedCount > 0 ? `已选 ${selectedCount} 个文件` : `${files.length} 个文件`}
+                      </span>
+                    </div>
+                  )}
                   {listing.entries.map((entry) => (
-                    <button
+                    <div
                       key={entry.path}
-                      className="row w-full !justify-between text-left data-[selected=true]:bg-[var(--clay-soft)]"
+                      role="button"
+                      tabIndex={0}
+                      className="row w-full cursor-pointer !justify-between text-left data-[selected=true]:bg-[var(--clay-soft)]"
                       data-selected={selected.has(entry.path)}
                       onClick={() => toggle(entry)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          toggle(entry)
+                        }
+                      }}
                     >
-                      <span className="flex min-w-0 items-center gap-2">
+                      {/* A folder is navigated into rather than picked, so it
+                          gets a chevron where a file gets a box. */}
+                      {entry.isDir ? (
+                        <ChevronRight size={14} className="ml-2.5 mr-1.5 shrink-0 text-[var(--faint)]" />
+                      ) : (
+                        <Checkbox
+                          checked={selected.has(entry.path)}
+                          onChange={() => toggle(entry)}
+                          label={`选择 ${entry.name}`}
+                        />
+                      )}
+                      <span className="flex min-w-0 flex-1 items-center gap-2">
                         <EntryIcon name={entry.name} isDir={entry.isDir} size={16} />
                         <span className="truncate text-sm">{entry.name}</span>
                       </span>
                       <span className="shrink-0 text-xs tabular-nums text-[var(--muted)]">
                         {entry.isDir ? '文件夹' : formatBytes(entry.size)}
                       </span>
-                      {selected.has(entry.path) && (
-                        <Check size={14} className="shrink-0 text-[var(--color-clay)]" />
-                      )}
-                    </button>
+                    </div>
                   ))}
                 </div>
               ) : (

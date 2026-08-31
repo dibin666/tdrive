@@ -147,6 +147,9 @@ type Manager struct {
 	inspections  map[string]pendingInspection
 	eventsStop   context.CancelFunc
 	closed       bool
+
+	// updates caches the last release check. See updates.go.
+	updates updateCache
 }
 
 // TelegramStatus is all a plugin may learn about the Telegram side: whether the
@@ -530,6 +533,10 @@ func (manager *Manager) Install(ctx context.Context, inspectionID string) (Plugi
 		}
 	}
 	manager.startEventBridge(ctx)
+	// The cached report still describes the version that was installed a moment
+	// ago, and leaving it in place would keep offering an update that has just
+	// been applied.
+	manager.invalidateUpdates()
 	return manager.toStatus(record), nil
 }
 
@@ -658,6 +665,7 @@ func (manager *Manager) Uninstall(ctx context.Context, id string) error {
 	manager.refreshDriveHooks()
 	manager.stopEventBridgeIfEmpty()
 	manager.startEventBridge(ctx)
+	manager.invalidateUpdates()
 	return nil
 }
 

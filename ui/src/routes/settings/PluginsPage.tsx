@@ -1,6 +1,22 @@
-import { useEffect, useRef, useState } from 'react'
-import { Blocks, PackageOpen, PanelsTopLeft, Plus, Power, RefreshCw, Trash2, X } from 'lucide-react'
-import { api, type PluginInspection, type PluginStatus, type PluginStoreItem } from '../../lib/api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  ArrowUpCircle,
+  Blocks,
+  PackageOpen,
+  PanelsTopLeft,
+  Plus,
+  Power,
+  RefreshCw,
+  Trash2,
+  X,
+} from 'lucide-react'
+import {
+  api,
+  type PluginInspection,
+  type PluginStatus,
+  type PluginStoreItem,
+  type PluginUpdate,
+} from '../../lib/api'
 import { Button, Drawer, Field, IconButton, Input, Modal, Spinner, Switch, toast } from '../../components/primitives'
 import { Section, StatusDot } from './shared'
 
@@ -24,6 +40,8 @@ function uiRoute(plugin: PluginStatus): string | null {
 
 export function PluginsPage() {
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
+  const [updates, setUpdates] = useState<Record<string, PluginUpdate>>({})
+  const [checking, setChecking] = useState(false)
   const [loading, setLoading] = useState(true)
   const [installOpen, setInstallOpen] = useState(false)
   const [storeOpen, setStoreOpen] = useState(false)
@@ -37,18 +55,49 @@ export function PluginsPage() {
   const [configSaving, setConfigSaving] = useState(false)
   const [embedded, setEmbedded] = useState<PluginStatus | null>(null)
 
-  const loadPlugins = () => {
+  /**
+   * checkUpdates asks which installed plugins have a newer release.
+   *
+   * It runs on load rather than only on demand, because an update nobody looks
+   * for is an update nobody installs — which is exactly what a page with no
+   * indication of a new version leaves you with. The server caches the answer,
+   * so arriving at this page does not re-fetch every manifest; `refresh` is what
+   * the button next to it passes.
+   */
+  const checkUpdates = useCallback(async (refresh: boolean) => {
+    setChecking(true)
+    try {
+      const report = await api.pluginUpdates(refresh)
+      setUpdates(Object.fromEntries(report.plugins.map((item) => [item.id, item])))
+      if (refresh) {
+        toast(
+          report.available > 0 ? `${report.available} 个插件可以更新` : '所有插件都是最新版本',
+          report.available > 0 ? 'info' : 'success',
+        )
+      }
+      if (report.storeError && refresh) toast(`插件商店读取失败：${report.storeError}`, 'error')
+    } catch (error) {
+      // A failed check leaves the list usable; only an explicit one is worth
+      // interrupting for.
+      if (refresh) toast(errorMessage(error), 'error')
+    } finally {
+      setChecking(false)
+    }
+  }, [])
+
+  const loadPlugins = useCallback(() => {
     setLoading(true)
     void api
       .plugins()
       .then(setPlugins)
       .catch((error) => toast(errorMessage(error), 'error'))
       .finally(() => setLoading(false))
-  }
+  }, [])
 
   useEffect(() => {
     loadPlugins()
-  }, [])
+    void checkUpdates(false)
+  }, [loadPlugins, checkUpdates])
 
   const inspectManifest = async (item: { manifestUrl: string; manifestDigest?: string }) => {
     setInspecting(true)
@@ -70,7 +119,9 @@ export function PluginsPage() {
       const installed = await api.installPlugin(inspection.inspectionId)
       setPlugins((current) => [installed, ...current.filter((item) => item.id !== installed.id)])
       setInspection(null)
-      toast('插件已启用', 'success')
+      toast(inspection.isUpdate ? `已更新到 v${inspection.manifest.version}` : '插件已启用', 'success')
+      // The report still offers the version that was just installed.
+      void checkUpdates(true)
     } catch (error) {
       toast(errorMessage(error), 'error')
     } finally {
@@ -92,12 +143,30 @@ export function PluginsPage() {
     try {
       await api.uninstallPlugin(plugin.id)
       setPlugins((current) => current.filter((item) => item.id !== plugin.id))
+      setUpdates((current) => {
+        const next = { ...current }
+        delete next[plugin.id]
+        return next
+      })
       if (configuring?.id === plugin.id) setConfiguring(null)
       if (embedded?.id === plugin.id) setEmbedded(null)
     } catch (error) {
       toast(errorMessage(error), 'error')
     }
   }
+
+  /** Updating reuses the installation flow rather than shortcutting it: the
+   *  same manifest review and the same one confirmation, because new bytes are
+   *  new bytes whether or not an older version of the plugin is already here. */
+  const startUpdate = (update: PluginUpdate) => {
+    if (!update.manifestUrl) {
+      toast('这个插件没有可用的清单地址，请手动安装新版本', 'error')
+      return
+    }
+    void inspectManifest({ manifestUrl: update.manifestUrl, manifestDigest: update.manifestDigest })
+  }
+
+  const availableUpdates = Object.values(updates).filter((item) => item.available).length
 
   const openConfiguration = async (plugin: PluginStatus) => {
     setConfiguring(plugin)
@@ -142,7 +211,14 @@ export function PluginsPage() {
         icon={<Blocks size={16} />}
         title="插件"
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              icon={<ArrowUpCircle size={15} />}
+              loading={checking}
+              onClick={() => void checkUpdates(true)}
+            >
+              检查更新
+            </Button>
             <Button icon={<PackageOpen size={15} />} onClick={() => setStoreOpen(true)}>
               商店
             </Button>
@@ -152,6 +228,13 @@ export function PluginsPage() {
           </div>
         }
       >
+        {availableUpdates > 0 && (
+          <div className="mb-3 flex items-center gap-2 rounded-[var(--radius-control)] bg-[var(--clay-soft)] px-3 py-2 text-xs text-[var(--color-clay)]">
+            <ArrowUpCircle size={14} className="shrink-0" />
+            {availableUpdates} 个插件有新版本，点击下面的「更新」按钮查看并安装。
+          </div>
+        )}
+
         {loading ? (
           <div className="flex justify-center py-6"><Spinner /></div>
         ) : plugins.length === 0 ? (
@@ -162,10 +245,12 @@ export function PluginsPage() {
               <PluginRow
                 key={plugin.id}
                 plugin={plugin}
+                update={updates[plugin.id]}
                 onEnabled={(enabled) => void setEnabled(plugin, enabled)}
                 onOpen={() => setEmbedded(plugin)}
                 onConfigure={() => void openConfiguration(plugin)}
                 onUninstall={() => void uninstall(plugin)}
+                onUpdate={() => updates[plugin.id] && startUpdate(updates[plugin.id])}
               />
             ))}
           </div>
@@ -173,7 +258,13 @@ export function PluginsPage() {
       </Section>
 
       <div className="flex justify-end">
-        <IconButton label="刷新插件" onClick={loadPlugins}>
+        <IconButton
+          label="刷新插件"
+          onClick={() => {
+            loadPlugins()
+            void checkUpdates(true)
+          }}
+        >
           <RefreshCw size={15} />
         </IconButton>
       </div>
@@ -285,16 +376,20 @@ function PluginFrame({ plugin, onClose }: { plugin: PluginStatus; onClose: () =>
 
 function PluginRow({
   plugin,
+  update,
   onEnabled,
   onOpen,
   onConfigure,
   onUninstall,
+  onUpdate,
 }: {
   plugin: PluginStatus
+  update?: PluginUpdate
   onEnabled: (enabled: boolean) => void
   onOpen: () => void
   onConfigure: () => void
   onUninstall: () => void
+  onUpdate: () => void
 }) {
   const hasUI = uiRoute(plugin) !== null
   return (
@@ -304,12 +399,29 @@ function PluginRow({
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <span className="truncate text-sm font-medium">{plugin.manifest.name}</span>
           <span className="text-xs text-[var(--faint)]">v{plugin.manifest.version}</span>
+          {update?.available && (
+            <span className="chip !border-transparent !bg-[var(--clay-soft)] !text-[var(--color-clay)]">
+              新版本 v{update.latestVersion}
+            </span>
+          )}
         </div>
         <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
           {plugin.manifest.author} · {plugin.status}
           {plugin.error ? ` · ${plugin.error}` : ''}
+          {update?.error ? ` · 检查更新失败：${update.error}` : ''}
         </div>
       </div>
+      {update?.available && (
+        <button
+          type="button"
+          onClick={onUpdate}
+          className="btn btn-primary !px-2 !py-1.5 text-xs"
+          title={`更新到 v${update.latestVersion}`}
+        >
+          <ArrowUpCircle size={14} />
+          更新
+        </button>
+      )}
       {hasUI && (
         <button type="button" onClick={onOpen} className="btn btn-ghost !px-2 !py-1.5 text-xs">
           <PanelsTopLeft size={14} />
@@ -394,13 +506,19 @@ function InspectionModal({
         <>
           <Button onClick={onClose}>取消</Button>
           <Button variant="primary" loading={loading} onClick={onInstall}>
-            确认安装
+            {inspection?.isUpdate ? '确认更新' : '确认安装'}
           </Button>
         </>
       }
     >
       {inspection && manifest && (
         <div className="space-y-4 text-sm">
+          {inspection.isUpdate && (
+            <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs text-[var(--muted)]">
+              当前已安装 v{inspection.currentVersion || '未知版本'}，将替换为 v{manifest.version}。
+              插件会重启，配置和数据目录保留。
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Info label="作者" value={manifest.author} />
             <Info label="许可证" value={manifest.license} />

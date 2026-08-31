@@ -43,6 +43,15 @@ const (
 	JobCancelled JobStatus = "cancelled"
 )
 
+// Aborted reports whether a job stopped short of storing its file. A segment
+// that lands after this point belongs to a transfer nobody is waiting for any
+// more, and writing it would move the row back to running — which is how a
+// cancelled upload used to reappear as if it were still going.
+func (s JobStatus) Aborted() bool { return s == JobFailed || s == JobCancelled }
+
+// Terminal reports whether a job has reached a state it never leaves.
+func (s JobStatus) Terminal() bool { return s == JobComplete || s.Aborted() }
+
 type User struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`

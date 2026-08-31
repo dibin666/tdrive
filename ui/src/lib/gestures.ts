@@ -119,8 +119,12 @@ export interface SwipeState {
  * that gives no feedback until it completes feels broken on the first try and
  * teaches nobody that it exists.
  */
-export function useSwipe(options: { onOpen?: () => void; enabled?: boolean } = {}) {
-  const { onOpen, enabled = true } = options
+export function useSwipe(options: { onOpen?: () => void; enabled?: boolean; width?: number } = {}) {
+  // width is how far the row travels when the actions are open, and it has to
+  // be the actual width of those actions. A fixed distance revealed one button
+  // of a two-button drawer and left the second one under the row, where it was
+  // unreachable however far the row was dragged.
+  const { onOpen, enabled = true, width = SWIPE_THRESHOLD } = options
   const [state, setState] = useState<SwipeState>({ offset: 0, open: false })
   const start = useRef<{ x: number; y: number } | null>(null)
   const axis = useRef<'none' | 'x' | 'y'>('none')
@@ -150,28 +154,31 @@ export function useSwipe(options: { onOpen?: () => void; enabled?: boolean } = {
       }
       if (axis.current !== 'x') return
 
-      // Only left swipes reveal anything, and the offset is clamped so the row
-      // cannot be dragged off the screen.
-      const offset = Math.max(-120, Math.min(0, dx + (state.open ? -SWIPE_THRESHOLD : 0)))
+      // Only left swipes reveal anything, and the offset is clamped just past
+      // the actions so the row cannot be dragged off the screen.
+      const offset = Math.max(-width * 1.2, Math.min(0, dx + (state.open ? -width : 0)))
       setState((prev) => ({ ...prev, offset }))
     },
-    [state.open],
+    [state.open, width],
   )
 
   const onPointerUp = useCallback(() => {
     if (axis.current === 'x') {
+      // Past a bit over half way it snaps open, so a short drawer does not
+      // demand a longer drag than it can travel.
+      const commit = Math.min(SWIPE_THRESHOLD, width * 0.55)
       setState((prev) => {
-        const open = prev.offset <= -SWIPE_THRESHOLD
+        const open = prev.offset <= -commit
         if (open && !prev.open) {
           haptic(8)
           onOpen?.()
         }
-        return { offset: open ? -SWIPE_THRESHOLD : 0, open }
+        return { offset: open ? -width : 0, open }
       })
     }
     start.current = null
     axis.current = 'none'
-  }, [onOpen])
+  }, [onOpen, width])
 
   return {
     swipe: state,

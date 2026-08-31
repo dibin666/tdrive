@@ -66,8 +66,11 @@ func wireRemoteProgress(svc *drive.Service, broker *events.Broker, live *liveUpl
 		switch {
 		case err != nil:
 			status, message = database.JobFailed, err.Error()
-		case job.Status == database.JobComplete:
-			status = database.JobComplete
+		case job.Status.Terminal():
+			// A worker that was cancelled reports the state it actually settled
+			// on, so the stream agrees with the record rather than announcing a
+			// failure for a transfer somebody stopped on purpose.
+			status = job.Status
 		}
 		if status == database.JobRunning {
 			live.update(job.ID, uploaded, total, status)

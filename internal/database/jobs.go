@@ -3,9 +3,15 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrJobFinished is returned when work arrives for a job that has already been
+// cancelled or failed. The caller's job is to stop, not to retry: the file row
+// the segment belonged to has been deleted along with the transfer.
+var ErrJobFinished = errors.New("database: this upload has already been stopped")
 
 const jobCols = `id, user_id, file_id, dir_id, name, total_size, segment_size, segment_count,
 	done_mask, uploaded_bytes, status, error, source, source_url, created_at, updated_at,
@@ -117,12 +123,20 @@ func (d *DB) MarkSegmentDone(ctx context.Context, jobID string, idx int, bytes i
 			mask     []byte
 			uploaded int64
 			count    int
+			current  JobStatus
 		)
 		err := tx.QueryRowContext(ctx,
-			`SELECT done_mask, uploaded_bytes, segment_count FROM upload_jobs WHERE id = ?`, jobID).
-			Scan(&mask, &uploaded, &count)
+			`SELECT done_mask, uploaded_bytes, segment_count, status FROM upload_jobs WHERE id = ?`, jobID).
+			Scan(&mask, &uploaded, &count, &current)
 		if err != nil {
 			return Translate(err)
+		}
+		// A segment can still be in flight when the transfer is cancelled, and
+		// it finishes some seconds later. Recording it would set the row back to
+		// running against a file that Abort has already deleted, so the caller is
+		// told to stop instead.
+		if current.Aborted() {
+			return ErrJobFinished
 		}
 
 		// Re-sending a segment after a retry must not double-count bytes.
@@ -171,6 +185,48 @@ func (d *DB) MarkSegmentDone(ctx context.Context, jobID string, idx int, bytes i
 // terminal status, so an average speed can be computed without counting the
 // time the job spent queued behind the concurrency limit.
 func (d *DB) SetJobStatus(ctx context.Context, id string, status JobStatus, errMsg string) error {
+	sets, args := jobStatusUpdate(status, errMsg)
+	args = append(args, id)
+	res, err := d.write.ExecContext(ctx,
+		`UPDATE upload_jobs SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
+	return affectedOne(res, err, "set job status")
+}
+
+// SetJobStatusIf moves a job forward only from one of the given statuses,
+// reporting whether it applied.
+//
+// Every transition made by a transfer that is under way has to go through this
+// rather than SetJobStatus. A cancelled upload has workers still unwinding —
+// the next segment request, the fetch loop's error path — and an unconditional
+// write from one of them puts the row back into a state the transfer panel then
+// shows as live. Refusing the transition is what makes "cancelled" stick.
+func (d *DB) SetJobStatusIf(ctx context.Context, id string, status JobStatus, errMsg string, from ...JobStatus) (bool, error) {
+	if len(from) == 0 {
+		return false, errors.New("set job status: no source status given")
+	}
+	sets, args := jobStatusUpdate(status, errMsg)
+	placeholders := make([]string, 0, len(from))
+	for _, allowed := range from {
+		placeholders = append(placeholders, "?")
+		args = append(args, string(allowed))
+	}
+	args = append(args, id)
+	res, err := d.write.ExecContext(ctx,
+		`UPDATE upload_jobs SET `+strings.Join(sets, ", ")+
+			` WHERE status IN (`+strings.Join(placeholders, ", ")+`) AND id = ?`, args...)
+	if err != nil {
+		return false, Translate(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, Translate(err)
+	}
+	return n > 0, nil
+}
+
+// jobStatusUpdate builds the assignment list shared by both status writers,
+// including the timing brackets described above.
+func jobStatusUpdate(status JobStatus, errMsg string) ([]string, []any) {
 	now := nowMS()
 	sets := []string{"status = ?", "error = ?", "updated_at = ?"}
 	args := []any{string(status), errMsg, now}
@@ -183,11 +239,7 @@ func (d *DB) SetJobStatus(ctx context.Context, id string, status JobStatus, errM
 		sets = append(sets, "finished_at = ?")
 		args = append(args, now)
 	}
-
-	args = append(args, id)
-	res, err := d.write.ExecContext(ctx,
-		`UPDATE upload_jobs SET `+strings.Join(sets, ", ")+` WHERE id = ?`, args...)
-	return affectedOne(res, err, "set job status")
+	return sets, args
 }
 
 // SetJobFile links a job to the file row it is filling in, which only becomes

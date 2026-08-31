@@ -58,6 +58,13 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		writeError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, drive.ErrExists), errors.Is(err, database.ErrConflict):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, database.ErrJobFinished):
+		// The transfer stopped before this request reached it. That is a state
+		// conflict rather than a server fault, and a client that retried would
+		// get the same answer. The code lets the browser settle its own row to
+		// match instead of reporting an upload failure for a transfer that was
+		// cancelled somewhere else.
+		writeJSON(w, http.StatusConflict, errorBody{Error: err.Error(), Code: "transfer_finished"})
 	case errors.Is(err, drive.ErrLoop), errors.Is(err, drive.ErrIsDir), errors.Is(err, drive.ErrNotDir):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, drive.ErrUploadTaskClosed):

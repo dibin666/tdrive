@@ -69,6 +69,11 @@ func (s *Service) StartLocal(ctx context.Context, req LocalRequest) (database.Up
 // granularity used by server-side URL fetches. It deliberately reopens the
 // source in the goroutine so the HTTP request does not own a file descriptor.
 func (s *Service) runLocal(ctx context.Context, job database.UploadJob, localRoot, sourcePath string) {
+	// Detached from the request that started it, so a cancellation from the
+	// transfer panel needs the job watch to have anything to interrupt.
+	ctx, release := s.WatchUploadJob(ctx, job.ID)
+	defer release()
+
 	lease, err := s.acquireUploadTask(ctx)
 	if err != nil {
 		s.failLocal(ctx, job, err)
@@ -89,8 +94,15 @@ func (s *Service) runLocal(ctx context.Context, job database.UploadJob, localRoo
 		s.failLocal(ctx, job, fmt.Errorf("local file changed size while it was queued"))
 		return
 	}
-	if err := s.db.SetJobStatus(ctx, job.ID, database.JobRunning, ""); err != nil {
+	// Cancelling while the job waited for a transfer slot is common, and this
+	// must not put such a job back into a running state.
+	started, err := s.db.SetJobStatusIf(ctx, job.ID, database.JobRunning, "",
+		database.JobPending, database.JobRunning)
+	if err != nil {
 		s.failLocal(ctx, job, err)
+		return
+	}
+	if !started {
 		return
 	}
 
@@ -135,13 +147,18 @@ func (s *Service) runLocal(ctx context.Context, job database.UploadJob, localRoo
 }
 
 func (s *Service) failLocal(ctx context.Context, job database.UploadJob, err error) {
-	s.log.Warn("a local transfer failed",
-		zap.String("job", job.ID), zap.String("name", job.Name), zap.Error(err))
-	if abortErr := s.Abort(ctx, job.ID, err.Error(), database.JobFailed); abortErr != nil {
-		s.log.Warn("could not clean up a failed local transfer",
-			zap.String("job", job.ID), zap.Error(abortErr))
+	s.abortAfterFailure(ctx, job.ID, err)
+
+	stopped, reported := job, err
+	if ctx.Err() != nil {
+		s.log.Info("a local transfer stopped because it was cancelled",
+			zap.String("job", job.ID), zap.String("name", job.Name))
+		stopped.Status, reported = database.JobCancelled, nil
+	} else {
+		s.log.Warn("a local transfer failed",
+			zap.String("job", job.ID), zap.String("name", job.Name), zap.Error(err))
 	}
 	if s.OnRemoteProgress != nil {
-		s.OnRemoteProgress(job, 0, job.TotalSize, err)
+		s.OnRemoteProgress(stopped, 0, job.TotalSize, reported)
 	}
 }

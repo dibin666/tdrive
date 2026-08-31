@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { Loader2, X } from 'lucide-react'
+import { Check, Loader2, Minus, X } from 'lucide-react'
 import {
   useEffect,
   useRef,
@@ -129,6 +129,67 @@ export function Switch({
         </span>
       )}
     </label>
+  )
+}
+
+/**
+ * Checkbox is the multi-select control for lists.
+ *
+ * Switch is the right control for a setting that is on or off; a list needs the
+ * other thing — a box you tick, with an indeterminate state for a "select all"
+ * header that is only partly true. It is a button rather than a native input
+ * because the platform control cannot show that third state without imperative
+ * DOM work, and on a phone it is both too small to hit and the wrong shape.
+ *
+ * The tap target is deliberately larger than the box: 16px of drawn checkbox
+ * inside a 36px hit area, which is the difference between selecting a file and
+ * opening it by accident.
+ */
+export function Checkbox({
+  checked,
+  indeterminate,
+  onChange,
+  label,
+  className,
+}: {
+  checked: boolean
+  indeterminate?: boolean
+  onChange: (next: boolean) => void
+  label: string
+  className?: string
+}) {
+  const on = checked || Boolean(indeterminate)
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={indeterminate ? 'mixed' : checked}
+      aria-label={label}
+      title={label}
+      onClick={(e) => {
+        // Inside a row that selects on click, the box must be the only thing
+        // that reacts to a tap on the box.
+        e.stopPropagation()
+        onChange(!checked)
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      className={clsx(
+        'flex size-9 shrink-0 items-center justify-center sm:size-6',
+        className,
+      )}
+    >
+      <span
+        className={clsx(
+          'flex size-4 items-center justify-center rounded-[4px] border transition-colors',
+          on
+            ? 'border-[var(--color-clay)] bg-[var(--color-clay)] text-white'
+            : 'border-[var(--line-strong)]',
+        )}
+      >
+        {indeterminate ? <Minus size={11} strokeWidth={3} /> : checked ? <Check size={11} strokeWidth={3} /> : null}
+      </span>
+    </button>
   )
 }
 
@@ -513,7 +574,8 @@ export function ToastHost() {
   if (items.length === 0) return null
 
   return (
-    <div className="fixed bottom-4 left-1/2 z-[60] -translate-x-1/2 space-y-2 px-4 w-full max-w-sm pb-safe">
+    // Clear of the phone's tab bar, which a toast at bottom-4 covered.
+    <div className="fixed bottom-[calc(4.25rem+env(safe-area-inset-bottom))] left-1/2 z-[60] w-full max-w-sm -translate-x-1/2 space-y-2 px-4 md:bottom-4">
       {items.map((item) => (
         <div
           key={item.id}

@@ -221,6 +221,28 @@ export interface PluginStoreIndex {
   plugins: PluginStoreItem[]
 }
 
+/** One installed plugin's update state. manifestUrl and manifestDigest go back
+ *  into inspectPlugin, so installing an update takes the same review-and-confirm
+ *  path as a first installation. */
+export interface PluginUpdate {
+  id: string
+  name: string
+  currentVersion: string
+  latestVersion?: string
+  manifestUrl?: string
+  manifestDigest?: string
+  available: boolean
+  origin?: 'store' | 'manifest'
+  error?: string
+}
+
+export interface PluginUpdateReport {
+  plugins: PluginUpdate[]
+  checkedAt: string
+  available: number
+  storeError?: string
+}
+
 export interface LocalEntry {
   name: string
   path: string
@@ -797,6 +819,8 @@ export const api = {
 
   plugins: () => request<PluginStatus[]>('/plugins/'),
   pluginStore: (q = '') => request<PluginStoreIndex>(`/plugins/store${query({ q })}`),
+  pluginUpdates: (refresh = false) =>
+    request<PluginUpdateReport>(`/plugins/updates${query({ refresh: refresh ? '1' : '' })}`),
   inspectPlugin: (body: { manifestUrl: string; manifestDigest?: string }) =>
     request<PluginInspection>('/plugins/inspect', { method: 'POST', body: json(body) }),
   installPlugin: (inspectionId: string) =>

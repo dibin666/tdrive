@@ -366,7 +366,10 @@ export function Transfers() {
     // button either. Report what went wrong instead of swallowing it.
     try {
       if (row.kind === 'upload') {
-        if (row.localId) uploads.cancel(row.localId)
+        // Awaited: the manager stops the request here and the transfer on the
+        // server, and a refusal from either has to reach the toast below rather
+        // than leaving a row that says cancelled while the upload continues.
+        if (row.localId) await uploads.cancel(row.localId)
         else await api.cancelUpload(row.id)
       } else {
         if (row.localId) downloads.cancel(row.localId)

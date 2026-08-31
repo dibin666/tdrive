@@ -665,6 +665,75 @@ func TestMarkSegmentDoneIsIdempotent(t *testing.T) {
 	}
 }
 
+// A segment already in flight when the transfer was cancelled lands seconds
+// later. Recording it would put the row back into running against a file that
+// has already been deleted, which is how a cancelled upload reappeared as if it
+// were still going.
+func TestMarkSegmentDoneRefusesACancelledJob(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	u, _ := db.CreateUser(ctx, "u", "h", RoleUser)
+	job := UploadJob{
+		ID: NewID(), UserID: u.ID, Name: "f", TotalSize: 200,
+		SegmentSize: 100, SegmentCount: 2, DoneMask: NewMask(2), Status: JobRunning,
+	}
+	if err := db.InsertJob(ctx, job); err != nil {
+		t.Fatalf("InsertJob: %v", err)
+	}
+	if err := db.SetJobStatus(ctx, job.ID, JobCancelled, "cancelled"); err != nil {
+		t.Fatalf("SetJobStatus: %v", err)
+	}
+
+	if _, err := db.MarkSegmentDone(ctx, job.ID, 1, 100); !errors.Is(err, ErrJobFinished) {
+		t.Fatalf("MarkSegmentDone after cancel = %v, want ErrJobFinished", err)
+	}
+	got, _ := db.JobByID(ctx, job.ID)
+	if got.Status != JobCancelled {
+		t.Errorf("Status = %q, want %q", got.Status, JobCancelled)
+	}
+	if got.UploadedBytes != 0 {
+		t.Errorf("UploadedBytes = %d, want 0: a cancelled job counted a straggling segment", got.UploadedBytes)
+	}
+}
+
+// The workers of a cancelled transfer are still unwinding when it is cancelled,
+// and one of them marking the job running is what made the panel show a
+// cancelled upload as live again.
+func TestSetJobStatusIfWillNotRestartACancelledJob(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	u, _ := db.CreateUser(ctx, "u", "h", RoleUser)
+	job := UploadJob{
+		ID: NewID(), UserID: u.ID, Name: "f", TotalSize: 100,
+		SegmentSize: 100, SegmentCount: 1, DoneMask: NewMask(1), Status: JobPending,
+	}
+	if err := db.InsertJob(ctx, job); err != nil {
+		t.Fatalf("InsertJob: %v", err)
+	}
+
+	started, err := db.SetJobStatusIf(ctx, job.ID, JobRunning, "", JobPending, JobRunning)
+	if err != nil || !started {
+		t.Fatalf("SetJobStatusIf(pending -> running) = %v, %v; want true, nil", started, err)
+	}
+
+	if err := db.SetJobStatus(ctx, job.ID, JobCancelled, "cancelled"); err != nil {
+		t.Fatalf("SetJobStatus: %v", err)
+	}
+	started, err = db.SetJobStatusIf(ctx, job.ID, JobRunning, "", JobPending, JobRunning)
+	if err != nil {
+		t.Fatalf("SetJobStatusIf after cancel: %v", err)
+	}
+	if started {
+		t.Fatal("SetJobStatusIf restarted a cancelled job")
+	}
+	got, _ := db.JobByID(ctx, job.ID)
+	if got.Status != JobCancelled {
+		t.Errorf("Status = %q, want %q", got.Status, JobCancelled)
+	}
+}
+
 func TestDefaultChannelSwitch(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

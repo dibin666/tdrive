@@ -154,6 +154,11 @@ func (s *Service) scheduleJobWorker(jobID string, run func()) bool {
 // same granularity the browser uploads at, which keeps one recovery story for
 // both paths.
 func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target *url.URL) {
+	// The worker outlives the request that started it, so a cancellation from
+	// the transfer panel has nothing to interrupt unless the job is watched.
+	ctx, release := s.WatchUploadJob(ctx, job.ID)
+	defer release()
+
 	lease, err := s.acquireUploadTask(ctx)
 	if err != nil {
 		s.failRemote(ctx, job, err)
@@ -162,8 +167,15 @@ func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target 
 	defer lease.release()
 	defer s.bindUploadAccount(job.ID, lease.account)()
 
-	if err := s.db.SetJobStatus(ctx, job.ID, database.JobRunning, ""); err != nil {
+	// Cancelling while the job waited for a transfer slot is common, because
+	// waiting is exactly when a queue is long enough to change your mind.
+	started, err := s.db.SetJobStatusIf(ctx, job.ID, database.JobRunning, "",
+		database.JobPending, database.JobRunning)
+	if err != nil {
 		s.log.Warn("could not mark a transfer running", zap.String("job", job.ID), zap.Error(err))
+	}
+	if err == nil && !started {
+		return
 	}
 
 	file, err := s.db.FileByID(ctx, job.FileID)
@@ -202,13 +214,21 @@ func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target 
 }
 
 func (s *Service) failRemote(ctx context.Context, job database.UploadJob, err error) {
-	s.log.Warn("a remote transfer failed",
-		zap.String("job", job.ID), zap.String("name", job.Name), zap.Error(err))
-	if abortErr := s.Abort(ctx, job.ID, err.Error(), database.JobFailed); abortErr != nil {
-		s.log.Warn("could not clean up a failed transfer",
-			zap.String("job", job.ID), zap.Error(abortErr))
+	s.abortAfterFailure(ctx, job.ID, err)
+
+	// The cancellation already recorded the reason it stopped. Announcing the
+	// context error as a failure on top of it is what made the transfer panel
+	// and the history tell two different stories about the same transfer.
+	stopped, reported := job, err
+	if ctx.Err() != nil {
+		s.log.Info("a remote transfer stopped because it was cancelled",
+			zap.String("job", job.ID), zap.String("name", job.Name))
+		stopped.Status, reported = database.JobCancelled, nil
+	} else {
+		s.log.Warn("a remote transfer failed",
+			zap.String("job", job.ID), zap.String("name", job.Name), zap.Error(err))
 	}
-	s.notifyRemote(job, database.File{Name: job.Name}, 0, 0, job.TotalSize, err)
+	s.notifyRemote(stopped, database.File{Name: job.Name}, 0, 0, job.TotalSize, reported)
 }
 
 func (s *Service) notifyRemote(job database.UploadJob, file database.File, index int, uploaded, total int64, err error) {

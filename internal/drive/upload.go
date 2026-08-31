@@ -201,6 +201,14 @@ func (s *Service) PutSegment(
 	if err != nil {
 		return err
 	}
+	// Nothing is uploaded for a transfer that has already been stopped. The
+	// caller may be a browser whose cancellation raced its own in-flight
+	// request, or a plugin that has not noticed yet; either way the file row is
+	// gone and storing the segment would leave a Telegram document nothing
+	// points at.
+	if job.Status.Aborted() {
+		return fmt.Errorf("%w: %q", database.ErrJobFinished, job.Name)
+	}
 	index, size = request.Index, request.Size
 	if index < 1 || index > job.SegmentCount {
 		return fmt.Errorf("segment %d is outside the file's %d segments", index, job.SegmentCount)
@@ -413,6 +421,84 @@ func (s *Service) Complete(ctx context.Context, jobID string) (database.File, er
 	return file, err
 }
 
+// WatchUploadJob derives a context that CancelUpload can interrupt.
+//
+// Every piece of work that moves bytes for a job registers here: the HTTP
+// handler receiving a browser segment, the goroutine fetching a remote URL, the
+// stream a plugin writes its segments into. None of them is running inside the
+// request that eventually cancels the transfer, so without this there is
+// nothing for a cancellation to interrupt and the bytes keep going to Telegram
+// after the record says the transfer stopped.
+//
+// The returned release must be called when the work finishes; it cancels the
+// derived context and drops the registration.
+func (s *Service) WatchUploadJob(ctx context.Context, jobID string) (context.Context, context.CancelFunc) {
+	if jobID == "" {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	token := s.jobCancelID.Add(1)
+
+	s.jobCancelMu.Lock()
+	watchers, ok := s.jobCancels[jobID]
+	if !ok {
+		watchers = make(map[uint64]context.CancelFunc)
+		s.jobCancels[jobID] = watchers
+	}
+	watchers[token] = cancel
+	s.jobCancelMu.Unlock()
+
+	return ctx, func() {
+		cancel()
+		s.jobCancelMu.Lock()
+		if watchers, ok := s.jobCancels[jobID]; ok {
+			delete(watchers, token)
+			if len(watchers) == 0 {
+				delete(s.jobCancels, jobID)
+			}
+		}
+		s.jobCancelMu.Unlock()
+	}
+}
+
+// stopUploadWork interrupts everything registered against a job.
+func (s *Service) stopUploadWork(jobID string) {
+	s.jobCancelMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.jobCancels[jobID]))
+	for _, cancel := range s.jobCancels[jobID] {
+		cancels = append(cancels, cancel)
+	}
+	s.jobCancelMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+// CancelUpload stops a transfer and records it as cancelled.
+//
+// The order matters. The workers are interrupted first, so that by the time
+// Abort deletes the file row there is nothing still trying to store segments
+// into it; a worker that notices its context is gone leaves the status alone
+// rather than reporting a failure over the cancellation.
+//
+// Cancelling twice is not an error — the transfer panel and the browser can
+// both ask — and a transfer that has already stored its file is refused rather
+// than deleted, since Abort's cleanup would take the finished file with it.
+func (s *Service) CancelUpload(ctx context.Context, jobID string) error {
+	job, err := s.db.JobByID(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	s.stopUploadWork(jobID)
+	switch {
+	case job.Status == database.JobComplete:
+		return fmt.Errorf("%w: %q has already finished uploading", database.ErrJobFinished, job.Name)
+	case job.Status.Aborted():
+		return nil
+	}
+	return s.Abort(ctx, jobID, "cancelled", database.JobCancelled)
+}
+
 // Abort tears down a failed or cancelled upload, removing whatever segments did
 // land so the channel is not left holding documents nothing points at.
 func (s *Service) Abort(ctx context.Context, jobID, reason string, status database.JobStatus) error {
@@ -451,6 +537,29 @@ func (s *Service) Abort(ctx context.Context, jobID, reason string, status databa
 	return err
 }
 
+// abortAfterFailure records why a transfer stopped, unless it stopped because
+// somebody cancelled it.
+//
+// A cancellation interrupts the worker, so the worker's own error is the
+// context error the cancellation caused. Reporting that as a failure would
+// overwrite the reason CancelUpload already wrote, which is how a transfer the
+// user cancelled ended up in the history as "failed: context canceled". The
+// recorded status is read rather than inferred from the context, so a caller
+// whose request was simply abandoned — a WebDAV client that hung up mid-PUT —
+// is still recorded as failed. The cleanup itself runs on an uncancellable
+// context for the same reason: the context it was handed is usually the one
+// that just died.
+func (s *Service) abortAfterFailure(ctx context.Context, jobID string, cause error) {
+	cleanupCtx := context.WithoutCancel(ctx)
+	if job, err := s.db.JobByID(cleanupCtx, jobID); err == nil && job.Status.Terminal() {
+		return
+	}
+	if err := s.Abort(cleanupCtx, jobID, cause.Error(), database.JobFailed); err != nil {
+		s.log.Warn("could not clean up a failed transfer",
+			zap.String("job", jobID), zap.Error(err))
+	}
+}
+
 // UploadStream stores a whole file from one reader of known length, splitting
 // it into segments as it goes.
 //
@@ -478,7 +587,12 @@ func (s *Service) uploadStream(ctx context.Context, account Account, req UploadR
 		return database.File{}, err
 	}
 	defer s.bindUploadAccount(job.ID, account)()
-	if err := s.db.SetJobStatus(ctx, job.ID, database.JobRunning, ""); err != nil {
+
+	ctx, release := s.WatchUploadJob(ctx, job.ID)
+	defer release()
+
+	if _, err := s.db.SetJobStatusIf(ctx, job.ID, database.JobRunning, "",
+		database.JobPending, database.JobRunning); err != nil {
 		return database.File{}, err
 	}
 	if s.OnRemoteProgress != nil {
@@ -501,7 +615,7 @@ func (s *Service) uploadStream(ctx context.Context, account Account, req UploadR
 				}
 			})
 		if err != nil {
-			_ = s.Abort(ctx, job.ID, err.Error(), database.JobFailed)
+			s.abortAfterFailure(ctx, job.ID, err)
 			if s.OnRemoteProgress != nil {
 				s.OnRemoteProgress(job, base, file.Size, err)
 			}
