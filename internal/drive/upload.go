@@ -551,7 +551,10 @@ func (s *Service) Abort(ctx context.Context, jobID, reason string, status databa
 // that just died.
 func (s *Service) abortAfterFailure(ctx context.Context, jobID string, cause error) {
 	cleanupCtx := context.WithoutCancel(ctx)
-	if job, err := s.db.JobByID(cleanupCtx, jobID); err == nil && job.Status.Terminal() {
+	// Aborted rather than Terminal: a job whose last segment landed but whose
+	// completion then failed reads as complete and still has a pending file row
+	// to clean up, so it must not be skipped here.
+	if job, err := s.db.JobByID(cleanupCtx, jobID); err == nil && job.Status.Aborted() {
 		return
 	}
 	if err := s.Abort(cleanupCtx, jobID, cause.Error(), database.JobFailed); err != nil {
