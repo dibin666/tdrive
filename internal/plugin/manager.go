@@ -304,7 +304,12 @@ func (manager *Manager) Before(ctx context.Context, operation tdriveplugin.Opera
 		pluginResult, err := active.client.Before(callCtx, operation)
 		cancel()
 		if err != nil {
-			manager.handlePluginFailure(active.record.ID, err)
+			// A caller that gave up on its own request has not told us anything
+			// about the plugin. Restarting a healthy child for it would abandon
+			// whatever work that child was doing for everybody else.
+			if !callerAbandonedPluginCall(ctx, err) {
+				manager.handlePluginFailure(active.record.ID, err)
+			}
 			return tdriveplugin.OperationResult{}, fmt.Errorf("plugin %q before hook: %w", active.record.ID, err)
 		}
 		if !pluginResult.Allowed {
@@ -330,10 +335,26 @@ func (manager *Manager) After(ctx context.Context, operation tdriveplugin.Operat
 		err := active.client.After(callCtx, operation)
 		cancel()
 		if err != nil {
+			if callerAbandonedPluginCall(ctx, err) {
+				continue
+			}
 			manager.log.Warn("plugin after hook failed", zap.String("plugin", active.record.ID), zap.Error(err))
 			manager.handlePluginFailure(active.record.ID, err)
 		}
 	}
+}
+
+// callerAbandonedPluginCall reports whether a failed plugin call ended because
+// the caller's own context was cancelled rather than because the plugin did
+// anything wrong.
+//
+// The RPC client races every call against the caller's context and returns
+// ctx.Err() when that context wins, so a cancelled HTTP request, a client that
+// disconnected, or a shutting-down request chain all surface here as an error
+// from a plugin that may be perfectly healthy. Recovering from one of those
+// kills a working child and everything it had in flight.
+func callerAbandonedPluginCall(ctx context.Context, err error) bool {
+	return ctx != nil && ctx.Err() != nil && errors.Is(err, context.Canceled)
 }
 
 // Inspect downloads and validates a plugin manifest and stores a one-time

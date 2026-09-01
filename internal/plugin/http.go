@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -148,9 +149,7 @@ func (manager *Manager) servePublicHTTP(response http.ResponseWriter, request *h
 	pluginResponse, err := active.client.HandleHTTP(callCtx, pluginRequest)
 	cancel()
 	if err != nil {
-		manager.log.Warn("plugin HTTP handler failed", zap.String("plugin", active.record.ID), zap.Error(err))
-		manager.handlePluginFailure(active.record.ID, err)
-		http.Error(response, "plugin handler failed", http.StatusBadGateway)
+		manager.reportPluginCallError(response, active, request, err)
 		return
 	}
 	for key, values := range pluginResponse.Headers {
@@ -162,6 +161,67 @@ func (manager *Manager) servePublicHTTP(response http.ResponseWriter, request *h
 	}
 	response.WriteHeader(status)
 	_, _ = response.Write(pluginResponse.Body)
+}
+
+// reportPluginCallError answers one failed plugin HTTP call and decides whether
+// the child process is at fault.
+//
+// It exists because "the call did not return a response" and "the plugin is
+// broken" are not the same thing, and treating them as one restarted a healthy
+// child every time a browser walked away from an in-flight request. A plugin
+// page that polls cancels request.Context() whenever the operator switches
+// tabs, reloads, or closes it; the RPC client returns that cancellation
+// verbatim, and reading it as a runtime failure killed the child. For a sync
+// plugin that meant every in-flight transfer restarted from zero whenever
+// somebody navigated away from its page.
+//
+// Only a child that has actually exited, or an RPC connection that can no
+// longer carry a call, is a failure worth recovering from. A cancellation
+// belongs to the caller, and a timeout against a live child is reported to the
+// browser without disturbing whatever that child is still doing.
+func (manager *Manager) reportPluginCallError(
+	response http.ResponseWriter,
+	active *activePlugin,
+	request *http.Request,
+	err error,
+) {
+	// The client hung up. Nothing is waiting for a response and no plugin
+	// misbehaved, so this is not even worth a warning.
+	if request.Context().Err() != nil && errors.Is(err, context.Canceled) {
+		manager.log.Debug("plugin HTTP request was cancelled by the client",
+			zap.String("plugin", active.record.ID), zap.Error(err))
+		// 499 is nginx's "client closed request". Nothing reads it here, but it
+		// keeps the access log honest about why the handler produced no body.
+		response.WriteHeader(clientClosedRequest)
+		return
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) && !pluginChildExited(active) {
+		// The child is alive and simply slower than pluginCallTimeout, which a
+		// plugin moving bytes legitimately can be. Report the timeout and record
+		// it, but let it keep working.
+		manager.log.Warn("plugin HTTP handler timed out",
+			zap.String("plugin", active.record.ID), zap.Error(err))
+		manager.recordPluginFailure(active.record.ID, err)
+		http.Error(response, "plugin handler timed out", http.StatusGatewayTimeout)
+		return
+	}
+
+	manager.log.Warn("plugin HTTP handler failed", zap.String("plugin", active.record.ID), zap.Error(err))
+	manager.handlePluginFailure(active.record.ID, err)
+	http.Error(response, "plugin handler failed", http.StatusBadGateway)
+}
+
+// clientClosedRequest is nginx's non-standard 499, used here for the same
+// reason: the request ended because the client went away, and no other status
+// says that without blaming the server or the plugin.
+const clientClosedRequest = 499
+
+// pluginChildExited reports whether the child process is gone. A runtime built
+// by a test has no process, and is treated as alive so the caller falls back to
+// classifying by error alone.
+func pluginChildExited(active *activePlugin) bool {
+	return active != nil && active.process != nil && active.process.Exited()
 }
 
 func splitPluginPath(path string) (string, string, bool) {
