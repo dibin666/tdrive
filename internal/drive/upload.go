@@ -238,6 +238,21 @@ func (s *Service) PutSegment(
 		}
 	}
 
+	// Plugin uploads enter through the host stream rather than the HTTP upload
+	// handler, so they do not get that handler's pending-to-running transition.
+	// Keep the transition at the shared segment boundary as well; otherwise a
+	// one-segment plugin upload records its start time only when the segment has
+	// already finished, making its duration and average speed meaningless.
+	started, err := s.db.SetJobStatusIf(
+		ctx, job.ID, database.JobRunning, "", database.JobPending, database.JobRunning,
+	)
+	if err != nil {
+		return err
+	}
+	if !started {
+		return fmt.Errorf("%w: %q", database.ErrJobFinished, job.Name)
+	}
+
 	doc, account, err := s.uploadSegment(ctx, account, file, channel, index, r, size, progress)
 	if err != nil {
 		return err

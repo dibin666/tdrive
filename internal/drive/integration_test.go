@@ -9,7 +9,9 @@ import (
 	"math/rand"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -255,6 +257,87 @@ func TestParallelSegmentUploadMatchesSequential(t *testing.T) {
 	if got := h.readAll(t, done); !bytes.Equal(got, data) {
 		t.Fatal("content stored out of order did not read back correctly")
 	}
+}
+
+// A plugin writes through the host stream, so it bypasses the HTTP handler
+// that normally marks an upload as running. PutSegment must make the same
+// transition before it starts consuming the stream; otherwise a one-segment
+// plugin upload gets its StartedAt timestamp only when its final bytes land.
+func TestPutSegmentRecordsStartBeforeTheStreamFinishes(t *testing.T) {
+	const segmentSize = 4096
+	h := newHarness(t, segmentSize)
+	ctx := context.Background()
+	data := randomBytes(segmentSize, 23)
+
+	job, _, err := h.svc.Begin(ctx, UploadRequest{
+		DirPath: "/", Name: "gated.bin", Size: int64(len(data)),
+	})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	reader := newStartGatedReader(data)
+	defer reader.allow()
+	uploadDone := make(chan error, 1)
+	go func() {
+		uploadDone <- h.svc.PutSegment(ctx, job, 1, reader, int64(len(data)), nil)
+	}()
+
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("the segment uploader did not start reading the source")
+	}
+
+	running, err := h.db.JobByID(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("read running job: %v", err)
+	}
+	if running.Status != database.JobRunning {
+		t.Fatalf("job status while the stream is blocked = %q, want running", running.Status)
+	}
+	if running.StartedAt.IsZero() {
+		t.Fatal("job start time was not recorded before the stream finished")
+	}
+	if !running.FinishedAt.IsZero() {
+		t.Fatal("job was marked finished before the stream finished")
+	}
+
+	reader.allow()
+	select {
+	case err := <-uploadDone:
+		if err != nil {
+			t.Fatalf("put segment: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the segment uploader did not finish after the source was released")
+	}
+}
+
+type startGatedReader struct {
+	source      *bytes.Reader
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newStartGatedReader(data []byte) *startGatedReader {
+	return &startGatedReader{
+		source:  bytes.NewReader(data),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (reader *startGatedReader) Read(buffer []byte) (int, error) {
+	reader.startOnce.Do(func() { close(reader.started) })
+	<-reader.release
+	return reader.source.Read(buffer)
+}
+
+func (reader *startGatedReader) allow() {
+	reader.releaseOnce.Do(func() { close(reader.release) })
 }
 
 // An interrupted upload must resume by re-sending only the segments that never
