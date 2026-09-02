@@ -485,22 +485,49 @@ export function Modal({
   width?: string
 }) {
   const ref = useRef<HTMLDivElement>(null)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
 
   useEffect(() => {
     if (!open) return
+
+    const previousActiveElement = document.activeElement as HTMLElement | null
+
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') onCloseRef.current()
     }
     document.addEventListener('keydown', onKey)
-    // Moving focus into the dialog is what makes Escape and Tab behave.
+
+    // Moving focus into the dialog only once when opened.
     const timer = setTimeout(() => {
-      ref.current?.querySelector<HTMLElement>('input, textarea, button')?.focus()
+      const container = ref.current
+      if (!container) return
+      const autoFocusEl = container.querySelector<HTMLElement>('[autofocus], [data-autofocus]')
+      if (autoFocusEl) {
+        autoFocusEl.focus()
+      } else {
+        const firstInput = container.querySelector<HTMLElement>(
+          'input:not([disabled]):not([type="hidden"]), textarea:not([disabled]), select:not([disabled])'
+        )
+        if (firstInput) {
+          firstInput.focus()
+        } else {
+          const firstFocusable = container.querySelector<HTMLElement>(
+            'button:not([disabled]), [tabindex]:not([tabindex="-1"]), a[href]'
+          )
+          firstFocusable?.focus()
+        }
+      }
     }, 30)
+
     return () => {
       document.removeEventListener('keydown', onKey)
       clearTimeout(timer)
+      if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
+        previousActiveElement.focus()
+      }
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
 

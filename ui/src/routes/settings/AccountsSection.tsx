@@ -327,8 +327,8 @@ function AccountCard({
         !account.enabled && 'opacity-60',
       )}
     >
-      <div className="flex flex-wrap items-start gap-3">
-        <span className="mt-1">
+      <div className="flex items-start gap-3">
+        <span className="mt-1 shrink-0">
           <StatusDot tone={tone} />
         </span>
         <div className="min-w-0 flex-1">
@@ -355,37 +355,37 @@ function AccountCard({
           <p className="mt-0.5 text-xs text-[var(--muted)]">{label}</p>
 
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted)]">
-            {account.status.phone && <span>{account.status.phone}</span>}
-            {account.status.dc ? <span>DC{account.status.dc}</span> : null}
-            {account.channelTitle && <span>频道「{account.channelTitle}」</span>}
-            {account.proxyUrl && <span>代理 {account.proxyUrl}</span>}
-            <span>
+            {account.status.phone && <span className="shrink-0">{account.status.phone}</span>}
+            {account.status.dc ? <span className="shrink-0">DC{account.status.dc}</span> : null}
+            {account.channelTitle && <span className="break-all">频道「{account.channelTitle}」</span>}
+            {account.proxyUrl && <span className="break-all">代理 {account.proxyUrl}</span>}
+            <span className="shrink-0">
               占用 上传 {account.activeUploads} / 下载 {account.activeDownloads}
             </span>
           </div>
 
           {/* Daily Quota Section */}
-          <div className="mt-3 rounded-[var(--radius-control)] bg-[var(--sunk)] p-3">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="@container mt-3 rounded-[var(--radius-control)] bg-[var(--sunk)] p-3">
+            <div className="grid grid-cols-1 gap-3 @lg:grid-cols-2">
               {/* Upload Quota */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="flex items-center gap-1 font-medium text-[var(--ink)]">
-                    <Upload size={12} className="text-[var(--color-clay)]" />
+              <div className="min-w-0 space-y-1.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="flex items-center gap-1 font-medium text-[var(--ink)] shrink-0">
+                    <Upload size={12} className="text-[var(--color-clay)] shrink-0" />
                     每日上传
                   </span>
                   {account.uploadDailyQuota > 0 ? (
                     uploadExhausted ? (
-                      <span className="rounded bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)]">
+                      <span className="rounded bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)] shrink-0">
                         已耗尽
                       </span>
                     ) : (
-                      <span className="text-[11px] text-[var(--muted)]">
+                      <span className="text-[11px] text-[var(--muted)] shrink-0">
                         剩余 <span className="font-medium text-[var(--ink)]">{formatBytes(account.uploadRemainingToday)}</span>
                       </span>
                     )
                   ) : (
-                    <span className="text-[11px] text-[var(--faint)]">不限</span>
+                    <span className="text-[11px] text-[var(--faint)] shrink-0">不限</span>
                   )}
                 </div>
 
@@ -397,38 +397,38 @@ function AccountCard({
                   />
                 ) : null}
 
-                <div className="flex flex-wrap items-baseline justify-between gap-1 text-[11px] text-[var(--muted)]">
-                  <span>
+                <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-[11px] text-[var(--muted)]">
+                  <span className="shrink-0">
                     已用 {formatBytes(account.uploadUsedToday)}
                     {account.uploadReservedToday > 0 && (
                       <span className="text-[var(--faint)]">（保留中 {formatBytes(account.uploadReservedToday)}）</span>
                     )}
                   </span>
-                  <span className="text-[var(--faint)]">
+                  <span className="shrink-0 text-[var(--faint)]">
                     {account.uploadDailyQuota > 0 ? `/ ${formatBytes(account.uploadDailyQuota)}` : '配额不限'}
                   </span>
                 </div>
               </div>
 
               {/* Download Quota */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="flex items-center gap-1 font-medium text-[var(--ink)]">
-                    <Download size={12} className="text-[var(--color-clay)]" />
+              <div className="min-w-0 space-y-1.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="flex items-center gap-1 font-medium text-[var(--ink)] shrink-0">
+                    <Download size={12} className="text-[var(--color-clay)] shrink-0" />
                     每日下载
                   </span>
                   {account.downloadDailyQuota > 0 ? (
                     downloadExhausted ? (
-                      <span className="rounded bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)]">
+                      <span className="rounded bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)] shrink-0">
                         已耗尽
                       </span>
                     ) : (
-                      <span className="text-[11px] text-[var(--muted)]">
+                      <span className="text-[11px] text-[var(--muted)] shrink-0">
                         剩余 <span className="font-medium text-[var(--ink)]">{formatBytes(account.downloadRemainingToday)}</span>
                       </span>
                     )
                   ) : (
-                    <span className="text-[11px] text-[var(--faint)]">不限</span>
+                    <span className="text-[11px] text-[var(--faint)] shrink-0">不限</span>
                   )}
                 </div>
 
@@ -440,62 +440,63 @@ function AccountCard({
                   />
                 ) : null}
 
-                <div className="flex flex-wrap items-baseline justify-between gap-1 text-[11px] text-[var(--muted)]">
-                  <span>
+                <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-[11px] text-[var(--muted)]">
+                  <span className="shrink-0">
                     已用 {formatBytes(account.downloadUsedToday)}
                     {account.downloadReservedToday > 0 && (
                       <span className="text-[var(--faint)]">（保留中 {formatBytes(account.downloadReservedToday)}）</span>
                     )}
                   </span>
-                  <span className="text-[var(--faint)]">
+                  <span className="shrink-0 text-[var(--faint)]">
                     {account.downloadDailyQuota > 0 ? `/ ${formatBytes(account.downloadDailyQuota)}` : '配额不限'}
                   </span>
                 </div>
               </div>
             </div>
 
-            <div className="mt-2.5 flex items-center justify-between border-t border-[var(--line)] pt-2 text-[10px] text-[var(--faint)]">
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-[var(--line)] pt-2 text-[10px] text-[var(--faint)]">
               <span>每日按 UTC 0 点重置（UTC {account.quotaDate || '当日'}）</span>
-              {resetCountdown && <span>{resetCountdown}</span>}
+              {resetCountdown && <span className="shrink-0">{resetCountdown}</span>}
             </div>
           </div>
-        </div>
 
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <Button icon={<SlidersHorizontal size={14} />} disabled={busy} onClick={onQuota}>
-            配额
-          </Button>
-          <Button icon={<Globe size={14} />} disabled={busy} onClick={onProxy}>
-            代理
-          </Button>
-          {hasChannel && account.status.state === 'ready' && (
-            <Button icon={<RefreshCw size={14} />} loading={busy} onClick={onCheck}>
-              检测频道
+          {/* Action Buttons */}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button icon={<SlidersHorizontal size={14} />} disabled={busy} onClick={onQuota}>
+              配额
             </Button>
-          )}
-          {needsChannel && (
-            <>
-              <Button icon={<Radio size={14} />} loading={busy} onClick={onJoin}>
-                加入存储频道
+            <Button icon={<Globe size={14} />} disabled={busy} onClick={onProxy}>
+              代理
+            </Button>
+            {hasChannel && account.status.state === 'ready' && (
+              <Button icon={<RefreshCw size={14} />} loading={busy} onClick={onCheck}>
+                检测频道
               </Button>
-              {/* The way out when the automatic join cannot work, and the way
-                  in for an account somebody already added in a Telegram
-                  client. */}
-              <Button icon={<Hash size={14} />} disabled={busy} onClick={onPickChannel}>
-                手动选择频道
-              </Button>
-            </>
-          )}
-          {!account.isPrimary && (
-            <>
-              <Button icon={<RefreshCw size={14} />} loading={busy} onClick={onToggle}>
-                {account.enabled ? '停用' : '启用'}
-              </Button>
-              <Button variant="danger" icon={<Trash2 size={14} />} loading={busy} onClick={onRemove}>
-                删除
-              </Button>
-            </>
-          )}
+            )}
+            {needsChannel && (
+              <>
+                <Button icon={<Radio size={14} />} loading={busy} onClick={onJoin}>
+                  加入存储频道
+                </Button>
+                {/* The way out when the automatic join cannot work, and the way
+                    in for an account somebody already added in a Telegram
+                    client. */}
+                <Button icon={<Hash size={14} />} disabled={busy} onClick={onPickChannel}>
+                  手动选择频道
+                </Button>
+              </>
+            )}
+            {!account.isPrimary && (
+              <>
+                <Button icon={<RefreshCw size={14} />} loading={busy} onClick={onToggle}>
+                  {account.enabled ? '停用' : '启用'}
+                </Button>
+                <Button variant="danger" icon={<Trash2 size={14} />} loading={busy} onClick={onRemove}>
+                  删除
+                </Button>
+              </>
+            )}
+          </div>
         </div>
       </div>
     </div>
