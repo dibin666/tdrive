@@ -8,13 +8,12 @@ import (
 
 // Telegram accounts and their per-account view of a storage channel.
 //
-// Telegram meters FLOOD_WAIT and transfer quota per account, so the only way
-// to get a second budget is a second login — several api_id values on one
-// phone number share the same budget and buy nothing. Everything here exists
-// to keep those logins genuinely separate: separate credentials, separate
+// Telegram meters FLOOD_WAIT and transfer quota per account. The drive keeps
+// those logins genuinely separate for failover: separate credentials, separate
 // session files, and separate access hashes, because Telegram mints an access
 // hash for the requesting account and the value one account holds is
-// meaningless to another.
+// meaningless to another. Task concurrency is controlled by one global queue in
+// the drive service rather than by the number of rows here.
 
 const accountCols = `id, label, app_id, app_hash, proxy_url, session_file, enabled, is_primary,
 	tg_user_id, username, phone, position, upload_daily_quota, download_daily_quota, created_at`
@@ -38,8 +37,8 @@ func scanAccount(row interface{ Scan(...any) error }) (TGAccount, error) {
 	return a, nil
 }
 
-// ListAccounts returns every account in scheduling order. The order is stable
-// so that round-robin over it is predictable across restarts.
+// ListAccounts returns every account in primary-first order. The order is stable
+// so that failover selection is predictable across restarts.
 func (d *DB) ListAccounts(ctx context.Context) ([]TGAccount, error) {
 	rows, err := d.read.QueryContext(ctx,
 		`SELECT `+accountCols+` FROM tg_accounts ORDER BY is_primary DESC, position, created_at`)

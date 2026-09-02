@@ -8,54 +8,94 @@ import (
 	"time"
 )
 
-// The two promises multiple accounts make: the configured task limits are per
-// account rather than global, and a file stored by one account can be read by
-// any of them. Both are easy to get subtly wrong in a way that only shows up in
-// production — the first as a drive that mysteriously runs no faster after an
-// account is added, the second as a download that fails only for files
-// uploaded before that account existed.
+// Multiple accounts are a primary plus failover accounts. The task limits stay
+// global, while a file stored by one account can still be read by any of them.
 
-func TestTaskLimitsArePerAccount(t *testing.T) {
-	// One upload at a time, two accounts: two uploads at a time in total.
+func TestTaskLimitsAreGlobalAndAccountsOnlyFailOver(t *testing.T) {
+	// One upload at a time, two accounts: the second account must not create a
+	// second queue slot, and the primary remains the preferred account.
 	svc := limiterTestService(1, 1, time.Millisecond, 8, 2)
 
-	firstAccount, first, err := svc.AcquireUploadJob(context.Background(), "job-a")
+	first, err := svc.acquire(context.Background(), true, "", 0)
 	if err != nil {
 		t.Fatalf("acquire the first upload: %v", err)
 	}
-	secondAccount, second, err := svc.AcquireUploadJob(context.Background(), "job-b")
-	if err != nil {
-		t.Fatalf("a second upload was refused even though a second account was idle: %v", err)
-	}
-	if firstAccount.ID() == secondAccount.ID() {
-		t.Fatalf("both uploads were put on account %s, so they share one rate-limit budget",
-			firstAccount.ID())
+	if first.account.ID() != "acct-1" {
+		t.Fatalf("first upload used %s, want the primary acct-1", first.account.ID())
 	}
 
-	// Both accounts are now at their limit, so a third upload has to queue.
-	waiting := make(chan func(), 1)
+	waiting := make(chan *lease, 1)
 	go func() {
-		_, release, err := svc.AcquireUploadJob(context.Background(), "job-c")
+		second, err := svc.acquire(context.Background(), true, "", 0)
 		if err == nil {
-			waiting <- release
+			waiting <- second
 		}
 	}()
 	select {
 	case <-waiting:
-		t.Fatal("a third upload started while both accounts were already at their limit")
+		t.Fatal("a second upload bypassed the global concurrency limit")
 	case <-time.After(30 * time.Millisecond):
 	}
 
-	first()
-	svc.ReleaseUploadJob("job-a")
+	first.release()
 	select {
-	case release := <-waiting:
-		release()
+	case second := <-waiting:
+		if second.account.ID() != "acct-1" {
+			t.Fatalf("second upload used fallback %s while the primary was available", second.account.ID())
+		}
+		second.release()
 	case <-time.After(time.Second):
 		t.Fatal("the queued upload did not start after a slot was freed")
 	}
-	second()
-	svc.ReleaseUploadJob("job-b")
+
+	// Once the primary is unavailable, the same global slot falls back to the
+	// secondary account.
+	cluster := svc.cluster.(*fakeTelegram)
+	cluster.account(0).unavailable.Store(true)
+	fallback, err := svc.acquire(context.Background(), true, "", 0)
+	if err != nil {
+		t.Fatalf("acquire through the fallback account: %v", err)
+	}
+	if fallback.account.ID() != "acct-2" {
+		t.Fatalf("fallback upload used %s, want acct-2", fallback.account.ID())
+	}
+	fallback.release()
+}
+
+func TestDownloadTaskLimitIsGlobalAcrossAccounts(t *testing.T) {
+	svc := limiterTestService(1, 1, time.Millisecond, 8, 2)
+
+	first, err := svc.acquire(context.Background(), false, "", 0)
+	if err != nil {
+		t.Fatalf("acquire the first download: %v", err)
+	}
+	if first.account.ID() != "acct-1" {
+		t.Fatalf("first download used %s, want the primary acct-1", first.account.ID())
+	}
+
+	waiting := make(chan *lease, 1)
+	go func() {
+		second, err := svc.acquire(context.Background(), false, "", 0)
+		if err == nil {
+			waiting <- second
+		}
+	}()
+	select {
+	case <-waiting:
+		t.Fatal("a second download bypassed the global concurrency limit")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	first.release()
+	select {
+	case second := <-waiting:
+		if second.account.ID() != "acct-1" {
+			t.Fatalf("second download used fallback %s while the primary was available", second.account.ID())
+		}
+		second.release()
+	case <-time.After(time.Second):
+		t.Fatal("the queued download did not start after a slot was freed")
+	}
 }
 
 // A throttled account must not be handed new work while another one is idle.

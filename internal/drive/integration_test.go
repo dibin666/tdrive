@@ -41,7 +41,7 @@ func newHarness(t *testing.T, segmentSize int64) *harness {
 }
 
 // newHarnessN builds the same drive over a cluster of the given size, for the
-// tests that care about how work is spread across Telegram accounts.
+// tests that care about primary/fallback Telegram accounts.
 func newHarnessN(t *testing.T, segmentSize int64, accounts int) *harness {
 	t.Helper()
 	ctx := context.Background()

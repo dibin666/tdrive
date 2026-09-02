@@ -16,7 +16,7 @@ Turn your Telegram account into a network drive with unlimited storage.
 - **VPS local upload** — Docker can mount a VPS directory read-only, letting the WebUI upload dialog choose server-side files without sending them through the browser first
 - **Remote URL fetch** — submit a URL and the server downloads it directly into Telegram; large files never travel through the browser
 - **Parallel download** — multiple concurrent 1 MiB chunk prefetches replace single-connection sequential reads, significantly improving download speed
-- **Multiple Telegram accounts** — configure several api_id / api_hash pairs to spread the load. Accounts are fully isolated (their own session, connection pool, rate limiter and task budget), the tuning knobs are per account, and a throttled account is routed around automatically
+- **Multiple Telegram accounts** — configure a primary account and one or more fallbacks. Accounts are isolated (their own session, connection pool and rate limiter); a throttled or unavailable primary is failed over automatically, while the transfer queue limits remain global and do not multiply with account count
 - **Index rebuild** — the database is just a cache; the directory tree, file metadata and ownership can all be reconstructed from the Telegram channel
 - **Multi-user** — JWT authentication, roles, twelve fine-grained permissions, per-account directory scoping, storage quotas, account enable/disable, session management and an audit log
 - **Transfer centre** — uploads and downloads in one filterable list: by kind, status, source and date range, with live speed, average speed and elapsed time, and deletable history. Transfers the server drives itself — WebDAV reads and writes, VPS-local uploads, remote fetches, staged downloads — are timed server-side and stream their progress over SSE, so the list moves without being refreshed
@@ -141,8 +141,10 @@ Plugin SDK, manifest, Host API, lifecycle, and store submission requirements are
 
 ## Multiple Telegram accounts
 
-A drive can be backed by several Telegram accounts, which multiplies its upload and download budget.
-Add them under **Settings → Telegram → Telegram accounts**.
+A drive can be backed by several Telegram accounts as a primary plus failover accounts.
+Add them under **Settings → Telegram → Telegram accounts**. Upload and download task limits
+always use one global configuration: with a limit of 1 and two accounts, at most one upload
+and one download run at a time. A fallback takes over only when the primary is unavailable.
 
 **Each one has to be a different phone number.** Telegram meters FLOOD_WAIT and transfer quota per
 *account*, so registering a second api_id / api_hash against the same number just opens another
@@ -172,24 +174,24 @@ choose the row marked as the storage channel. That route does not involve the pr
 
 ### Isolation and scheduling
 
-Accounts share nothing: separate `session-*.json`, separate MTProto pools, separate rate limiters,
-separate task budgets. Each account can also have its own SOCKS5 or HTTP proxy from the **Proxy**
+Accounts share no connection state: separate `session-*.json`, separate MTProto pools and separate
+rate limiters. Each account can also have its own SOCKS5 or HTTP proxy from the **Proxy**
 button on its account card; it applies from login through uploads and downloads. Proxy credentials
 stay on the server and the account list only shows a masked address. Use different proxy exit IPs
 for different accounts where possible. A proxy separates network exits, but it is not a way around
 Telegram's anti-abuse or account limits.
 
-- **The tuning knobs are per account.** "One upload at a time" with two accounts runs two uploads at
-  once, one per login. Pool size and request interval work the same way. The settings page shows the
-  resulting totals next to each slider.
+- **The task queue is global.** "One upload at a time" stays one upload with two accounts; the
+  fallback does not add a second queue slot. Pool size, threads, request interval and connections
+  per download likewise do not multiply because a fallback is configured.
 - **A transfer stays on one account.** Every segment of a browser upload and every connection of a
   parallel download goes through the same login, never split across accounts.
-- **Throttling is routed around.** An account that receives a FLOOD_WAIT is marked as cooling down,
-  and new transfers go elsewhere until it expires. Requests already in flight still wait it out.
+- **Throttling fails over.** An account that receives a FLOOD_WAIT is marked as cooling down, and
+  new transfers use a fallback until it expires. Requests already in flight still wait it out.
 - **Any account can read any file.** Telegram mints access hashes per account, so an account reading
   a file it did not upload first re-resolves its own handle from the message id — one extra round
-  trip per segment, cached per account for 30 minutes. That is what lets a newly added account share
-  the download load for files that predate it.
+  trip per segment, cached per account for 30 minutes. That is what lets a fallback read files that
+  predate it.
 
 Removing an account does not delete the files it uploaded; the others re-resolve handles and carry
 on. The last enabled account cannot be removed or disabled.

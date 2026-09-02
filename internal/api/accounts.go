@@ -41,8 +41,8 @@ type accountBody struct {
 	// InChannel distinguishes "not a member" from "a member who cannot post".
 	InChannel bool `json:"inChannel"`
 
-	// ActiveUploads and ActiveDownloads are the task slots this account is
-	// currently using, which is what makes the per-account limits legible.
+	// ActiveUploads and ActiveDownloads identify which account currently owns a
+	// globally admitted task. They are status counters, not per-account limits.
 	ActiveUploads   int `json:"activeUploads"`
 	ActiveDownloads int `json:"activeDownloads"`
 

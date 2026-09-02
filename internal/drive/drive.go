@@ -59,20 +59,19 @@ type Service struct {
 	// lose the unique-index race, leaving an orphaned record in the channel.
 	mkdirMu sync.Mutex
 
-	// Task limiters count whole logical file transfers, one pair per Telegram
-	// account. The configured limit is therefore per account: two accounts and
-	// a limit of one means two transfers run at once, each on its own login
-	// with its own rate-limit budget. The upload job leases and download
-	// sessions below let concurrent requests belonging to one transfer share a
-	// single slot — and pin that transfer to the account holding it.
-	limitersMu       sync.Mutex
-	uploadLimiters   map[string]*taskLimiter
-	downloadLimiters map[string]*taskLimiter
-	quotaMu          sync.Mutex
-	quotas           *quotaTracker
-	// schedCursor round-robins across accounts that are equally loaded, so a
-	// quiet drive does not send everything to the first account in the list.
-	schedCursor atomic.Uint64
+	// Task limiters count whole logical file transfers globally. The configured
+	// limit is deliberately independent of the number of Telegram accounts: a
+	// second account is a fallback, not another parallel queue. The upload job
+	// leases and download sessions below let concurrent requests belonging to one
+	// transfer share a single slot — and pin that transfer to the account holding
+	// it.
+	limitersMu      sync.Mutex
+	uploadLimiter   *taskLimiter
+	downloadLimiter *taskLimiter
+	activeUploads   map[string]int
+	activeDownloads map[string]int
+	quotaMu         sync.Mutex
+	quotas          *quotaTracker
 
 	uploadJobsMu sync.Mutex
 	uploadJobs   map[string]*uploadJobLease
@@ -119,14 +118,17 @@ type Service struct {
 }
 
 func New(cfg *config.Config, db *database.DB, cluster Cluster, log *zap.Logger) *Service {
+	settings := cfg.RuntimeSettings()
 	return &Service{
 		cfg:              cfg,
 		db:               db,
 		cluster:          cluster,
 		log:              log,
 		refs:             newRefCache(cfg.Stream.LocationTTL),
-		uploadLimiters:   make(map[string]*taskLimiter),
-		downloadLimiters: make(map[string]*taskLimiter),
+		uploadLimiter:    newTaskLimiter(settings.UploadConcurrency),
+		downloadLimiter:  newTaskLimiter(settings.DownloadConcurrency),
+		activeUploads:    make(map[string]int),
+		activeDownloads:  make(map[string]int),
 		quotas:           newQuotaTracker(db, log),
 		uploadJobs:       make(map[string]*uploadJobLease),
 		jobAccounts:      make(map[string]Account),

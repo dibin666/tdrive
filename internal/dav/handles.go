@@ -48,8 +48,8 @@ func (h *readHandle) ensure() error {
 	}
 	// Every range request of one mounted read shares a session, and therefore
 	// one Telegram account: the account is part of the slot, not chosen per
-	// request. Preferring the account that uploaded the file saves a handle
-	// lookup per segment when it happens to be free.
+	// request. The primary is selected first and a fallback can take over when
+	// it is unavailable.
 	account, release, err := h.fs.drive.AcquireDownloadSession(h.ctx, h.sessionKey, h.file.ID)
 	if err != nil {
 		return translate(err)

@@ -58,14 +58,13 @@ CREATE TABLE settings (
     value TEXT NOT NULL
 );
 
--- One row per Telegram login. A deployment may hold several, because Telegram
--- meters FLOOD_WAIT and transfer quota per account: a second account is the
--- only way to get a second budget, and multiple api_id values on one phone
--- number buy nothing at all.
+-- One row per Telegram login. Telegram meters FLOOD_WAIT and transfer quota per
+-- account, so each login keeps its own state for failover. Multiple api_id values
+-- on one phone number still share the same Telegram budget and buy nothing.
 --
 -- Every account is fully isolated — its own credentials, its own session file,
--- its own connection pool and its own share of the task limits — so one being
--- throttled never stalls the others.
+-- and its own connection pool — so a fallback can take over when the primary
+-- is throttled. Task limits remain global to the drive.
 CREATE TABLE tg_accounts (
     id           TEXT PRIMARY KEY,
     label        TEXT NOT NULL DEFAULT '',

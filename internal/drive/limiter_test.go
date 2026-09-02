@@ -138,9 +138,9 @@ func downloadTestService(limit int, grace time.Duration, maxConns int) *Service 
 }
 
 // limiterTestService builds a Service with only the fields the scheduler and
-// the session code touch, over a fake cluster of the given size. The task
-// limits are per account, so the totals a test should expect are
-// upload*accounts and download*accounts.
+// the session code touch, over a fake cluster of the given size. Task limits
+// are global; the account count only controls which primary/fallback accounts
+// are available.
 func limiterTestService(upload, download int, grace time.Duration, maxConns, accounts int) *Service {
 	cfg := &config.Config{
 		Transfer: config.Transfer{
@@ -153,8 +153,10 @@ func limiterTestService(upload, download int, grace time.Duration, maxConns, acc
 	return &Service{
 		cfg:              cfg,
 		cluster:          newFakeTelegramN(accounts),
-		uploadLimiters:   make(map[string]*taskLimiter),
-		downloadLimiters: make(map[string]*taskLimiter),
+		uploadLimiter:    newTaskLimiter(upload),
+		downloadLimiter:  newTaskLimiter(download),
+		activeUploads:    make(map[string]int),
+		activeDownloads:  make(map[string]int),
 		uploadJobs:       make(map[string]*uploadJobLease),
 		jobAccounts:      make(map[string]Account),
 		downloadSessions: make(map[string]*downloadSession),

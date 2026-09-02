@@ -97,16 +97,17 @@ export interface TelegramStatus {
   awaitingCode: boolean
   awaitingPassword: boolean
   /** How long Telegram has told this account to wait. Non-zero means new
-   *  transfers are being routed to the other accounts. */
+   *  transfers can fail over to another account. */
   cooldownMs?: number
   channelReady: boolean
   channelChecked: boolean
 }
 
 /**
- * One Telegram login. A drive may hold several: Telegram meters its rate limits
- * and transfer quota per account, so a second account is the only way to get a
- * second budget — several api_id values on one phone number share one.
+ * One Telegram login. A drive may hold several as primary and fallback logins:
+ * Telegram meters rate limits and transfer quota per account, while the drive's
+ * task queue remains global. Several api_id values on one phone number share one
+ * Telegram budget.
  */
 export interface TelegramAccount {
   id: string
@@ -295,14 +296,6 @@ export interface RuntimeSettings {
   downloadGraceMs: number
   shareTtlHours: number
 
-  /**
-   * Read-only. uploadConcurrency and downloadConcurrency above are per Telegram
-   * account, so what the drive actually runs is the limit times the number of
-   * accounts that can take work.
-   */
-  accountCount?: number
-  effectiveUploadConcurrency?: number
-  effectiveDownloadConcurrency?: number
 }
 
 export type JobStatus = 'pending' | 'running' | 'complete' | 'failed' | 'cancelled'

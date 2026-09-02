@@ -50,90 +50,6 @@ func (l *taskLimiter) setLimit(limit int) {
 	l.dispatchLocked()
 }
 
-// activeCount is how many slots are in use, which is what the scheduler sorts
-// accounts by when it looks for the least busy one.
-func (l *taskLimiter) activeCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.active
-}
-
-// tryAcquire takes a slot only if one is free right now. It respects the
-// waiter queue: jumping ahead of tasks that are already blocked would let a
-// steady trickle of new transfers starve them indefinitely.
-func (l *taskLimiter) tryAcquire() (func(), bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.active < l.limit && len(l.queue) == 0 {
-		l.active++
-		return l.releaseFunc(), true
-	}
-	return nil, false
-}
-
-// acquireAny blocks on several limiters at once and returns the first slot that
-// frees up, along with the index of the limiter it came from.
-//
-// This is how a busy multi-account drive stays even: rather than committing a
-// queued transfer to one account and watching another go idle, every account is
-// queued for and the loser waits are cancelled. A waiter that is granted a slot
-// at the same moment as its cancellation hands it straight back — taskLimiter's
-// own cancel path already covers that race, which is what makes this safe.
-func acquireAny(ctx context.Context, limiters []*taskLimiter) (int, func(), error) {
-	switch len(limiters) {
-	case 0:
-		return 0, nil, ErrNoAccount
-	case 1:
-		release, err := limiters[0].acquire(ctx)
-		return 0, release, err
-	}
-
-	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	type result struct {
-		index   int
-		release func()
-		err     error
-	}
-	results := make(chan result, len(limiters))
-	for i, limiter := range limiters {
-		go func() {
-			release, err := limiter.acquire(raceCtx)
-			results <- result{index: i, release: release, err: err}
-		}()
-	}
-
-	var (
-		winner  = -1
-		release func()
-		lastErr error
-	)
-	for range limiters {
-		r := <-results
-		switch {
-		case r.err != nil:
-			if lastErr == nil {
-				lastErr = r.err
-			}
-		case winner == -1:
-			winner, release = r.index, r.release
-			// Stop the others. They either fail with context.Canceled or return
-			// their slot themselves.
-			cancel()
-		default:
-			r.release()
-		}
-	}
-	if winner == -1 {
-		if lastErr == nil {
-			lastErr = ctx.Err()
-		}
-		return 0, nil, lastErr
-	}
-	return winner, release, nil
-}
-
 func (l *taskLimiter) acquire(ctx context.Context) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -230,47 +146,38 @@ type uploadJobLease struct {
 	closed      bool
 }
 
-// SetTransferConcurrency applies new task limits immediately. Existing tasks
-// keep their slots; queued tasks are woken when a larger limit makes room.
-//
-// The limits are per account. An operator asking for one upload at a time on a
-// drive with two accounts gets two concurrent uploads, one per login — which is
-// the point of configuring a second account, and is spelled out in the WebUI
-// next to the slider.
+// SetTransferConcurrency applies the global task limits immediately. Existing
+// tasks keep their slots; queued tasks are woken when a larger limit makes room.
+// The number of Telegram accounts has no effect on these limits.
 func (s *Service) SetTransferConcurrency(upload, download int) {
 	s.limitersMu.Lock()
 	defer s.limitersMu.Unlock()
-	for _, limiter := range s.uploadLimiters {
-		limiter.setLimit(upload)
+	if s.uploadLimiter == nil {
+		s.uploadLimiter = newTaskLimiter(upload)
+	} else {
+		s.uploadLimiter.setLimit(upload)
 	}
-	for _, limiter := range s.downloadLimiters {
-		limiter.setLimit(download)
+	if s.downloadLimiter == nil {
+		s.downloadLimiter = newTaskLimiter(download)
+	} else {
+		s.downloadLimiter.setLimit(download)
 	}
 }
 
-// TransferCapacity reports the configured per-account limits and what they add
-// up to across the accounts currently able to take work. The WebUI shows both
-// numbers so the per-account semantics are not a surprise.
-func (s *Service) TransferCapacity() (accounts, upload, download int) {
-	settings := s.cfg.RuntimeSettings()
-	n := len(s.cluster.Accounts())
-	return n, settings.UploadConcurrency * n, settings.DownloadConcurrency * n
-}
-
-// ActiveTasksByAccount reports how many upload and download slots each account
-// is using, which is what makes "one at a time, per account" observable in the
-// settings page instead of something an operator has to take on trust.
+// ActiveTasksByAccount reports which account currently owns each globally
+// admitted task. There is still one account per transfer, but these counters are
+// informational only; they do not create additional capacity.
 func (s *Service) ActiveTasksByAccount() (upload, download map[string]int) {
 	s.limitersMu.Lock()
 	defer s.limitersMu.Unlock()
 
-	upload = make(map[string]int, len(s.uploadLimiters))
-	for id, limiter := range s.uploadLimiters {
-		upload[id] = limiter.activeCount()
+	upload = make(map[string]int, len(s.activeUploads))
+	for id, active := range s.activeUploads {
+		upload[id] = active
 	}
-	download = make(map[string]int, len(s.downloadLimiters))
-	for id, limiter := range s.downloadLimiters {
-		download[id] = limiter.activeCount()
+	download = make(map[string]int, len(s.activeDownloads))
+	for id, active := range s.activeDownloads {
+		download[id] = active
 	}
 	return upload, download
 }
@@ -280,12 +187,12 @@ func (s *Service) ActiveTasksByAccount() (upload, download map[string]int) {
 // disk, for instance. Callers serving a client over HTTP want
 // AcquireDownloadSession instead, so that the several range requests making up
 // one logical download share a slot.
-func (s *Service) AcquireDownloadTask(ctx context.Context, prefer string, expectedSize ...int64) (Account, func(), error) {
+func (s *Service) AcquireDownloadTask(ctx context.Context, _ string, expectedSize ...int64) (Account, func(), error) {
 	size := int64(0)
 	if len(expectedSize) > 0 {
 		size = expectedSize[0]
 	}
-	lease, err := s.leaseDownload(ctx, prefer, size)
+	lease, err := s.leaseDownload(ctx, "", size)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -332,14 +239,12 @@ type downloadSession struct {
 // download, and returns the Telegram account that slot belongs to. The returned
 // function must be called when the request finishes.
 //
-// fileID lets the scheduler prefer the account that uploaded the file, which
-// already holds usable document handles for it. It is only a hint — any account
-// can serve any file by re-resolving its own handles, so a busy uploader never
-// blocks a read — and it is only consulted when the session is first created,
-// because every later range request joins an account that is already chosen.
+// fileID supplies the file size for daily quota accounting. Account selection is
+// primary-first and does not promote the account that uploaded the file; a
+// fallback account can re-resolve its own handles when it takes over.
 func (s *Service) AcquireDownloadSession(ctx context.Context, key, fileID string) (Account, func(), error) {
 	if key == "" {
-		return s.AcquireDownloadTask(ctx, s.SegmentOwner(ctx, fileID), s.transferSize(ctx, fileID))
+		return s.AcquireDownloadTask(ctx, "", s.transferSize(ctx, fileID))
 	}
 	if ctx == nil {
 		ctx = context.Background()

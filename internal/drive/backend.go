@@ -71,14 +71,16 @@ type Account interface {
 	ChannelRef(ctx context.Context, channelID string) (ChannelRef, error)
 }
 
-// Cluster is the set of accounts a deployment has. Which one a given transfer
-// runs on is decided in this package rather than here, because the choice is
-// inseparable from the task slot it comes with.
+// Cluster is the set of accounts a deployment has. Accounts must be returned in
+// primary-first order: the scheduler uses the first eligible account and treats
+// the rest as failover accounts. Which account a transfer runs on is decided in
+// this package together with its global task slot.
 type Cluster interface {
 	// Ready reports whether any account can serve requests.
 	Ready() bool
 
-	// Accounts lists the accounts eligible for new work, in a stable order.
+	// Accounts lists the accounts eligible for new work, primary first and then
+	// fallbacks, in a stable order.
 	Accounts() []Account
 
 	// Account looks one up by id, including accounts that are currently

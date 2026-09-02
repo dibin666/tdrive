@@ -4,21 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Choosing which Telegram account runs a transfer.
 //
-// The rule the settings page promises is that the configured task limits are
-// per account: "one upload at a time" with two accounts means two uploads at
-// once, each on its own login. That falls out of giving every account its own
-// taskLimiter — the total is the limit times the number of accounts, and no
-// account can be pushed past its own share no matter how busy the drive is.
-//
-// Isolation is the point. A transfer holds a slot on exactly one account for
-// its whole life, so a browser upload's segments and a parallel download's
-// range requests never straddle two logins. That matters beyond tidiness:
-// Telegram mints access hashes per account, so a segment fetched with the wrong
-// one simply fails.
+// The task limits are global to the drive. The cluster supplies accounts in
+// primary-first order, so a transfer uses the primary account whenever it can;
+// a later account is only selected when the earlier one is unavailable or its
+// daily quota cannot accept the transfer. A transfer still holds one account
+// for its whole life, so a browser upload's segments and a parallel download's
+// range requests never straddle two logins.
 
 // ErrNoAccount is returned when no Telegram account can take the work: none is
 // configured, none is signed in, or none has been admitted to the channel.
@@ -32,113 +28,88 @@ type lease struct {
 	release func()
 }
 
-// syncLimiters brings the per-account limiter set in line with the accounts the
-// cluster currently offers and the limits currently configured.
-//
-// Limiters for accounts that went away are dropped rather than stopped: a
-// transfer still holding a slot owns its release closure, so it finishes
-// cleanly against a limiter nothing else can reach.
-func (s *Service) syncLimiters() []Account {
+// newLease records the account chosen for one logical transfer and makes the
+// returned release idempotent. The task limiter itself is global; these counts
+// are only for the per-account status shown in the settings page.
+func (s *Service) newLease(
+	account Account,
+	upload bool,
+	reservation *quotaReservation,
+	slotRelease func(),
+) *lease {
+	s.trackTask(account.ID(), upload, 1)
+	var once sync.Once
+	return &lease{
+		account: account,
+		quota:   reservation,
+		release: func() {
+			once.Do(func() {
+				if reservation != nil {
+					reservation.commit()
+				}
+				s.trackTask(account.ID(), upload, -1)
+				if slotRelease != nil {
+					slotRelease()
+				}
+			})
+		},
+	}
+}
+
+func (s *Service) trackTask(accountID string, upload bool, delta int) {
+	if accountID == "" || delta == 0 {
+		return
+	}
+	s.limitersMu.Lock()
+	defer s.limitersMu.Unlock()
+	counts := s.activeDownloads
+	if upload {
+		counts = s.activeUploads
+	}
+	if counts == nil {
+		counts = make(map[string]int)
+		if upload {
+			s.activeUploads = counts
+		} else {
+			s.activeDownloads = counts
+		}
+	}
+	counts[accountID] += delta
+	if counts[accountID] <= 0 {
+		delete(counts, accountID)
+	}
+}
+
+// syncLimiter brings the one global limiter for a direction in line with the
+// current setting and returns the accounts currently eligible for work.
+func (s *Service) syncLimiter(upload bool) ([]Account, *taskLimiter) {
 	accounts := s.cluster.Accounts()
 	settings := s.cfg.RuntimeSettings()
 
 	s.limitersMu.Lock()
 	defer s.limitersMu.Unlock()
 
-	live := make(map[string]struct{}, len(accounts))
-	for _, account := range accounts {
-		id := account.ID()
-		live[id] = struct{}{}
-
-		if limiter, ok := s.uploadLimiters[id]; ok {
-			limiter.setLimit(settings.UploadConcurrency)
-		} else {
-			s.uploadLimiters[id] = newTaskLimiter(settings.UploadConcurrency)
-		}
-		if limiter, ok := s.downloadLimiters[id]; ok {
-			limiter.setLimit(settings.DownloadConcurrency)
-		} else {
-			s.downloadLimiters[id] = newTaskLimiter(settings.DownloadConcurrency)
-		}
-	}
-	for id := range s.uploadLimiters {
-		if _, ok := live[id]; !ok {
-			delete(s.uploadLimiters, id)
-		}
-	}
-	for id := range s.downloadLimiters {
-		if _, ok := live[id]; !ok {
-			delete(s.downloadLimiters, id)
-		}
-	}
-	return accounts
-}
-
-// limiterFor returns an account's limiter for the given direction, creating it
-// if the account appeared between a sync and this call.
-func (s *Service) limiterFor(id string, upload bool) *taskLimiter {
-	settings := s.cfg.RuntimeSettings()
-
-	s.limitersMu.Lock()
-	defer s.limitersMu.Unlock()
-
-	set, limit := s.downloadLimiters, settings.DownloadConcurrency
+	limiter, limit := s.downloadLimiter, settings.DownloadConcurrency
 	if upload {
-		set, limit = s.uploadLimiters, settings.UploadConcurrency
+		limiter, limit = s.uploadLimiter, settings.UploadConcurrency
 	}
-	if limiter, ok := set[id]; ok {
-		return limiter
+	if limiter == nil {
+		limiter = newTaskLimiter(limit)
+		if upload {
+			s.uploadLimiter = limiter
+		} else {
+			s.downloadLimiter = limiter
+		}
+	} else {
+		limiter.setLimit(limit)
 	}
-	limiter := newTaskLimiter(limit)
-	set[id] = limiter
-	return limiter
+	return accounts, limiter
 }
 
-// order arranges candidates least-loaded first, with prefer promoted to the
-// front and a rotating cursor breaking ties.
-//
-// prefer exists for downloads: the account that uploaded a segment already
-// holds a usable handle for it, so choosing it saves a round trip. It is a
-// preference rather than a rule, because pinning reads to the uploader would
-// leave every file written before a second account existed unable to use it.
-func (s *Service) order(accounts []Account, limiters []*taskLimiter, prefer string) []int {
-	idx := make([]int, len(accounts))
-	for i := range idx {
-		idx[i] = i
-	}
-
-	cursor := int(s.schedCursor.Add(1))
-	rank := func(i int) (int, int, int) {
-		preferred := 1
-		if prefer != "" && accounts[i].ID() == prefer {
-			preferred = 0
-		}
-		// Rotate the tiebreak so equally idle accounts take turns.
-		return preferred, limiters[i].activeCount(), (i + cursor) % max(len(accounts), 1)
-	}
-	// A handful of accounts at most; an insertion sort keeps the comparison
-	// readable and avoids pulling in a closure-heavy sort for six elements.
-	for i := 1; i < len(idx); i++ {
-		for j := i; j > 0; j-- {
-			ap, aa, ac := rank(idx[j])
-			bp, ba, bc := rank(idx[j-1])
-			if ap < bp || (ap == bp && aa < ba) || (ap == bp && aa == ba && ac < bc) {
-				idx[j], idx[j-1] = idx[j-1], idx[j]
-				continue
-			}
-			break
-		}
-	}
-	return idx
-}
-
-// acquire reserves a task slot on one account.
-//
-// An idle account is taken immediately. When every account is at its limit the
-// call blocks on all of them at once and takes whichever frees a slot first,
-// which is what makes a busy drive drain evenly instead of queueing everything
-// behind the account that happens to be first in the list.
-func (s *Service) acquire(ctx context.Context, upload bool, prefer string, expectedSize ...int64) (*lease, error) {
+// acquire reserves a global task slot and then chooses one account for the
+// transfer. Account order is significant: the first account is the primary,
+// while later accounts are fallbacks rather than extra queue capacity.
+func (s *Service) acquire(ctx context.Context, upload bool, _ string, expectedSize ...int64) (*lease, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -148,7 +119,7 @@ func (s *Service) acquire(ctx context.Context, upload bool, prefer string, expec
 	}
 
 	for {
-		accounts := s.syncLimiters()
+		accounts, limiter := s.syncLimiter(upload)
 		if len(accounts) == 0 {
 			if !s.cluster.Ready() {
 				return nil, ErrNoAccount
@@ -156,123 +127,100 @@ func (s *Service) acquire(ctx context.Context, upload bool, prefer string, expec
 			return nil, fmt.Errorf("%w: no account can post to the storage channel", ErrNoAccount)
 		}
 
-		limiters := make([]*taskLimiter, len(accounts))
-		for i, account := range accounts {
-			limiters[i] = s.limiterFor(account.ID(), upload)
-		}
-
 		quota := s.quotaTracker()
 		observedQuotaGeneration := quota.generationNow()
-		ordered := s.order(accounts, limiters, prefer)
-		fitting := make([]int, 0, len(ordered))
-		crossing := make([]int, 0, len(ordered))
-		for _, i := range ordered {
-			if s.quotaMayStart(accounts[i], upload, size) {
-				if s.quotaFits(accounts[i], upload, size) {
-					fitting = append(fitting, i)
-				} else {
-					crossing = append(crossing, i)
-				}
-			}
-		}
-		eligible := append(fitting, crossing...)
-		if len(eligible) == 0 {
+		account := firstAccountForTransfer(s, accounts, upload, size)
+		if account == nil {
 			// Every account has committed or reserved its budget. A quota
 			// reservation is held until its current content finishes, so the
-			// only ordinary wake-up is the next UTC day (or an administrator
-			// changing a quota, which also signals this tracker).
+			// ordinary wake-up is the next UTC day (or an administrator changing
+			// a quota, which also signals this tracker).
 			if err := quota.wait(ctx, observedQuotaGeneration); err != nil {
 				return nil, err
 			}
 			continue
 		}
 
-		for _, i := range eligible {
-			if release, ok := limiters[i].tryAcquire(); ok {
-				reservation, reserved := s.reserveQuota(accounts[i], upload, size)
-				if reserved {
-					return &lease{
-						account: accounts[i],
-						quota:   reservation,
-						release: func() {
-							reservation.commit()
-							release()
-						},
-					}, nil
-				}
-				release()
-			}
-		}
-
-		queue := make([]*taskLimiter, len(eligible))
-		for n, i := range eligible {
-			queue[n] = limiters[i]
-		}
-		winner, release, err := acquireAny(ctx, queue)
+		// Do not let a backup account bypass the global task queue. The slot is
+		// acquired before the quota reservation is committed so every retry still
+		// respects the same FIFO queue.
+		release, err := limiter.acquire(ctx)
 		if err != nil {
 			return nil, err
 		}
-		account := accounts[eligible[winner]]
+
+		// The account list can change while this request waits for the global
+		// slot. Re-evaluate it before committing the account choice so a newly
+		// cooled primary falls back promptly.
+		if !containsAccount(s.cluster.Accounts(), account.ID()) {
+			release()
+			continue
+		}
+
 		reservation, reserved := s.reserveQuota(account, upload, size)
 		if reserved {
-			return &lease{
-				account: account,
-				quota:   reservation,
-				release: func() {
-					reservation.commit()
-					release()
-				},
-			}, nil
+			return s.newLease(account, upload, reservation, release), nil
 		}
-		// Another waiter may have consumed the last budget while this
-		// acquireAny call was blocked. Return the task slot and retry with
-		// the remaining accounts.
+		// Another waiter may have consumed the account's last budget while this
+		// acquire was blocked. Return the global slot and retry; the next pass
+		// may select a fallback account.
 		release()
 	}
 }
 
-// leaseUpload reserves an upload slot on some account.
+// firstAccountForTransfer follows the cluster's primary-first order. A later
+// account is considered only when an earlier account cannot start the transfer,
+// including when its daily quota is exhausted.
+func firstAccountForTransfer(s *Service, accounts []Account, upload bool, size int64) Account {
+	for _, account := range accounts {
+		if s.quotaMayStart(account, upload, size) {
+			return account
+		}
+	}
+	return nil
+}
+
+func containsAccount(accounts []Account, id string) bool {
+	for _, account := range accounts {
+		if account.ID() == id {
+			return true
+		}
+	}
+	return false
+}
+
+// leaseUpload reserves one global upload slot and assigns one account.
 func (s *Service) leaseUpload(ctx context.Context, expectedSize ...int64) (*lease, error) {
 	return s.acquire(ctx, true, "", expectedSize...)
 }
 
-// leaseDownload reserves a download slot, preferring the account named — in
-// practice the one that uploaded the segments about to be read.
+// leaseDownload reserves one global download slot and assigns one account. The
+// preferred id is retained at the call boundary for compatibility; account
+// selection is always primary-first with failover.
 func (s *Service) leaseDownload(ctx context.Context, prefer string, expectedSize ...int64) (*lease, error) {
 	return s.acquire(ctx, false, prefer, expectedSize...)
 }
 
-// metaAccount picks an account for a metadata operation: creating a directory
-// record, rewriting a caption after a rename, deleting messages.
-//
-// These take no task slot. They are single small RPCs, and making a rename
-// queue behind two multi-gigabyte uploads would be a strange thing to do to
-// someone who pressed F2. Every account is granted edit and delete rights when
-// it joins the channel, so any of them can amend a record another one wrote.
+// metaAccount picks the primary account for a metadata operation, falling back
+// to the next eligible account only when the primary is unavailable.
 func (s *Service) metaAccount(ctx context.Context) (Account, error) {
 	accounts := s.cluster.Accounts()
 	if len(accounts) == 0 {
 		return nil, ErrNoAccount
 	}
-	cursor := int(s.schedCursor.Add(1))
-	return accounts[cursor%len(accounts)], nil
+	return accounts[0], nil
 }
 
-// ReadAccount picks an account for a read that does not occupy a transfer
-// slot — a plugin pulling a bounded chunk, for instance. It prefers the account
-// that uploaded the file, which already holds handles for it.
+// ReadAccount picks the primary account for a read that does not occupy a
+// transfer slot, falling back when the primary is unavailable. The file owner
+// is not promoted ahead of the primary: a second account is a backup, not a
+// second read queue.
 func (s *Service) ReadAccount(ctx context.Context, fileID string) (Account, error) {
 	return s.accountFor(ctx, s.SegmentOwner(ctx, fileID))
 }
 
-// accountFor returns a specific account, falling back to a scheduled one when
-// the named account is gone or cannot serve. An unknown id is normal: it is
-// what a segment uploaded by a since-removed account carries.
-func (s *Service) accountFor(ctx context.Context, id string) (Account, error) {
-	if id != "" {
-		if account, ok := s.cluster.Account(id); ok && account.Available() {
-			return account, nil
-		}
-	}
+// accountFor returns the first eligible account. An unknown id is normal: it
+// is what a segment uploaded by a since-removed account carries.
+func (s *Service) accountFor(ctx context.Context, _ string) (Account, error) {
 	return s.metaAccount(ctx)
 }

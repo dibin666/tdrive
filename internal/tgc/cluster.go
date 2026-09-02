@@ -218,7 +218,8 @@ func (c *Cluster) Ready() bool {
 }
 
 // Accounts implements drive.Cluster, returning the accounts that are signed in,
-// admitted to the storage channel, and not sitting out a FLOOD_WAIT.
+// admitted to the storage channel, and not sitting out a FLOOD_WAIT. The order
+// is primary first, followed by fallback accounts.
 //
 // When every account is cooling down it returns the signed-in ones anyway:
 // making the caller wait on a real account is better than telling it the drive

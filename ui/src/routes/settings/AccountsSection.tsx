@@ -25,7 +25,8 @@ import { Section, StatusDot } from './shared'
  * someone's afternoon, is that a second account means a second *phone number*.
  * Telegram meters FLOOD_WAIT and transfer quota per account, so registering a
  * second api_id against the same number buys nothing at all — the two
- * authorizations share one budget.
+ * authorizations share one budget. In this drive, additional logins are
+ * failover accounts: they do not multiply the global transfer queue limits.
  *
  * The second thing is that an account is not useful until it is both signed in
  * and admitted to the storage channel, so every card says plainly which of
@@ -95,8 +96,8 @@ export function AccountsSection({
       title="Telegram 账号"
       description={
         usable > 1
-          ? `${usable} 个账号在分担压力。上传和下载队列的额度是「每个账号」的，一个账号被限流时新任务自动走其它账号。`
-          : '再加一个账号可以让上传和下载的额度翻倍。注意：必须是另一个手机号——Telegram 的限流是按账号算的，同一个号申请多个 api_id 没有任何作用。'
+          ? `${usable} 个账号可用；主账号不可用时新任务自动回落到备用账号。上传和下载队列按全局配置执行，不会因账号数量增加而翻倍。`
+          : '添加账号只用于在主账号不可用时回落备用。注意：必须是另一个手机号——Telegram 的限流是按账号算的，同一个号申请多个 api_id 没有任何作用。'
       }
       actions={
         <div className="flex flex-wrap gap-2">
@@ -719,18 +720,18 @@ function describe(
     }
   }
   if (cooldownSeconds > 0) {
-    return { tone: 'warn', label: `被 Telegram 限流，${cooldownSeconds} 秒后恢复；新任务已转给其它账号` }
+    return { tone: 'warn', label: `被 Telegram 限流，${cooldownSeconds} 秒后恢复；新任务会回落到备用账号` }
   }
   const uploadExhausted = account.uploadDailyQuota > 0 && account.uploadRemainingToday <= 0
   const downloadExhausted = account.downloadDailyQuota > 0 && account.downloadRemainingToday <= 0
   if (uploadExhausted && downloadExhausted) {
-    return { tone: 'warn', label: '今日上传与下载配额均已耗尽，新任务已转给其它账号（按 UTC 0 点重置）' }
+    return { tone: 'warn', label: '今日上传与下载配额均已耗尽，新任务会回落到备用账号（按 UTC 0 点重置）' }
   }
   if (uploadExhausted) {
-    return { tone: 'warn', label: '今日上传配额已耗尽，新上传任务已转给其它账号（按 UTC 0 点重置）' }
+    return { tone: 'warn', label: '今日上传配额已耗尽，新上传任务会回落到备用账号（按 UTC 0 点重置）' }
   }
   if (downloadExhausted) {
-    return { tone: 'warn', label: '今日下载配额已耗尽，新下载任务已转给其它账号（按 UTC 0 点重置）' }
+    return { tone: 'warn', label: '今日下载配额已耗尽，新下载任务会回落到备用账号（按 UTC 0 点重置）' }
   }
   return { tone: 'ok', label: '正常，可以承担上传和下载' }
 }

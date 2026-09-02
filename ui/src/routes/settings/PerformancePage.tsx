@@ -173,10 +173,6 @@ export function PerformancePage() {
   const segmentMiB = draft.segmentSize / MIB
   const stepMiB = draft.uploadPartSize / MIB
   const partsPerSegment = Math.round(draft.segmentSize / draft.uploadPartSize)
-  // Pool size and thread count are per account: every login opens its own
-  // pool and runs its own uploads, so the drive-wide peak is this times the
-  // number of accounts.
-  const accounts = Math.max(1, draft.accountCount ?? 1)
   const peakConnections = Number(draft.poolSize) * draft.uploadThreads
 
   return (
@@ -320,11 +316,7 @@ export function PerformancePage() {
                   max={32}
                   onChange={(value) => patch({ poolSize: value })}
                   format={() =>
-                    accounts > 1
-                      ? `每个账号保持 ${draft.poolSize} 条 MTProto 连接，${accounts} 个账号共 ${
-                          Number(draft.poolSize) * accounts
-                        } 条。`
-                      : `与 Telegram 数据中心保持 ${draft.poolSize} 条 MTProto 连接。`
+                    `每个正在使用的 Telegram 账号使用 ${draft.poolSize} 条 MTProto 连接；备用账号不会增加任务并发额度。`
                   }
                 />
               </Field>
@@ -356,11 +348,7 @@ export function PerformancePage() {
           <Section
             icon={<SlidersHorizontal size={16} />}
             title="任务队列"
-            description={
-              accounts > 1
-                ? `这两个额度是「每个 Telegram 账号」的。当前有 ${accounts} 个账号可用，实际额度是设置值的 ${accounts} 倍；每个传输固定走一个账号，不会跨账号拆分。`
-                : '这两个额度由 WebUI、VPS 上传、离线下载和 WebDAV 共同占用。超出后排队等待，不会失败。额度按 Telegram 账号计算，再加一个账号就能翻倍。'
-            }
+            description="这两个额度是整个网盘的全局上限，由 WebUI、VPS 上传、离线下载和 WebDAV 共同占用。超出后排队等待，不会失败；备用账号不会让额度翻倍。"
           >
             <div className="space-y-5">
               <Field label="同时进行的上传任务">
@@ -371,11 +359,7 @@ export function PerformancePage() {
                   suffix="个"
                   onChange={(value) => patch({ uploadConcurrency: value })}
                   format={() =>
-                    accounts > 1
-                      ? `每账号 ${draft.uploadConcurrency} 个 × ${accounts} 个账号 ＝ 实际最多 ${
-                          draft.uploadConcurrency * accounts
-                        } 个文件同时上传。浏览器上传的多个分卷算作一个任务。`
-                      : `最多 ${draft.uploadConcurrency} 个文件同时上传。浏览器上传的多个分卷算作一个任务。`
+                    `最多 ${draft.uploadConcurrency} 个文件同时上传。浏览器上传的多个分卷算作一个任务。备用账号只在主账号不可用时接替。`
                   }
                 />
               </Field>
@@ -388,11 +372,7 @@ export function PerformancePage() {
                   suffix="个"
                   onChange={(value) => patch({ downloadConcurrency: value })}
                   format={() =>
-                    accounts > 1
-                      ? `每账号 ${draft.downloadConcurrency} 个 × ${accounts} 个账号 ＝ 实际最多 ${
-                          draft.downloadConcurrency * accounts
-                        } 个文件同时读取。一个下载开的多条连接只算一个任务。`
-                      : `最多 ${draft.downloadConcurrency} 个文件同时从 Telegram 读取。一个下载开的多条连接只算一个任务。`
+                    `最多 ${draft.downloadConcurrency} 个文件同时从 Telegram 读取。一个下载开的多条连接只算一个任务。备用账号只在主账号不可用时接替。`
                   }
                 />
               </Field>

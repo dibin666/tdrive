@@ -86,9 +86,9 @@ type Session struct {
 	ExpiresAt  time.Time `json:"expiresAt"`
 }
 
-// TGAccount is one Telegram login. A deployment may hold several so that the
-// per-account FLOOD_WAIT and transfer budgets add up instead of contending;
-// each one carries its own api credentials and its own session file.
+// TGAccount is one Telegram login. A deployment may hold several so a later
+// login can take over when the primary is unavailable; each one carries its own
+// api credentials and its own session file.
 type TGAccount struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`

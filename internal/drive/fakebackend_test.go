@@ -19,7 +19,7 @@ import (
 // real service would.
 //
 // It doubles as the Cluster: one fake Telegram serves however many fake
-// accounts a test asks for, which is what makes multi-account scheduling and
+// accounts a test asks for, which is what makes primary/fallback scheduling and
 // cross-account reads testable without a network.
 type fakeTelegram struct {
 	mu       sync.Mutex
@@ -66,7 +66,7 @@ type fakeAccount struct {
 	// and still works if asked, but the scheduler should route around it.
 	unavailable atomic.Bool
 	// uploads counts what this particular account stored, which is how a test
-	// checks that work actually spread across accounts.
+	// checks which primary/fallback account handled a transfer.
 	uploads atomic.Int64
 	reads   atomic.Int64
 	// refreshes counts handle resolutions, which is how a test checks that a
@@ -101,9 +101,10 @@ func newFakeTelegramN(n int) *fakeTelegram {
 
 func (f *fakeTelegram) Ready() bool { return f.ready }
 
-// Accounts implements Cluster. Like the real cluster it falls back to the
-// signed-in accounts when every one of them is unavailable, so a test that
-// throttles everything sees queueing rather than a hard failure.
+// Accounts implements Cluster. The slice keeps the first fake account as the
+// primary and the rest as fallbacks. Like the real cluster it returns all
+// signed-in accounts when every one is unavailable, so a test that throttles
+// everything sees queueing rather than a hard failure.
 func (f *fakeTelegram) Accounts() []Account {
 	var out []Account
 	for _, a := range f.accounts {

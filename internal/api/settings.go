@@ -37,14 +37,6 @@ type settingsBody struct {
 	MaxDownloadConns    int    `json:"maxDownloadConns"`
 	DownloadGraceMs     int64  `json:"downloadGraceMs"`
 	ShareTTLHours       int64  `json:"shareTtlHours"`
-
-	// The task limits above are per Telegram account, so what an operator
-	// actually gets is the limit times the number of accounts able to take
-	// work. These three are derived and read-only; the WebUI shows them next to
-	// the sliders so the multiplication is not a surprise.
-	AccountCount                 int `json:"accountCount"`
-	EffectiveUploadConcurrency   int `json:"effectiveUploadConcurrency"`
-	EffectiveDownloadConcurrency int `json:"effectiveDownloadConcurrency"`
 }
 
 type settingsUpdateRequest struct {
@@ -93,20 +85,9 @@ func toSettingsBody(s config.RuntimeSettings) settingsBody {
 	}
 }
 
-// settingsBodyFor fills in the derived per-account totals, which toSettingsBody
-// cannot compute on its own because they depend on how many accounts are live.
-func (s *Server) settingsBodyFor(settings config.RuntimeSettings) settingsBody {
-	body := toSettingsBody(settings)
-	accounts, upload, download := s.drive.TransferCapacity()
-	body.AccountCount = accounts
-	body.EffectiveUploadConcurrency = upload
-	body.EffectiveDownloadConcurrency = download
-	return body
-}
-
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, s.settingsBodyFor(s.cfg.RuntimeSettings()))
+	writeJSON(w, http.StatusOK, toSettingsBody(s.cfg.RuntimeSettings()))
 }
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -284,5 +265,5 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.audit(r, database.AuditSettingsUpdate, "", "runtime settings")
-	writeJSON(w, http.StatusOK, s.settingsBodyFor(next))
+	writeJSON(w, http.StatusOK, toSettingsBody(next))
 }

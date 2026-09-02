@@ -8,10 +8,9 @@
 //
 // One Manager is one Telegram account. A deployment may hold several, held
 // together by Cluster: Telegram meters FLOOD_WAIT and transfer quota per
-// account, so a second login is the only way to get a second budget. Nothing
-// is shared between them — separate credentials, separate session files,
-// separate pools, separate rate limiters — which is what lets one sit out a
-// FLOOD_WAIT while the others keep working.
+// account, so a fallback login can take over while another sits out a
+// FLOOD_WAIT. Nothing is shared between them — separate credentials, separate
+// session files, separate pools and separate rate limiters.
 package tgc
 
 import (
@@ -77,8 +76,8 @@ type Status struct {
 	// AwaitingPassword means the account has 2FA and the code was accepted.
 	AwaitingPassword bool `json:"awaitingPassword"`
 	// CooldownMs is how long Telegram has told this account to wait before
-	// sending more requests. Non-zero means the scheduler is routing new work
-	// to the other accounts.
+	// sending more requests. Non-zero means new work can fail over to another
+	// account.
 	CooldownMs int64 `json:"cooldownMs,omitempty"`
 	// ChannelReady and ChannelChecked let the settings page distinguish a
 	// signed-in account that is still being checked from one that failed the
@@ -311,8 +310,8 @@ func (m *Manager) start(ctx context.Context, appID int, appHash string) error {
 	// scheduler needs to start sending new transfers to another account.
 	//
 	// Every one of these is per-account: the rate limiter, the retry budget and
-	// the connection pool below all belong to this login alone, which is the
-	// whole point of running more than one.
+	// the connection pool below all belong to this login alone. The drive-level
+	// task queue remains global even though the Telegram connections are isolated.
 	middlewares := []telegram.Middleware{
 		floodwait.NewSimpleWaiter().WithMaxRetries(5).WithMaxWait(5 * time.Minute),
 		m.healthMiddleware(),
