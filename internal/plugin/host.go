@@ -394,7 +394,16 @@ func (host *managerHost) OpenStream(ctx context.Context, method string, request 
 		stream := newUploadStream()
 		go func() {
 			defer release()
-			err := host.manager.drive.PutSegment(segmentCtx, job, input.Index, stream.reader(), input.Size, nil)
+			// PutSegment itself is deliberately a low-level primitive. The
+			// browser normally wraps it in AcquireUploadJob, but plugin streams
+			// arrive through this bridge, so acquire the same job-level account
+			// lease here. This keeps plugin segments on one account and makes
+			// daily quota exhaustion apply to them as well.
+			_, releaseRequest, err := host.manager.drive.AcquireUploadJob(segmentCtx, input.JobID)
+			if err == nil {
+				defer releaseRequest()
+				err = host.manager.drive.PutSegment(segmentCtx, job, input.Index, stream.reader(), input.Size, nil)
+			}
 			stream.finish(err)
 		}()
 		return stream, nil

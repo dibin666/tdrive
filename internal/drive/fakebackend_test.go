@@ -58,6 +58,10 @@ type fakeAccount struct {
 	tg *fakeTelegram
 	id string
 
+	// Daily quotas are zero (unlimited) unless a quota test opts in.
+	uploadQuota   int64
+	downloadQuota int64
+
 	// unavailable stands in for a FLOOD_WAIT: the account is still signed in
 	// and still works if asked, but the scheduler should route around it.
 	unavailable atomic.Bool
@@ -131,6 +135,13 @@ func (f *fakeTelegram) account(i int) *fakeAccount { return f.accounts[i] }
 
 func (a *fakeAccount) ID() string      { return a.id }
 func (a *fakeAccount) Available() bool { return a.tg.ready && !a.unavailable.Load() }
+
+func (a *fakeAccount) DailyQuota(upload bool) int64 {
+	if upload {
+		return a.uploadQuota
+	}
+	return a.downloadQuota
+}
 
 // ChannelRef mints this account's own view of the channel. The fake ignores the
 // value when serving, but handing out a different one per account matches

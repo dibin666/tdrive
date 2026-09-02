@@ -158,6 +158,19 @@ func (m *Manager) Account() database.TGAccount {
 	return m.acct
 }
 
+// DailyQuota returns this account's byte budget for one direction. A zero
+// value means that direction is unlimited. The drive keeps the scheduler's
+// quota policy out of the Telegram client, but it needs this small read-only
+// view when choosing which login can take the next content.
+func (m *Manager) DailyQuota(upload bool) int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if upload {
+		return m.acct.UploadDailyQuota
+	}
+	return m.acct.DownloadDailyQuota
+}
+
 // SessionPath is where this account's gotd session lives. Every account gets
 // its own file: sharing one would mean two clients overwriting each other's
 // auth key.

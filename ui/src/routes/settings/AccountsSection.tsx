@@ -1,7 +1,20 @@
 import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { Check, Globe, Hash, Plus, Radio, RefreshCw, Trash2, UserPlus } from 'lucide-react'
+import {
+  Check,
+  Download,
+  Globe,
+  Hash,
+  Plus,
+  Radio,
+  RefreshCw,
+  SlidersHorizontal,
+  Trash2,
+  Upload,
+  UserPlus,
+} from 'lucide-react'
 import { ApiError, api, type AccountChannels, type TelegramAccount } from '../../lib/api'
+import { formatBytes } from '../../lib/format'
 import { Button, Field, Input, Modal, Spinner, toast } from '../../components/primitives'
 import { Section, StatusDot } from './shared'
 
@@ -40,6 +53,8 @@ export function AccountsSection({
   const [picking, setPicking] = useState<TelegramAccount | null>(null)
   // The account whose outbound proxy editor is open, if any.
   const [proxyAccount, setProxyAccount] = useState<TelegramAccount | null>(null)
+  // The account whose quota editor is open, if any.
+  const [quotaAccount, setQuotaAccount] = useState<TelegramAccount | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -106,6 +121,7 @@ export function AccountsSection({
               account={account}
               hasChannel={hasChannel}
               busy={busyId === account.id}
+              onQuota={() => setQuotaAccount(account)}
               onJoin={() =>
                 void act(account.id, '已加入存储频道', () => api.joinStorageChannel(account.id))
               }
@@ -190,14 +206,94 @@ export function AccountsSection({
           />
         )}
       </Modal>
+
+      <Modal
+        open={quotaAccount !== null}
+        onClose={() => setQuotaAccount(null)}
+        title="设置每日传输配额"
+        description={`配置「${quotaAccount?.label || (quotaAccount ? `api_id ${quotaAccount.appId}` : '')}」的每日上传与下载额度`}
+        width="max-w-lg"
+      >
+        {quotaAccount && (
+          <QuotaEditor
+            account={quotaAccount}
+            onSaved={async () => {
+              setQuotaAccount(null)
+              await reload()
+              await onChanged()
+            }}
+          />
+        )}
+      </Modal>
     </Section>
   )
+}
+
+function QuotaProgressBar({
+  used,
+  reserved,
+  quota,
+}: {
+  used: number
+  reserved: number
+  quota: number
+}) {
+  if (quota <= 0) return null
+  const usedPct = Math.min(100, Math.max(0, (used / quota) * 100))
+  const reservedPct = Math.min(100 - usedPct, Math.max(0, (reserved / quota) * 100))
+  const total = used + reserved
+  const isExhausted = total >= quota
+  const isNearLimit = total >= quota * 0.9
+
+  return (
+    <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-[var(--line)]">
+      {/* Used portion */}
+      <div
+        className={clsx(
+          'absolute left-0 top-0 h-full transition-[width] duration-300',
+          isExhausted
+            ? 'bg-[var(--color-danger)]'
+            : isNearLimit
+              ? 'bg-[var(--color-warn)]'
+              : 'bg-[var(--color-clay)]',
+        )}
+        style={{ width: `${usedPct}%` }}
+      />
+      {/* Reserved portion */}
+      {reservedPct > 0 && (
+        <div
+          className={clsx(
+            'absolute top-0 h-full opacity-60 transition-[left,width] duration-300',
+            isExhausted
+              ? 'bg-[var(--color-danger)]'
+              : isNearLimit
+                ? 'bg-[var(--color-warn)]'
+                : 'bg-[var(--color-clay)]',
+          )}
+          style={{ left: `${usedPct}%`, width: `${reservedPct}%` }}
+        />
+      )}
+    </div>
+  )
+}
+
+function formatResetCountdown(resetAtMs: number): string {
+  if (!resetAtMs) return ''
+  const diffMs = resetAtMs - Date.now()
+  if (diffMs <= 0) return '即将重置'
+  const hours = Math.floor(diffMs / 3_600_000)
+  const minutes = Math.floor((diffMs % 3_600_000) / 60_000)
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes} 分钟后重置`
+  }
+  return `${Math.max(1, minutes)} 分钟后重置`
 }
 
 function AccountCard({
   account,
   hasChannel,
   busy,
+  onQuota,
   onJoin,
   onPickChannel,
   onCheck,
@@ -208,6 +304,7 @@ function AccountCard({
   account: TelegramAccount
   hasChannel: boolean
   busy: boolean
+  onQuota: () => void
   onJoin: () => void
   onPickChannel: () => void
   onCheck: () => void
@@ -219,10 +316,14 @@ function AccountCard({
   const { tone, label } = describe(account, cooldown)
   const needsChannel = hasChannel && account.status.state === 'ready' && !account.canPost
 
+  const uploadExhausted = account.uploadDailyQuota > 0 && account.uploadRemainingToday <= 0
+  const downloadExhausted = account.downloadDailyQuota > 0 && account.downloadRemainingToday <= 0
+  const resetCountdown = formatResetCountdown(account.quotaResetAt)
+
   return (
     <div
       className={clsx(
-        'rounded-[var(--radius-card)] border border-[var(--line)] p-3',
+        'rounded-[var(--radius-card)] border border-[var(--line)] p-3.5',
         !account.enabled && 'opacity-60',
       )}
     >
@@ -231,13 +332,23 @@ function AccountCard({
           <StatusDot tone={tone} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">
               {account.label || `api_id ${account.appId}`}
             </span>
             {account.isPrimary && (
               <span className="rounded-full bg-[var(--sunk)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
                 主账号
+              </span>
+            )}
+            {uploadExhausted && (
+              <span className="rounded-full bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)]">
+                上传配额已耗尽
+              </span>
+            )}
+            {downloadExhausted && (
+              <span className="rounded-full bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)]">
+                下载配额已耗尽
               </span>
             )}
           </div>
@@ -252,9 +363,108 @@ function AccountCard({
               占用 上传 {account.activeUploads} / 下载 {account.activeDownloads}
             </span>
           </div>
+
+          {/* Daily Quota Section */}
+          <div className="mt-3 rounded-[var(--radius-control)] bg-[var(--sunk)] p-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {/* Upload Quota */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1 font-medium text-[var(--ink)]">
+                    <Upload size={12} className="text-[var(--color-clay)]" />
+                    每日上传
+                  </span>
+                  {account.uploadDailyQuota > 0 ? (
+                    uploadExhausted ? (
+                      <span className="rounded bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)]">
+                        已耗尽
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-[var(--muted)]">
+                        剩余 <span className="font-medium text-[var(--ink)]">{formatBytes(account.uploadRemainingToday)}</span>
+                      </span>
+                    )
+                  ) : (
+                    <span className="text-[11px] text-[var(--faint)]">不限</span>
+                  )}
+                </div>
+
+                {account.uploadDailyQuota > 0 ? (
+                  <QuotaProgressBar
+                    used={account.uploadUsedToday}
+                    reserved={account.uploadReservedToday}
+                    quota={account.uploadDailyQuota}
+                  />
+                ) : null}
+
+                <div className="flex flex-wrap items-baseline justify-between gap-1 text-[11px] text-[var(--muted)]">
+                  <span>
+                    已用 {formatBytes(account.uploadUsedToday)}
+                    {account.uploadReservedToday > 0 && (
+                      <span className="text-[var(--faint)]">（保留中 {formatBytes(account.uploadReservedToday)}）</span>
+                    )}
+                  </span>
+                  <span className="text-[var(--faint)]">
+                    {account.uploadDailyQuota > 0 ? `/ ${formatBytes(account.uploadDailyQuota)}` : '配额不限'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Download Quota */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1 font-medium text-[var(--ink)]">
+                    <Download size={12} className="text-[var(--color-clay)]" />
+                    每日下载
+                  </span>
+                  {account.downloadDailyQuota > 0 ? (
+                    downloadExhausted ? (
+                      <span className="rounded bg-[var(--color-danger)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-danger)]">
+                        已耗尽
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-[var(--muted)]">
+                        剩余 <span className="font-medium text-[var(--ink)]">{formatBytes(account.downloadRemainingToday)}</span>
+                      </span>
+                    )
+                  ) : (
+                    <span className="text-[11px] text-[var(--faint)]">不限</span>
+                  )}
+                </div>
+
+                {account.downloadDailyQuota > 0 ? (
+                  <QuotaProgressBar
+                    used={account.downloadUsedToday}
+                    reserved={account.downloadReservedToday}
+                    quota={account.downloadDailyQuota}
+                  />
+                ) : null}
+
+                <div className="flex flex-wrap items-baseline justify-between gap-1 text-[11px] text-[var(--muted)]">
+                  <span>
+                    已用 {formatBytes(account.downloadUsedToday)}
+                    {account.downloadReservedToday > 0 && (
+                      <span className="text-[var(--faint)]">（保留中 {formatBytes(account.downloadReservedToday)}）</span>
+                    )}
+                  </span>
+                  <span className="text-[var(--faint)]">
+                    {account.downloadDailyQuota > 0 ? `/ ${formatBytes(account.downloadDailyQuota)}` : '配额不限'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-2.5 flex items-center justify-between border-t border-[var(--line)] pt-2 text-[10px] text-[var(--faint)]">
+              <span>每日按 UTC 0 点重置（UTC {account.quotaDate || '当日'}）</span>
+              {resetCountdown && <span>{resetCountdown}</span>}
+            </div>
+          </div>
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2">
+          <Button icon={<SlidersHorizontal size={14} />} disabled={busy} onClick={onQuota}>
+            配额
+          </Button>
           <Button icon={<Globe size={14} />} disabled={busy} onClick={onProxy}>
             代理
           </Button>
@@ -510,7 +720,267 @@ function describe(
   if (cooldownSeconds > 0) {
     return { tone: 'warn', label: `被 Telegram 限流，${cooldownSeconds} 秒后恢复；新任务已转给其它账号` }
   }
+  const uploadExhausted = account.uploadDailyQuota > 0 && account.uploadRemainingToday <= 0
+  const downloadExhausted = account.downloadDailyQuota > 0 && account.downloadRemainingToday <= 0
+  if (uploadExhausted && downloadExhausted) {
+    return { tone: 'warn', label: '今日上传与下载配额均已耗尽，新任务已转给其它账号（按 UTC 0 点重置）' }
+  }
+  if (uploadExhausted) {
+    return { tone: 'warn', label: '今日上传配额已耗尽，新上传任务已转给其它账号（按 UTC 0 点重置）' }
+  }
+  if (downloadExhausted) {
+    return { tone: 'warn', label: '今日下载配额已耗尽，新下载任务已转给其它账号（按 UTC 0 点重置）' }
+  }
   return { tone: 'ok', label: '正常，可以承担上传和下载' }
+}
+
+const QUOTA_UNITS = [
+  { value: 'GiB', label: 'GiB (1024³ 字节)', multiplier: 1024 * 1024 * 1024 },
+  { value: 'GB', label: 'GB (1000³ 字节)', multiplier: 1000 * 1000 * 1000 },
+  { value: 'TiB', label: 'TiB (1024⁴ 字节)', multiplier: 1024 * 1024 * 1024 * 1024 },
+  { value: 'MiB', label: 'MiB (1024² 字节)', multiplier: 1024 * 1024 },
+  { value: 'B', label: '字节 (B)', multiplier: 1 },
+]
+
+function bytesToInputState(bytes: number): { value: string; unit: string } {
+  if (!bytes || bytes <= 0) return { value: '', unit: 'GiB' }
+  const TIB = 1024 * 1024 * 1024 * 1024
+  const GIB = 1024 * 1024 * 1024
+  const MIB = 1024 * 1024
+
+  if (bytes % TIB === 0) return { value: String(bytes / TIB), unit: 'TiB' }
+  if (bytes % GIB === 0) return { value: String(bytes / GIB), unit: 'GiB' }
+  if (bytes % (1000 * 1000 * 1000) === 0) return { value: String(bytes / (1000 * 1000 * 1000)), unit: 'GB' }
+  if (bytes % MIB === 0) return { value: String(bytes / MIB), unit: 'MiB' }
+
+  // Check if close to clean GiB
+  const gibVal = bytes / GIB
+  const roundedGib = parseFloat(gibVal.toFixed(3))
+  if (Math.abs(roundedGib * GIB - bytes) < 1024) {
+    return { value: String(roundedGib), unit: 'GiB' }
+  }
+  return { value: String(bytes), unit: 'B' }
+}
+
+function parseQuotaBytes(valStr: string, unit: string): { bytes: number; error?: string } {
+  const trimmed = valStr.trim()
+  if (!trimmed || trimmed === '0') return { bytes: 0 }
+  const num = Number(trimmed)
+  if (!Number.isFinite(num) || num < 0) {
+    return { bytes: 0, error: '配额必须是非负数字' }
+  }
+  const item = QUOTA_UNITS.find((u) => u.value === unit)
+  const mult = item?.multiplier ?? (1024 * 1024 * 1024)
+  const bytes = Math.round(num * mult)
+  if (bytes > Number.MAX_SAFE_INTEGER) {
+    return { bytes: 0, error: '配额数值过大' }
+  }
+  return { bytes }
+}
+
+function formatBytesPreview(valStr: string, unit: string): string {
+  const trimmed = valStr.trim()
+  if (!trimmed || trimmed === '0') return '不限额（0 字节）'
+  const num = Number(trimmed)
+  if (!Number.isFinite(num) || num < 0) return '无效输入'
+  const item = QUOTA_UNITS.find((u) => u.value === unit)
+  const mult = item?.multiplier ?? (1024 * 1024 * 1024)
+  const bytes = Math.round(num * mult)
+  const formatted = formatBytes(bytes)
+  const gib = (bytes / (1024 * 1024 * 1024)).toFixed(2)
+  return `换算: ≈ ${bytes.toLocaleString()} 字节（${formatted} / ${gib} GiB）`
+}
+
+function QuotaInputField({
+  label,
+  icon,
+  valStr,
+  unit,
+  onValChange,
+  onUnitChange,
+  usedToday,
+  reservedToday,
+}: {
+  label: string
+  icon: React.ReactNode
+  valStr: string
+  unit: string
+  onValChange: (v: string) => void
+  onUnitChange: (u: string) => void
+  usedToday: number
+  reservedToday: number
+}) {
+  const preview = formatBytesPreview(valStr, unit)
+  const presets = [
+    { label: '不限', val: '', unit: 'GiB' },
+    { label: '10 GiB', val: '10', unit: 'GiB' },
+    { label: '50 GiB', val: '50', unit: 'GiB' },
+    { label: '100 GiB', val: '100', unit: 'GiB' },
+    { label: '500 GiB', val: '500', unit: 'GiB' },
+    { label: '1 TiB', val: '1', unit: 'TiB' },
+  ]
+
+  return (
+    <div className="space-y-2.5 rounded-[var(--radius-control)] border border-[var(--line)] p-3">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-1.5 text-xs font-medium text-[var(--ink)]">
+          {icon}
+          {label}
+        </span>
+        <span className="text-[11px] text-[var(--muted)]">
+          今日已用 {formatBytes(usedToday)}
+          {reservedToday > 0 && ` (保留中 ${formatBytes(reservedToday)})`}
+        </span>
+      </div>
+
+      <div className="flex gap-2">
+        <Input
+          type="number"
+          min="0"
+          step="any"
+          value={valStr}
+          onChange={(e) => onValChange(e.target.value)}
+          placeholder="0 (不限额)"
+          className="flex-1 font-[family-name:var(--font-mono)] text-xs"
+        />
+        <select
+          value={unit}
+          onChange={(e) => onUnitChange(e.target.value)}
+          className="input !w-auto shrink-0 cursor-pointer text-xs"
+        >
+          {QUOTA_UNITS.map((u) => (
+            <option key={u.value} value={u.value}>
+              {u.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Preset pills */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[11px] text-[var(--faint)]">快速预设:</span>
+        {presets.map((p) => {
+          const isSelected = valStr.trim() === p.val && (p.val === '' || unit === p.unit)
+          return (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => {
+                onValChange(p.val)
+                onUnitChange(p.unit)
+              }}
+              className={clsx(
+                'rounded-md px-2 py-0.5 text-[11px] transition-colors',
+                isSelected
+                  ? 'bg-[var(--color-clay)] font-medium text-white'
+                  : 'bg-[var(--sunk)] text-[var(--muted)] hover:bg-[var(--line)] hover:text-[var(--ink)]',
+              )}
+            >
+              {p.label}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="text-[11px] text-[var(--muted)]">{preview}</div>
+    </div>
+  )
+}
+
+function QuotaEditor({
+  account,
+  onSaved,
+}: {
+  account: TelegramAccount
+  onSaved: () => Promise<void>
+}) {
+  const initialUpload = bytesToInputState(account.uploadDailyQuota)
+  const initialDownload = bytesToInputState(account.downloadDailyQuota)
+
+  const [label, setLabel] = useState(account.label || '')
+  const [uploadVal, setUploadVal] = useState(initialUpload.value)
+  const [uploadUnit, setUploadUnit] = useState(initialUpload.unit)
+  const [downloadVal, setDownloadVal] = useState(initialDownload.value)
+  const [downloadUnit, setDownloadUnit] = useState(initialDownload.unit)
+
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const save = async () => {
+    setError(null)
+
+    const uploadParsed = parseQuotaBytes(uploadVal, uploadUnit)
+    if (uploadParsed.error) {
+      setError(`上传配额错误：${uploadParsed.error}`)
+      return
+    }
+
+    const downloadParsed = parseQuotaBytes(downloadVal, downloadUnit)
+    if (downloadParsed.error) {
+      setError(`下载配额错误：${downloadParsed.error}`)
+      return
+    }
+
+    setBusy(true)
+    try {
+      await api.updateTelegramAccount(account.id, {
+        label: label.trim() || undefined,
+        uploadDailyQuota: uploadParsed.bytes,
+        downloadDailyQuota: downloadParsed.bytes,
+      })
+      toast('账号配额已保存', 'success')
+      await onSaved()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
+        每日上传和下载配额按 <b>UTC 0 点</b>（北京时间 08:00）自动重置。单位为字节，填 <b>0</b> 或留空表示<b>不限额</b>。
+        当某个账号的当日配额耗尽后，网盘会自动将后续传输调度给其它可用账号。
+      </p>
+
+      {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
+
+      <Field label="账号备注名" hint="便于在多账号列表与传输记录中识别">
+        <Input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder={`api_id ${account.appId}`}
+        />
+      </Field>
+
+      <QuotaInputField
+        label="每日上传配额"
+        icon={<Upload size={13} className="text-[var(--color-clay)]" />}
+        valStr={uploadVal}
+        unit={uploadUnit}
+        onValChange={setUploadVal}
+        onUnitChange={setUploadUnit}
+        usedToday={account.uploadUsedToday}
+        reservedToday={account.uploadReservedToday}
+      />
+
+      <QuotaInputField
+        label="每日下载配额"
+        icon={<Download size={13} className="text-[var(--color-clay)]" />}
+        valStr={downloadVal}
+        unit={downloadUnit}
+        onValChange={setDownloadVal}
+        onUnitChange={setDownloadUnit}
+        usedToday={account.downloadUsedToday}
+        reservedToday={account.downloadReservedToday}
+      />
+
+      <Button variant="primary" className="w-full" loading={busy} onClick={() => void save()}>
+        保存配额设置
+      </Button>
+    </div>
+  )
 }
 
 /**

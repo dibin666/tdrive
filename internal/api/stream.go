@@ -255,7 +255,8 @@ func (s *Server) serveBytes(w http.ResponseWriter, r *http.Request, window byteW
 		}
 	}
 
-	if _, err := io.CopyN(w, reader, end-start+1); err != nil {
+	if copied, err := io.CopyN(w, reader, end-start+1); err != nil {
+		s.drive.RecordDownloadSessionBytes(window.sessionKey, copied)
 		// A player seeking away or a client disconnecting mid-stream is
 		// routine, not an error worth alarming about. The headers are
 		// already sent, so there is nothing to report to the client anyway.
@@ -263,6 +264,8 @@ func (s *Server) serveBytes(w http.ResponseWriter, r *http.Request, window byteW
 			s.log.Warn("stream ended early",
 				zap.String("file", file.ID), zap.Error(err))
 		}
+	} else {
+		s.drive.RecordDownloadSessionBytes(window.sessionKey, copied)
 	}
 }
 

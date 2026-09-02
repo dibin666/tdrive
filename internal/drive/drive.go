@@ -68,6 +68,8 @@ type Service struct {
 	limitersMu       sync.Mutex
 	uploadLimiters   map[string]*taskLimiter
 	downloadLimiters map[string]*taskLimiter
+	quotaMu          sync.Mutex
+	quotas           *quotaTracker
 	// schedCursor round-robins across accounts that are equally loaded, so a
 	// quiet drive does not send everything to the first account in the list.
 	schedCursor atomic.Uint64
@@ -125,6 +127,7 @@ func New(cfg *config.Config, db *database.DB, cluster Cluster, log *zap.Logger) 
 		refs:             newRefCache(cfg.Stream.LocationTTL),
 		uploadLimiters:   make(map[string]*taskLimiter),
 		downloadLimiters: make(map[string]*taskLimiter),
+		quotas:           newQuotaTracker(db, log),
 		uploadJobs:       make(map[string]*uploadJobLease),
 		jobAccounts:      make(map[string]Account),
 		downloadSessions: make(map[string]*downloadSession),

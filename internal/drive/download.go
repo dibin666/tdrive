@@ -306,7 +306,7 @@ func (s *Service) runStaged(ctx context.Context, job database.DownloadJob, file 
 	// A staged download is one whole-file transfer, so it takes a task slot
 	// exactly like a WebDAV read or a browser download does. Nothing about
 	// running in the background exempts it from the configured limit.
-	account, release, err := s.AcquireDownloadTask(ctx, s.SegmentOwner(ctx, file.ID))
+	lease, err := s.leaseDownload(ctx, s.SegmentOwner(ctx, file.ID), file.Size)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -314,7 +314,12 @@ func (s *Service) runStaged(ctx context.Context, job database.DownloadJob, file 
 		fail(err)
 		return
 	}
-	defer release()
+	account := lease.account
+	var downloaded int64
+	defer func() {
+		lease.recordQuotaBytes(downloaded)
+		lease.release()
+	}()
 
 	ok, err := s.db.SetDownloadStatusIf(ctx, job.ID, database.DownloadRunning, "",
 		database.DownloadPending, database.DownloadRunning)
@@ -391,6 +396,7 @@ func (s *Service) runStaged(ctx context.Context, job database.DownloadJob, file 
 	defer reader.Close()
 
 	written, err := s.copyStaged(ctx, out, reader, job, file.Size)
+	downloaded = written
 	if err != nil {
 		cleanupPartial()
 		if ctx.Err() != nil {

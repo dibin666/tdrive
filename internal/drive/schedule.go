@@ -28,6 +28,7 @@ var ErrNoAccount = errors.New("drive: no telegram account is available")
 // exactly once; it is idempotent.
 type lease struct {
 	account Account
+	quota   *quotaReservation
 	release func()
 }
 
@@ -137,51 +138,108 @@ func (s *Service) order(accounts []Account, limiters []*taskLimiter, prefer stri
 // call blocks on all of them at once and takes whichever frees a slot first,
 // which is what makes a busy drive drain evenly instead of queueing everything
 // behind the account that happens to be first in the list.
-func (s *Service) acquire(ctx context.Context, upload bool, prefer string) (*lease, error) {
+func (s *Service) acquire(ctx context.Context, upload bool, prefer string, expectedSize ...int64) (*lease, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	size := int64(0)
+	if len(expectedSize) > 0 {
+		size = expectedSize[0]
+	}
 
-	accounts := s.syncLimiters()
-	if len(accounts) == 0 {
-		if !s.cluster.Ready() {
-			return nil, ErrNoAccount
+	for {
+		accounts := s.syncLimiters()
+		if len(accounts) == 0 {
+			if !s.cluster.Ready() {
+				return nil, ErrNoAccount
+			}
+			return nil, fmt.Errorf("%w: no account can post to the storage channel", ErrNoAccount)
 		}
-		return nil, fmt.Errorf("%w: no account can post to the storage channel", ErrNoAccount)
-	}
 
-	limiters := make([]*taskLimiter, len(accounts))
-	for i, account := range accounts {
-		limiters[i] = s.limiterFor(account.ID(), upload)
-	}
-
-	ordered := s.order(accounts, limiters, prefer)
-	for _, i := range ordered {
-		if release, ok := limiters[i].tryAcquire(); ok {
-			return &lease{account: accounts[i], release: release}, nil
+		limiters := make([]*taskLimiter, len(accounts))
+		for i, account := range accounts {
+			limiters[i] = s.limiterFor(account.ID(), upload)
 		}
-	}
 
-	queue := make([]*taskLimiter, len(ordered))
-	for n, i := range ordered {
-		queue[n] = limiters[i]
+		quota := s.quotaTracker()
+		observedQuotaGeneration := quota.generationNow()
+		ordered := s.order(accounts, limiters, prefer)
+		fitting := make([]int, 0, len(ordered))
+		crossing := make([]int, 0, len(ordered))
+		for _, i := range ordered {
+			if s.quotaMayStart(accounts[i], upload, size) {
+				if s.quotaFits(accounts[i], upload, size) {
+					fitting = append(fitting, i)
+				} else {
+					crossing = append(crossing, i)
+				}
+			}
+		}
+		eligible := append(fitting, crossing...)
+		if len(eligible) == 0 {
+			// Every account has committed or reserved its budget. A quota
+			// reservation is held until its current content finishes, so the
+			// only ordinary wake-up is the next UTC day (or an administrator
+			// changing a quota, which also signals this tracker).
+			if err := quota.wait(ctx, observedQuotaGeneration); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		for _, i := range eligible {
+			if release, ok := limiters[i].tryAcquire(); ok {
+				reservation, reserved := s.reserveQuota(accounts[i], upload, size)
+				if reserved {
+					return &lease{
+						account: accounts[i],
+						quota:   reservation,
+						release: func() {
+							reservation.commit()
+							release()
+						},
+					}, nil
+				}
+				release()
+			}
+		}
+
+		queue := make([]*taskLimiter, len(eligible))
+		for n, i := range eligible {
+			queue[n] = limiters[i]
+		}
+		winner, release, err := acquireAny(ctx, queue)
+		if err != nil {
+			return nil, err
+		}
+		account := accounts[eligible[winner]]
+		reservation, reserved := s.reserveQuota(account, upload, size)
+		if reserved {
+			return &lease{
+				account: account,
+				quota:   reservation,
+				release: func() {
+					reservation.commit()
+					release()
+				},
+			}, nil
+		}
+		// Another waiter may have consumed the last budget while this
+		// acquireAny call was blocked. Return the task slot and retry with
+		// the remaining accounts.
+		release()
 	}
-	winner, release, err := acquireAny(ctx, queue)
-	if err != nil {
-		return nil, err
-	}
-	return &lease{account: accounts[ordered[winner]], release: release}, nil
 }
 
 // leaseUpload reserves an upload slot on some account.
-func (s *Service) leaseUpload(ctx context.Context) (*lease, error) {
-	return s.acquire(ctx, true, "")
+func (s *Service) leaseUpload(ctx context.Context, expectedSize ...int64) (*lease, error) {
+	return s.acquire(ctx, true, "", expectedSize...)
 }
 
 // leaseDownload reserves a download slot, preferring the account named — in
 // practice the one that uploaded the segments about to be read.
-func (s *Service) leaseDownload(ctx context.Context, prefer string) (*lease, error) {
-	return s.acquire(ctx, false, prefer)
+func (s *Service) leaseDownload(ctx context.Context, prefer string, expectedSize ...int64) (*lease, error) {
+	return s.acquire(ctx, false, prefer, expectedSize...)
 }
 
 // metaAccount picks an account for a metadata operation: creating a directory

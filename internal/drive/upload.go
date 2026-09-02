@@ -281,8 +281,10 @@ func (s *Service) PutSegment(
 }
 
 // uploadSegment performs the Telegram half: stream the bytes, then post the
-// document with its tagged caption. It returns the account that actually stored
-// the segment, which is not always the one it was handed — see below.
+// document with its tagged caption. The account is fixed for the whole logical
+// content transfer. Telegram FLOOD_WAIT is allowed to delay this account's
+// current content; a different account is selected only for a later content
+// transfer after this lease is released.
 func (s *Service) uploadSegment(
 	ctx context.Context,
 	account Account,
@@ -334,46 +336,7 @@ func (s *Service) uploadSegment(
 	if err == nil {
 		return doc, account, nil
 	}
-
-	// The account was throttled partway through. A segment is the unit a
-	// resumed upload retries anyway, so it is also the natural unit to move to
-	// another account — but only once, because a body that has already been
-	// partly consumed cannot be re-read and a retry storm across every account
-	// would be worse than waiting out the FLOOD_WAIT.
-	if next, ok := s.failoverAccount(ctx, account, spec.Body); ok {
-		s.log.Warn("moving a segment to another telegram account after a rate limit",
-			zap.String("file", file.ID), zap.Int("segment", index),
-			zap.String("from", account.ID()), zap.String("to", next.ID()), zap.Error(err))
-
-		nextRef, refErr := channelRef(ctx, next, channel)
-		if refErr == nil {
-			if doc, retryErr := next.Upload(ctx, nextRef, spec); retryErr == nil {
-				return doc, next, nil
-			}
-		}
-	}
 	return StoredDoc{}, account, fmt.Errorf("upload segment %d of %q: %w", index, file.Name, err)
-}
-
-// failoverAccount picks a different account to retry a throttled segment on.
-//
-// It refuses unless the body can be rewound, because Telegram's uploader has
-// already consumed some of it: re-sending from a half-read stream would store a
-// truncated segment, which is the one failure this program must never produce.
-func (s *Service) failoverAccount(ctx context.Context, failed Account, body io.Reader) (Account, bool) {
-	seeker, ok := body.(io.Seeker)
-	if !ok {
-		return nil, false
-	}
-	if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-		return nil, false
-	}
-	for _, candidate := range s.cluster.Accounts() {
-		if candidate.ID() != failed.ID() && candidate.Available() {
-			return candidate, true
-		}
-	}
-	return nil, false
 }
 
 // fileCaption builds the tagged caption for one segment, including the
@@ -587,19 +550,24 @@ func (s *Service) abortAfterFailure(ctx context.Context, jobID string, cause err
 // of order. Parallel segments are available to callers that can seek, which in
 // practice means the browser slicing a local file.
 func (s *Service) UploadStream(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
-	lease, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx, req.Size)
 	if err != nil {
 		return database.File{}, err
 	}
-	defer lease.release()
 
-	return s.uploadStream(ctx, lease.account, req, r, progress)
+	return s.uploadStream(ctx, lease, req, r, progress)
 }
 
 // uploadStream is the implementation shared by known-size and unsized
 // uploads. Callers must already hold the task slot before entering it, and pass
 // the account it was taken on so every segment lands on the same login.
-func (s *Service) uploadStream(ctx context.Context, account Account, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
+func (s *Service) uploadStream(ctx context.Context, lease *lease, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
+	var leaseBytes int64
+	defer func() {
+		lease.recordQuotaBytes(leaseBytes)
+		lease.release()
+	}()
+	account := lease.account
 	job, file, err := s.Begin(ctx, req)
 	if err != nil {
 		return database.File{}, err
@@ -640,6 +608,7 @@ func (s *Service) uploadStream(ctx context.Context, account Account, req UploadR
 			return database.File{}, err
 		}
 		written += size
+		leaseBytes = written
 	}
 
 	result, err := s.Complete(ctx, job.ID)
@@ -659,12 +628,6 @@ func (s *Service) uploadStream(ctx context.Context, account Account, req UploadR
 // cannot be told the size afterwards. Callers that do know the length should
 // use UploadStream and skip the disk entirely.
 func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
-	lease, err := s.acquireUploadTask(ctx)
-	if err != nil {
-		return database.File{}, err
-	}
-	defer lease.release()
-
 	if err := os.MkdirAll(s.cfg.Storage.SpoolDir, 0o750); err != nil {
 		return database.File{}, fmt.Errorf("create spool directory: %w", err)
 	}
@@ -689,7 +652,11 @@ func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Rea
 	}
 
 	req.Size = size
-	return s.uploadStream(ctx, lease.account, req, spool, progress)
+	lease, err := s.acquireUploadTask(ctx, req.Size)
+	if err != nil {
+		return database.File{}, err
+	}
+	return s.uploadStream(ctx, lease, req, spool, progress)
 }
 
 // PutSegmentsParallel uploads several independently-sourced segments at once.
@@ -701,30 +668,34 @@ func (s *Service) PutSegmentsParallel(
 	segments map[int]io.Reader,
 	progress Progress,
 ) error {
-	lease, err := s.acquireUploadTask(ctx)
-	if err != nil {
-		return err
-	}
-	defer lease.release()
-	defer s.bindUploadAccount(job.ID, lease.account)()
-
 	file, err := s.db.FileByID(ctx, job.FileID)
 	if err != nil {
 		return err
 	}
 
+	lease, err := s.acquireUploadTask(ctx, file.Size)
+	if err != nil {
+		return err
+	}
+	var written atomic.Int64
+	defer func() {
+		lease.recordQuotaBytes(written.Load())
+		lease.release()
+	}()
+	defer s.bindUploadAccount(job.ID, lease.account)()
+
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(s.cfg.Storage.SegmentConcurrency)
 
-	var done atomic.Int64
 	for idx, r := range segments {
 		g.Go(func() error {
 			size := SegmentSize(file.Size, file.SegmentSize, idx)
 			if err := s.PutSegment(gctx, job, idx, r, size, nil); err != nil {
 				return err
 			}
+			written.Add(size)
 			if progress != nil {
-				progress(done.Add(size), file.Size)
+				progress(written.Load(), file.Size)
 			}
 			return nil
 		})

@@ -111,11 +111,25 @@ type TGAccount struct {
 	IsPrimary   bool   `json:"isPrimary"`
 	// TGUserID, Username and Phone are cached from the last successful login so
 	// the accounts list can name an account without a live connection.
-	TGUserID  int64     `json:"tgUserId,omitempty"`
-	Username  string    `json:"username,omitempty"`
-	Phone     string    `json:"phone,omitempty"`
-	Position  int       `json:"-"`
-	CreatedAt time.Time `json:"createdAt"`
+	TGUserID int64  `json:"tgUserId,omitempty"`
+	Username string `json:"username,omitempty"`
+	Phone    string `json:"phone,omitempty"`
+	Position int    `json:"-"`
+	// Byte budgets for one UTC calendar day. Zero disables the corresponding
+	// budget.
+	UploadDailyQuota   int64     `json:"uploadDailyQuota"`
+	DownloadDailyQuota int64     `json:"downloadDailyQuota"`
+	CreatedAt          time.Time `json:"createdAt"`
+}
+
+// TGTransferUsage is the persisted amount of Telegram traffic attributed to
+// one account for one UTC calendar day. It is deliberately separate from the
+// account row so changing a quota never rewrites historical usage.
+type TGTransferUsage struct {
+	AccountID     string
+	Date          string
+	UploadBytes   int64
+	DownloadBytes int64
 }
 
 // ChannelAccess is one account's view of a storage channel. Telegram mints

@@ -74,12 +74,16 @@ func (s *Service) runLocal(ctx context.Context, job database.UploadJob, localRoo
 	ctx, release := s.WatchUploadJob(ctx, job.ID)
 	defer release()
 
-	lease, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx, job.TotalSize)
 	if err != nil {
 		s.failLocal(ctx, job, err)
 		return
 	}
-	defer lease.release()
+	var written int64
+	defer func() {
+		lease.recordQuotaBytes(written)
+		lease.release()
+	}()
 	defer s.bindUploadAccount(job.ID, lease.account)()
 
 	source := localfs.New(localRoot)
@@ -133,6 +137,7 @@ func (s *Service) runLocal(ctx context.Context, job database.UploadJob, localRoo
 			s.failLocal(ctx, job, err)
 			return
 		}
+		written += size
 	}
 
 	if _, err := s.Complete(ctx, job.ID); err != nil {

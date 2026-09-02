@@ -125,6 +125,16 @@ export interface TelegramAccount {
   inChannel: boolean
   activeUploads: number
   activeDownloads: number
+  uploadDailyQuota: number
+  downloadDailyQuota: number
+  uploadUsedToday: number
+  downloadUsedToday: number
+  uploadReservedToday: number
+  downloadReservedToday: number
+  uploadRemainingToday: number
+  downloadRemainingToday: number
+  quotaDate: string
+  quotaResetAt: number
 }
 
 export interface TelegramAccountExport {
@@ -773,7 +783,15 @@ export const api = {
       method: 'POST',
       body: json(body),
     }),
-  updateTelegramAccount: (id: string, body: { label?: string; enabled?: boolean }) =>
+  updateTelegramAccount: (
+    id: string,
+    body: {
+      label?: string
+      enabled?: boolean
+      uploadDailyQuota?: number
+      downloadDailyQuota?: number
+    },
+  ) =>
     request<void>(`/tg/accounts/${id}`, { method: 'PATCH', body: json(body) }),
   deleteTelegramAccount: (id: string) =>
     request<void>(`/tg/accounts/${id}`, { method: 'DELETE' }),

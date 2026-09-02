@@ -86,9 +86,24 @@ CREATE TABLE tg_accounts (
     username     TEXT NOT NULL DEFAULT '',
     phone        TEXT NOT NULL DEFAULT '',
     position     INTEGER NOT NULL DEFAULT 0,
+    -- Byte budgets for one UTC calendar day. Zero means unlimited.
+    upload_daily_quota   INTEGER NOT NULL DEFAULT 0,
+    download_daily_quota INTEGER NOT NULL DEFAULT 0,
     created_at   INTEGER NOT NULL
 );
 CREATE INDEX idx_tg_accounts_enabled ON tg_accounts (enabled);
+
+-- Persisted daily traffic. The in-memory scheduler keeps reservations for
+-- transfers currently in flight; this table keeps committed usage across
+-- restarts and lets the settings page report today's totals.
+CREATE TABLE tg_account_usage (
+    account_id     TEXT NOT NULL REFERENCES tg_accounts (id) ON DELETE CASCADE,
+    quota_date     TEXT NOT NULL,
+    upload_bytes   INTEGER NOT NULL DEFAULT 0,
+    download_bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, quota_date)
+) WITHOUT ROWID;
+CREATE INDEX idx_tg_account_usage_date ON tg_account_usage (quota_date);
 
 CREATE TABLE channels (
     id          TEXT PRIMARY KEY,

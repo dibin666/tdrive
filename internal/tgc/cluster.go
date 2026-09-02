@@ -486,6 +486,22 @@ func (c *Cluster) Update(ctx context.Context, id, label string, enabled bool) er
 	return nil
 }
 
+// SetQuotas changes only the daily transfer budgets. It reloads the manager's
+// cached account row so the drive scheduler sees the new limits immediately;
+// an existing transfer is never interrupted by a quota edit.
+func (c *Cluster) SetQuotas(ctx context.Context, id string, upload, download int64) error {
+	if upload < 0 || download < 0 {
+		return errors.New("telegram account daily quotas must not be negative")
+	}
+	if err := c.db.SetAccountDailyQuotas(ctx, id, upload, download); err != nil {
+		return err
+	}
+	if err := c.reload(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
 // SetProxy points one account at an outbound proxy — or, with an empty
 // address, back at a direct connection — and redials it so the change takes
 // effect immediately rather than at the next restart.

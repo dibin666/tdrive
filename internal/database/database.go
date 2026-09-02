@@ -103,7 +103,7 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 
 // schemaVersion is what schema.sql describes. Anything older is brought up to
 // it by the steps in migrate.
-const schemaVersion = 8
+const schemaVersion = 9
 
 // upgradeSteps are the statements that take an existing database from the
 // version keyed here to the next one. A fresh database skips all of them,
@@ -311,6 +311,20 @@ var upgradeSteps = map[int][]string{
 		// the direct connection it already had, so an upgrade changes nothing
 		// until an administrator sets one.
 		`ALTER TABLE tg_accounts ADD COLUMN proxy_url TEXT NOT NULL DEFAULT ''`,
+	},
+	8: {
+		// Daily byte budgets are independent per direction. Zero preserves the
+		// old unlimited behaviour for every account on upgrade.
+		`ALTER TABLE tg_accounts ADD COLUMN upload_daily_quota INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE tg_accounts ADD COLUMN download_daily_quota INTEGER NOT NULL DEFAULT 0`,
+		`CREATE TABLE IF NOT EXISTS tg_account_usage (
+			account_id     TEXT NOT NULL REFERENCES tg_accounts (id) ON DELETE CASCADE,
+			quota_date     TEXT NOT NULL,
+			upload_bytes   INTEGER NOT NULL DEFAULT 0,
+			download_bytes INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (account_id, quota_date)
+		) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS idx_tg_account_usage_date ON tg_account_usage (quota_date)`,
 	},
 }
 

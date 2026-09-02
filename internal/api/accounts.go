@@ -45,6 +45,19 @@ type accountBody struct {
 	// currently using, which is what makes the per-account limits legible.
 	ActiveUploads   int `json:"activeUploads"`
 	ActiveDownloads int `json:"activeDownloads"`
+
+	// Daily quotas are byte budgets. Zero means unlimited; usage and
+	// reservations are for the current UTC calendar day.
+	UploadDailyQuota       int64  `json:"uploadDailyQuota"`
+	DownloadDailyQuota     int64  `json:"downloadDailyQuota"`
+	UploadUsedToday        int64  `json:"uploadUsedToday"`
+	DownloadUsedToday      int64  `json:"downloadUsedToday"`
+	UploadReservedToday    int64  `json:"uploadReservedToday"`
+	DownloadReservedToday  int64  `json:"downloadReservedToday"`
+	UploadRemainingToday   int64  `json:"uploadRemainingToday"`
+	DownloadRemainingToday int64  `json:"downloadRemainingToday"`
+	QuotaDate              string `json:"quotaDate"`
+	QuotaResetAt           int64  `json:"quotaResetAt"`
 }
 
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
@@ -89,17 +102,28 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	out := make([]accountBody, 0, len(accountRows))
 	for _, row := range accountRows {
 		body := accountBody{
-			ID:              row.ID,
-			Label:           row.Label,
-			AppID:           row.AppID,
-			Enabled:         row.Enabled,
-			IsPrimary:       row.IsPrimary,
-			ProxyURL:        tgc.MaskProxyURL(row.ProxyURL),
-			ChannelTitle:    storageChannelTitle,
-			Status:          tgc.Status{State: tgc.StateUnconfigured},
-			ActiveUploads:   upload[row.ID],
-			ActiveDownloads: download[row.ID],
+			ID:                 row.ID,
+			Label:              row.Label,
+			AppID:              row.AppID,
+			Enabled:            row.Enabled,
+			IsPrimary:          row.IsPrimary,
+			ProxyURL:           tgc.MaskProxyURL(row.ProxyURL),
+			ChannelTitle:       storageChannelTitle,
+			Status:             tgc.Status{State: tgc.StateUnconfigured},
+			ActiveUploads:      upload[row.ID],
+			ActiveDownloads:    download[row.ID],
+			UploadDailyQuota:   row.UploadDailyQuota,
+			DownloadDailyQuota: row.DownloadDailyQuota,
 		}
+		quota := s.drive.AccountQuotaStatus(row.ID, row.UploadDailyQuota, row.DownloadDailyQuota)
+		body.UploadUsedToday = quota.Upload.Used
+		body.DownloadUsedToday = quota.Download.Used
+		body.UploadReservedToday = quota.Upload.Reserved
+		body.DownloadReservedToday = quota.Download.Reserved
+		body.UploadRemainingToday = quota.Upload.Remaining
+		body.DownloadRemainingToday = quota.Download.Remaining
+		body.QuotaDate = quota.Date
+		body.QuotaResetAt = quota.ResetAt.UnixMilli()
 		if manager, ok := s.accounts.Manager(row.ID); ok {
 			body.Status = manager.Status()
 		}
@@ -181,8 +205,10 @@ func (s *Server) handleSetAccountProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateAccountRequest struct {
-	Label   *string `json:"label"`
-	Enabled *bool   `json:"enabled"`
+	Label              *string `json:"label"`
+	Enabled            *bool   `json:"enabled"`
+	UploadDailyQuota   *int64  `json:"uploadDailyQuota"`
+	DownloadDailyQuota *int64  `json:"downloadDailyQuota"`
 }
 
 func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
@@ -198,16 +224,34 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	label, enabled := row.Label, row.Enabled
+	uploadQuota, downloadQuota := row.UploadDailyQuota, row.DownloadDailyQuota
 	if req.Label != nil {
 		label = strings.TrimSpace(*req.Label)
 	}
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	if req.UploadDailyQuota != nil {
+		uploadQuota = *req.UploadDailyQuota
+	}
+	if req.DownloadDailyQuota != nil {
+		downloadQuota = *req.DownloadDailyQuota
+	}
+	if uploadQuota < 0 || downloadQuota < 0 {
+		writeError(w, http.StatusBadRequest, "Telegram account daily quotas must not be negative")
+		return
+	}
 
 	if err := s.accounts.Update(r.Context(), id, label, enabled); err != nil {
 		s.failAccount(w, err, "update telegram account")
 		return
+	}
+	if uploadQuota != row.UploadDailyQuota || downloadQuota != row.DownloadDailyQuota {
+		if err := s.accounts.SetQuotas(r.Context(), id, uploadQuota, downloadQuota); err != nil {
+			s.failAccount(w, err, "update telegram account daily quotas")
+			return
+		}
+		s.drive.NotifyQuotaChanged()
 	}
 	s.audit(r, database.AuditSettingsUpdate, id, "updated a telegram account")
 	w.WriteHeader(http.StatusNoContent)

@@ -219,6 +219,7 @@ func (l *taskLimiter) dispatchLocked() {
 type uploadJobLease struct {
 	id      string
 	account Account
+	quota   *quotaReservation
 
 	ready  chan struct{}
 	cancel context.CancelFunc
@@ -279,8 +280,12 @@ func (s *Service) ActiveTasksByAccount() (upload, download map[string]int) {
 // disk, for instance. Callers serving a client over HTTP want
 // AcquireDownloadSession instead, so that the several range requests making up
 // one logical download share a slot.
-func (s *Service) AcquireDownloadTask(ctx context.Context, prefer string) (Account, func(), error) {
-	lease, err := s.leaseDownload(ctx, prefer)
+func (s *Service) AcquireDownloadTask(ctx context.Context, prefer string, expectedSize ...int64) (Account, func(), error) {
+	size := int64(0)
+	if len(expectedSize) > 0 {
+		size = expectedSize[0]
+	}
+	lease, err := s.leaseDownload(ctx, prefer, size)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -307,6 +312,7 @@ var ErrTooManyConnections = errors.New("drive: too many parallel connections for
 type downloadSession struct {
 	key     string
 	account Account
+	quota   *quotaReservation
 
 	ready  chan struct{}
 	cancel context.CancelFunc
@@ -314,6 +320,10 @@ type downloadSession struct {
 	gateRelease func()
 	acquireErr  error
 	active      int
+	// transferred is the number of bytes actually served through Telegram
+	// during this logical content session. It is used to settle a partial
+	// client download without charging the whole file.
+	transferred int64
 	// idle is the grace timer armed when active reaches zero.
 	idle *time.Timer
 }
@@ -329,7 +339,7 @@ type downloadSession struct {
 // because every later range request joins an account that is already chosen.
 func (s *Service) AcquireDownloadSession(ctx context.Context, key, fileID string) (Account, func(), error) {
 	if key == "" {
-		return s.AcquireDownloadTask(ctx, s.SegmentOwner(ctx, fileID))
+		return s.AcquireDownloadTask(ctx, s.SegmentOwner(ctx, fileID), s.transferSize(ctx, fileID))
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -384,13 +394,16 @@ func (s *Service) AcquireDownloadSession(ctx context.Context, key, fileID string
 	// A client that disconnects while queued must not leave the session
 	// waiting forever on a slot nobody will use.
 	stopCancel := context.AfterFunc(ctx, cancel)
-	acquired, acquireErr := s.leaseDownload(taskCtx, s.SegmentOwner(taskCtx, fileID))
+	acquired, acquireErr := s.leaseDownload(
+		taskCtx, s.SegmentOwner(taskCtx, fileID), s.transferSize(taskCtx, fileID),
+	)
 	stopCancel()
 
 	s.downloadSessionsMu.Lock()
 	session.acquireErr = acquireErr
 	if acquireErr == nil {
 		session.account = acquired.account
+		session.quota = acquired.quota
 		session.gateRelease = acquired.release
 		session.active = 1
 	} else if s.downloadSessions[key] == session {
@@ -449,10 +462,27 @@ func (s *Service) finishDownloadSessionLocked(session *downloadSession) {
 	}
 	session.idle = nil
 	session.cancel()
+	if session.quota != nil {
+		session.quota.setActual(session.transferred)
+	}
 	if session.gateRelease != nil {
 		session.gateRelease()
 		session.gateRelease = nil
 	}
+}
+
+// RecordDownloadSessionBytes attributes bytes served by a range request to
+// the logical content session that owns the Telegram account reservation.
+// Requests are grouped by key, so parallel ranges update one counter.
+func (s *Service) RecordDownloadSessionBytes(key string, bytes int64) {
+	if key == "" || bytes <= 0 {
+		return
+	}
+	s.downloadSessionsMu.Lock()
+	if session, ok := s.downloadSessions[key]; ok {
+		session.transferred += bytes
+	}
+	s.downloadSessionsMu.Unlock()
 }
 
 // AcquireUploadJob reserves (or joins) the task slot for one browser upload and
@@ -510,19 +540,24 @@ func (s *Service) AcquireUploadJob(ctx context.Context, jobID string) (Account, 
 	// A disconnected browser request must not leave a queued lease waiting
 	// forever. A later retry can create a fresh lease for the same job.
 	stopCancel := context.AfterFunc(ctx, cancel)
-	acquired, acquireErr := s.leaseUpload(taskCtx)
+	acquired, acquireErr := s.leaseUpload(taskCtx, s.uploadJobSize(taskCtx, jobID))
 	stopCancel()
 
 	var releaseNow func()
 	s.uploadJobsMu.Lock()
 	if acquireErr == nil && lease.closed {
 		acquireErr = ErrUploadTaskClosed
+		// The job was closed before the caller received a request lease, so
+		// no bytes could have reached Telegram through this reservation.
+		// Return the slot without charging the expected content size.
+		acquired.recordQuotaBytes(0)
 		releaseNow = acquired.release
 		acquired = nil
 	}
 	lease.acquireErr = acquireErr
 	if acquireErr == nil {
 		lease.account = acquired.account
+		lease.quota = acquired.quota
 		lease.gateRelease = acquired.release
 		lease.active = 1
 	}
@@ -578,8 +613,8 @@ func (s *Service) bindUploadAccount(jobID string, account Account) func() {
 
 // acquireUploadTask reserves an upload slot on some account for a transfer the
 // server drives end to end.
-func (s *Service) acquireUploadTask(ctx context.Context) (*lease, error) {
-	return s.leaseUpload(ctx)
+func (s *Service) acquireUploadTask(ctx context.Context, expectedSize ...int64) (*lease, error) {
+	return s.leaseUpload(ctx, expectedSize...)
 }
 
 func (s *Service) uploadRequestRelease(lease *uploadJobLease) func() {
@@ -608,7 +643,7 @@ func (s *Service) uploadRequestRelease(lease *uploadJobLease) func() {
 
 // ReleaseUploadJob closes a browser upload's job-level lease. It is safe to
 // call when the job was never admitted or when it was already released.
-func (s *Service) ReleaseUploadJob(jobID string) {
+func (s *Service) ReleaseUploadJob(jobID string, actualBytes ...int64) {
 	s.uploadJobsMu.Lock()
 	lease, ok := s.uploadJobs[jobID]
 	if !ok {
@@ -617,6 +652,22 @@ func (s *Service) ReleaseUploadJob(jobID string) {
 	}
 	lease.closed = true
 	lease.cancel()
+	if lease.quota != nil {
+		actual := int64(0)
+		if len(actualBytes) > 0 {
+			actual = actualBytes[0]
+		} else if s.db != nil {
+			// Only terminal closure commits a browser job's bytes. A segment
+			// request can release the job lease after a transient error and a
+			// later retry must not pay for the same earlier segments twice.
+			if job, err := s.db.JobByID(context.Background(), jobID); err == nil {
+				if job.Status.Terminal() {
+					actual = job.UploadedBytes
+				}
+			}
+		}
+		lease.quota.setActual(actual)
+	}
 
 	var release func()
 	if lease.active == 0 && lease.gateRelease != nil {

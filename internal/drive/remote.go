@@ -159,12 +159,16 @@ func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target 
 	ctx, release := s.WatchUploadJob(ctx, job.ID)
 	defer release()
 
-	lease, err := s.acquireUploadTask(ctx)
+	lease, err := s.acquireUploadTask(ctx, job.TotalSize)
 	if err != nil {
 		s.failRemote(ctx, job, err)
 		return
 	}
-	defer lease.release()
+	written := job.UploadedBytes
+	defer func() {
+		lease.recordQuotaBytes(written)
+		lease.release()
+	}()
 	defer s.bindUploadAccount(job.ID, lease.account)()
 
 	// Cancelling while the job waited for a transfer slot is common, because
@@ -202,6 +206,7 @@ func (s *Service) runRemote(ctx context.Context, job database.UploadJob, target 
 			s.failRemote(ctx, job, err)
 			return
 		}
+		written += size
 	}
 
 	if _, err := s.Complete(ctx, job.ID); err != nil {

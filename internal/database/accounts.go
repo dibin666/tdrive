@@ -17,7 +17,7 @@ import (
 // meaningless to another.
 
 const accountCols = `id, label, app_id, app_hash, proxy_url, session_file, enabled, is_primary,
-	tg_user_id, username, phone, position, created_at`
+	tg_user_id, username, phone, position, upload_daily_quota, download_daily_quota, created_at`
 
 func scanAccount(row interface{ Scan(...any) error }) (TGAccount, error) {
 	var (
@@ -27,7 +27,8 @@ func scanAccount(row interface{ Scan(...any) error }) (TGAccount, error) {
 		created   int64
 	)
 	err := row.Scan(&a.ID, &a.Label, &a.AppID, &a.AppHash, &a.ProxyURL, &a.SessionFile,
-		&enabled, &isPrimary, &a.TGUserID, &a.Username, &a.Phone, &a.Position, &created)
+		&enabled, &isPrimary, &a.TGUserID, &a.Username, &a.Phone, &a.Position,
+		&a.UploadDailyQuota, &a.DownloadDailyQuota, &created)
 	if err != nil {
 		return TGAccount{}, Translate(err)
 	}
@@ -72,9 +73,10 @@ func (d *DB) PrimaryAccount(ctx context.Context) (TGAccount, error) {
 
 func (d *DB) InsertAccount(ctx context.Context, a TGAccount) error {
 	_, err := d.write.ExecContext(ctx,
-		`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Label, a.AppID, a.AppHash, a.ProxyURL, a.SessionFile, boolInt(a.Enabled),
-		boolInt(a.IsPrimary), a.TGUserID, a.Username, a.Phone, a.Position, nowMS())
+		boolInt(a.IsPrimary), a.TGUserID, a.Username, a.Phone, a.Position,
+		a.UploadDailyQuota, a.DownloadDailyQuota, nowMS())
 	if err != nil {
 		return fmt.Errorf("insert telegram account: %w", Translate(err))
 	}
@@ -99,6 +101,18 @@ func (d *DB) SetAccountProxy(ctx context.Context, id, proxyURL string) error {
 	res, err := d.write.ExecContext(ctx,
 		`UPDATE tg_accounts SET proxy_url = ? WHERE id = ?`, proxyURL, id)
 	return affectedOne(res, err, "set the proxy of a telegram account")
+}
+
+// SetAccountDailyQuotas updates the two byte budgets without touching the
+// login credentials or the current day's usage.
+func (d *DB) SetAccountDailyQuotas(ctx context.Context, id string, upload, download int64) error {
+	if upload < 0 || download < 0 {
+		return errors.New("telegram account daily quotas must not be negative")
+	}
+	res, err := d.write.ExecContext(ctx,
+		`UPDATE tg_accounts SET upload_daily_quota = ?, download_daily_quota = ? WHERE id = ?`,
+		upload, download, id)
+	return affectedOne(res, err, "set telegram account daily quotas")
 }
 
 // SetAccountIdentity caches who an account signed in as, so the accounts list
@@ -167,10 +181,11 @@ func (d *DB) SeedPrimaryAccount(ctx context.Context, appID int, appHash, session
 			return errAlreadySeeded
 		}
 		// The literals are proxy_url, enabled, is_primary, tg_user_id,
-		// username, phone and position: an adopted account connects directly
-		// and has no cached identity until it next signs in.
+		// username, phone, position and the two daily quotas: an adopted
+		// account connects directly, starts unlimited, and has no cached
+		// identity until it next signs in.
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, '', ?, 1, 1, 0, '', '', 0, ?)`,
+			`INSERT INTO tg_accounts (`+accountCols+`) VALUES (?, ?, ?, ?, '', ?, 1, 1, 0, '', '', 0, 0, 0, ?)`,
 			account.ID, account.Label, account.AppID, account.AppHash,
 			account.SessionFile, nowMS()); err != nil {
 			return Translate(err)

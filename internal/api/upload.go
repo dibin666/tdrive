@@ -255,6 +255,11 @@ func (s *Server) handlePutSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if updated.Status == database.JobComplete {
+		// All Telegram objects for this content are in place. Release the
+		// account lease now rather than waiting for the browser's follow-up
+		// /complete request; if that request is lost, the finished content
+		// must not hold the account's daily reservation forever.
+		s.drive.ReleaseUploadJob(job.ID)
 		s.progress.clear(job.ID)
 	} else {
 		s.progress.update(job.ID, updated.UploadedBytes, updated.TotalSize, updated.Status)

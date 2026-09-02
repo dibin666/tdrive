@@ -137,6 +137,7 @@ func (r *ClientRead) Add(n int64) error {
 		r.entry.lastReport = time.Now()
 	}
 	r.svc.clientDownloadsMu.Unlock()
+	r.svc.RecordDownloadSessionBytes(r.entry.key, n)
 
 	if report {
 		r.svc.recordClientProgress(job, received)
