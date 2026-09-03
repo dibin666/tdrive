@@ -1,59 +1,18 @@
 # tdrive
 
-将 Telegram 账号转变为无限容量的网络硬盘。
+把 Telegram 变成你的无限容量私人网盘。
 
 **[English](README.md)**
 
-## 功能特性
+---
 
-- **Web 文件管理器** — 内置现代化 Web UI，右键菜单、Ctrl / Shift 多选、框选、键盘快捷键、批量重命名；移动端支持长按、左滑操作和下拉刷新
-- **多格式在线预览** — 图片（缩放平移）、音频、PDF（pdf.js 分页渲染）、代码高亮、Markdown、Excel、Word 和 zip 目录浏览。视频不在浏览器里播放：直接下载，或者把下载直链丢给本地播放器
-- **可复用下载直链** — 生成带独立令牌的完整 URL，可粘贴到 aria2、IDM、迅雷或另一台设备，支持多线程和断点续传，可随时撤销
-- **多种下载方式** — 直接下载 / 服务器暂存后下载 / 分卷分别下载再本地合并；直接下载和暂存下载都是把带令牌的直链交给浏览器自己下，和平时下载网页文件一样支持续传；分卷大文件默认推荐先暂存，最稳妥
-- **WebDAV** — 作为网络硬盘挂载，兼容 rclone、macOS Finder、Windows Explorer 等客户端；与 WebUI 共用同一套并发限制和权限
-- **大文件分片** — 自动将文件按 ~1.9 GB 分片存储到 Telegram，突破单文件 2 GB 上限；跨分片的 HTTP Range 请求对客户端完全透明
-- **浏览器分片上传** — 前端按服务器的分片边界切割文件并逐片上传，断点只丢一个分片而非整个文件，支持并发和续传
-- **VPS 本地上传** — Docker 可只读挂载 VPS 目录，WebUI 上传弹窗中直接选择服务器上的文件，无需先下载到浏览器
-- **离线下载** — 提交一个 URL，服务器端直接拉取并存入 Telegram，大文件无需经过浏览器
-- **并行下载** — 多连接并发预取 1 MiB 块，替代单连接顺序读取，下载速度显著提升
-- **多 Telegram 账号** — 可配置主账号和备用账号。账号之间完全隔离（各自的会话、连接池和限流器），主账号不可用或被限流时新任务自动回落到备用账号；任务队列不会因账号数量增加而翻倍
-- **索引重建** — 数据库只是缓存；丢失或损坏后可从 Telegram 频道完整重建目录树、文件元数据和归属关系
-- **多用户** — JWT 认证、角色管理、12 项细粒度权限、按用户限定目录范围、存储配额、账号启停、登录会话管理和操作审计日志
-- **传输中心** — 上传和下载合并为一个可筛选的列表：按类型 / 状态 / 来源 / 日期区间筛选，显示实时速度、平均速度和用时，可删除历史记录。服务器自己驱动的传输（WebDAV 上传下载、VPS 本地上传、离线下载、服务器暂存）由服务端计时，进度走 SSE 推送，不用手动刷新
-- **全信任 Go 插件** — 可从插件商店或 HTTPS 源码仓库安装，检查清单后只确认一次；插件以独立 RPC 子进程运行，可调用公开 Host API 并修改核心操作 Hook
-- **轻量部署** — 单二进制 + 一个 SQLite 文件，纯 Go 编译无需 CGO；提供 amd64 / arm64 多架构 Docker 镜像
+## 快速安装
 
-## 快速开始
+安装完成后，打开浏览器访问 `http://你的服务器IP:8080` 即可使用。
 
-### Docker Compose（推荐）
+### 1. 最小安装（一行命令极速体验）
 
-1. 复制示例环境文件：
-
-```bash
-cp .env.example .env
-```
-
-2. 编辑 `.env`，至少设置管理员密码：
-
-```bash
-TDRIVE_ADMIN_USER=admin
-TDRIVE_ADMIN_PASSWORD=your-secure-password
-```
-
-3. 启动：
-
-```bash
-docker compose up -d
-```
-
-4. 打开浏览器访问 `http://localhost:8080`，先创建管理员账号即可进入网盘；Telegram 登录和频道选择可以稍后在“设置”中完成。
-
-如需从 VPS 直接上传已有文件，Compose 默认会把宿主机的 `./vps-files` 以只读方式挂载到容器的
-`/vps`。登录管理员账号后，打开 WebUI“设置 → 运行参数”，把“VPS 本地上传目录”设置为
-`/vps`，上传弹窗中就可以浏览该目录；不需要设置 `TDRIVE_LOCAL_DIR` 环境变量。若要换宿主机目录，
-只需设置 Compose 的 `TDRIVE_LOCAL_PATH`，WebUI 中仍填写容器内的 `/vps`。
-
-### Docker
+适合想快速尝试的用户，使用 Docker 一行命令直接启动：
 
 ```bash
 docker run -d \
@@ -61,179 +20,171 @@ docker run -d \
   -p 8080:8080 \
   -v tdrive-data:/data \
   -e TDRIVE_ADMIN_USER=admin \
-  -e TDRIVE_ADMIN_PASSWORD=change-this-please \
+  -e TDRIVE_ADMIN_PASSWORD=your-password \
   ghcr.io/dibin666/tdrive:latest
 ```
 
-### 从二进制运行
+启动后在浏览器打开 `http://localhost:8080`，使用账号 `admin` 和上面设置的密码登录。
+
+---
+
+### 2. 详细安装（Docker Compose，推荐日常使用）
+
+推荐使用 Docker Compose 部署，数据持久化更好管理，也更方便配置反向代理和本地目录挂载。
+
+#### 第一步：准备配置文件
+
+创建项目目录并进入：
 
 ```bash
+mkdir -p tdrive && cd tdrive
+```
+
+创建 `docker-compose.yml`：
+
+```yaml
+services:
+  tdrive:
+    image: ghcr.io/dibin666/tdrive:latest
+    container_name: tdrive
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # 网盘数据目录（存放数据库、登录会话等）
+      - tdrive-data:/data
+      # 可选：挂载宿主机目录，方便直接导入服务器已有的大文件
+      - ./vps-files:/vps:ro
+    environment:
+      # 初始管理员账号密码（仅首次启动生效）
+      TDRIVE_ADMIN_USER: ${TDRIVE_ADMIN_USER:-admin}
+      TDRIVE_ADMIN_PASSWORD: ${TDRIVE_ADMIN_PASSWORD}
+      # 外部访问地址（配置域名反向代理时填写，例如 https://pan.example.com）
+      TDRIVE_BASE_URL: ${TDRIVE_BASE_URL:-}
+
+volumes:
+  tdrive-data:
+```
+
+创建 `.env` 环境文件：
+
+```bash
+# 初始管理员账号与密码（必填，密码请设置为 8 位以上）
+TDRIVE_ADMIN_USER=admin
+TDRIVE_ADMIN_PASSWORD=change-this-please
+
+# 绑定域名（如果使用反代或开启 HTTPS 请填写；本地 IP 访问可留空）
+# TDRIVE_BASE_URL=https://pan.example.com
+```
+
+#### 第二步：启动服务
+
+```bash
+docker compose up -d
+```
+
+查看运行日志：
+
+```bash
+docker compose logs -f
+```
+
+---
+
+### 3. 二进制直接运行（无 Docker）
+
+如果不使用 Docker，可以直接下载对应平台的预编译可执行文件：
+
+```bash
+# 设置数据目录并启动
 TDRIVE_DATA_DIR=./data ./tdrive
 ```
 
-启动后访问 `http://localhost:8080`，首次会显示设置向导。
+打开 `http://localhost:8080` 即可看到初始化页面。
 
-## 环境变量
+---
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `TDRIVE_DATA_DIR` | `./data`（二进制）或 `/data`（容器） | 数据目录（SQLite、Telegram 会话、上传缓存） |
-| `TDRIVE_LISTEN` | `:8080` | HTTP 监听地址 |
-| `TDRIVE_BASE_URL` | *（空）* | 外部可达地址（反向代理时设置） |
-| `TDRIVE_ADMIN_USER` | *（空）* | 初始管理员用户名（仅首次生效） |
-| `TDRIVE_ADMIN_PASSWORD` | *（空）* | 初始管理员密码（≥8 位） |
-| `TDRIVE_LOCAL_PATH` | `./vps-files` | Docker Compose 宿主机上用于 VPS 文件上传的目录；以只读方式挂载 |
-| `TDRIVE_TG_UPLOAD_PART_SIZE` | `512KiB` | WebUI 首次配置前的 Telegram 上传分片默认值 |
-| `TDRIVE_TG_RATE_LIMIT` | `100ms` | WebUI 首次配置前的 Telegram 请求间隔默认值 |
-| `TDRIVE_UPLOAD_CONCURRENCY` | `2` | WebUI 首次配置前的同时上传任务数默认值 |
-| `TDRIVE_DOWNLOAD_CONCURRENCY` | `2` | WebUI 首次配置前的同时下载任务数默认值 |
-| `TDRIVE_CACHE_DIR` | `<数据目录>/cache` | 下载暂存目录 |
-| `TDRIVE_CACHE_LIMIT` | `20GiB` | 下载暂存磁盘上限，设为 0 关闭暂存功能 |
-| `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | 单个下载允许的并发连接数 |
-| `TDRIVE_PLUGIN_DIR` | `<数据目录>/plugins` | 已安装插件二进制和临时目录；插件私有数据固定保存在 `<数据目录>/plugin-data/<插件 ID>` |
-| `TDRIVE_PLUGIN_STORE_URL` | `https://raw.githubusercontent.com/dibin666/tdrive/main/plugins/index.json` | 插件商店索引 HTTPS 地址；留空关闭商店 |
-| `TDRIVE_PLUGIN_MAX_BINARY_BYTES` | `256MiB` | 下载插件二进制的大小上限 |
+## 首次使用配置
 
-使用管理员账号登录后，其余运行参数可在 WebUI 的“设置”中配置：
+登录管理员账号后，只需要三步就能把网盘真正用起来：
 
-| WebUI 设置 | 默认值 | 说明 |
-|---|---|---|
-| Telegram `api_id` / `api_hash` | *（空）* | 来自 [my.telegram.org](https://my.telegram.org/apps) 的凭据 |
-| 存储分片大小 | `1900 MiB` | 每个 Telegram 对象的大小（上限取决于上传分片大小）；修改后只影响新上传文件 |
-| Telegram 上传分片 | `512 KiB` | 单个 `saveBigFilePart` 请求的大小；修改后只影响新上传文件 |
-| Telegram 请求间隔 | `100 ms` | Telegram RPC 请求之间的最小间隔，过小可能触发限流 |
-| Telegram 连接池 | `8` | MTProto 连接池大小 |
-| 上传线程 | `8` | 单分片内并发上传线程 |
-| 下载并发块数 | `6` | 并发下载块数 |
-| 同时上传任务数 | `2` | WebUI、VPS、离线下载和 WebDAV 共享的整文件上传上限；超出后等待 |
-| 同时下载任务数 | `2` | WebUI、直链和 WebDAV 共享的整文件下载上限；一个下载开的多条连接只算一个任务 |
-| 单个下载连接数 | `8` | 多线程下载最多开几条连接，超出返回 429 并自动退避 |
-| 下载暂存目录 | *（空）* | 留空则使用数据目录下的 `cache` |
-| 暂存磁盘上限 | `20 GiB` | 超出后按最近使用时间淘汰；设为 0 关闭暂存 |
-| 暂存保留时长 | `24 小时` | 暂存完成后可重复下载的时长 |
-| 分享直链有效期 | `168 小时` | 新建直链的默认有效期，0 表示永不过期 |
-| VPS 本地上传目录 | *（空）* | 服务器或容器内的可读目录；Docker Compose 默认挂载路径为 `/vps`，留空则禁用 |
-| WebDAV | 启用 | 启用或禁用 WebDAV 挂载 |
-| 日志级别 | `info` | 运行时日志级别 |
+1. **获取 Telegram 凭据**：浏览器访问 [my.telegram.org](https://my.telegram.org/apps)，登录你的 Telegram 账号，点击 **API development tools** 创建应用，获取 `api_id` 和 `api_hash`。
+2. **绑定账号**：在网盘界面打开【设置】→【Telegram】，填入 `api_id` 和 `api_hash`，输入手机号和收到的验证码登录。
+3. **设置存储频道**：在设置页选择现有的频道或新建一个私有频道，网盘就会把该频道当作存储仓库。
 
-性能参数页提供「保守 / 均衡 / 极速」三档预设，也可以逐项微调。分片相关的控件是受约束的：
-Telegram 上传分片只列出合法取值，存储分片滑杆的上限和步长随之变化，非法组合根本无法选出。
+配置完成后就可以开始上传和管理文件了。
 
-这些设置会保存在 SQLite 数据目录中，并且无需重启服务即可生效。连接池大小或请求间隔变化时，Telegram 连接会自动重建。
+---
 
-`TDRIVE_LOCAL_PATH` 是 Docker Compose 的宿主机路径，不是容器内路径。若使用 `docker run`，请手动添加
-`-v /srv/repository:/vps:ro`，然后在 WebUI“设置 → 存储与暂存”中填写 `/vps`；不需要设置环境变量。
+## 核心功能
 
-## 插件
+tdrive 把 Telegram 频道当作存储底座，使用体验和常见网盘一样简单：
 
-管理员可以在“设置 → 插件”中从商店安装，或粘贴已发布的 `tdrive.plugin.json` 的 HTTPS 地址。清单会先检查——这一步不下载也不执行任何二进制——随后只需点击一次“确认安装”，tdrive 下载与本机平台对应的二进制，核对清单声明的 SHA-256，然后立即启动。插件是全信任代码：不做能力授权，安装提示也不是安全沙箱。
+- **Web 文件管理**：支持文件多选、框选、拖拽、右键操作、批量重命名；移动端支持手势滑动与下拉刷新。
+- **多格式在线预览**：支持图片、音视频、PDF、Markdown、代码高亮、Office 文档直接预览以及压缩包查看。
+- **大文件自动分卷**：单文件超过 1.9GB 时自动切片上传，突破 Telegram 单文件 2GB 限制；下载时自动合并。
+- **高速下载与直链**：支持多线程并发下载与断点续传；可生成带权限的独立直链，直接复制到 IDM 或 Aria2 批量下载。
+- **WebDAV 挂载**：支持 WebDAV 协议，可挂载到 Windows、Mac、Linux、Rclone、Infuse 或 Alist，像本地磁盘一样使用。
+- **多账号故障转移**：支持添加多个 Telegram 备用账号。主账号触发 Telegram 请求限制时，系统自动切换到备用账号继续传输，保证服务不中断。
+- **多用户与权限管理**：支持多用户登录、限定用户的目录访问范围、设置空间配额以及细粒度操作权限。
+- **离线下载与本地导入**：支持输入 HTTP 链接直接离线下载到网盘；支持直接挂载服务器本地文件秒级入库，不用经过浏览器中转。
+- **数据防丢**：本地数据库仅作为加速缓存。即使数据库损坏或丢失，也能从 Telegram 频道一键完整重建所有目录和文件元数据。
+- **插件扩展**：支持独立 Go 插件系统，方便扩展自定义功能。
+- **超轻量部署**：单二进制 + SQLite，纯 Go 编写无繁重依赖，内存与 CPU 占用极低。
 
-插件以预编译二进制分发，服务器上不编译任何东西。镜像保持 distroless（无 Go 工具链、无 Git、无 shell），**单个容器即可运行全部功能**。清单按 `goos/goarch` 分别声明二进制，因此插件在 Windows 版 tdrive 上同样可用。插件 SDK、manifest、Host API、生命周期和商店提交要求见
-[`docs/plugins.md`](docs/plugins.md)，默认空索引见 [`plugins/index.json`](plugins/index.json)。
+---
 
-## 多 Telegram 账号
+## 常用设置与说明
 
-一个网盘可以挂多个 Telegram 账号，用作主账号的故障备用。在“设置 → Telegram → Telegram 账号”里添加。
-上传和下载任务的并发上限始终按一套全局配置执行：例如设为 1，即使配置了 2 个账号，也最多同时运行 1 个上传和 1 个下载；备用账号只在主账号不可用时接替。
+### WebDAV 挂载
 
-**必须是不同的手机号。** Telegram 的 FLOOD_WAIT 和传输配额是按**账号**计算的，用同一个手机号再申请一组
-api_id / api_hash 只是多开一个登录会话，速度不会有任何变化，反而更容易被风控盯上。
-
-添加一个账号是三步，WebUI 会依次引导：
-
-1. 填入这个号在 my.telegram.org 申请的 api_id / api_hash；如果需要，也可以在这里填该账号专用的 SOCKS5 / HTTP 代理；
-2. 用这个手机号登录（验证码，必要时加两步验证密码）；
-3. 加入存储频道 —— 主账号导出邀请链接、新账号加入、主账号再把它设为管理员，授予**发消息、编辑消息、删除消息**三项权限。
-   编辑和删除是必须的：重命名、移动和删除文件会改写别的账号发出的消息。
-
-第 3 步会**先检测这个账号是不是已经在频道里**（自己在 Telegram 客户端里加进去的也算），已经在就直接记下来，
-不再走邀请流程。
-
-账号配置完成后，设置页会自动检查登录、频道成员身份和发消息权限，并在账号卡片显示当前存储频道名称；也可以点击“检测频道”立即复查。
-网盘当前使用的频道可通过账号列表上方的“切换频道”更换，已有文件仍保留在原频道。
-
-如果主账号不是频道的创建者、或者主账号换过号（导入过别人的会话），它可能无权导出邀请链接或授予管理员权限，
-自动加入就会失败。这时用账号卡片上的**“手动选择频道”**：在 Telegram 客户端里用这个号加入存储频道并设为管理员
-（勾选那三项权限），回来在列表里选中标着“存储频道”的那个即可——这条路完全不依赖主账号。
-
-### 隔离与调度
-
-账号之间不共享任何连接状态：各自的 `session-*.json`、各自的 MTProto 连接池和各自的请求限流器。
-每个账号还可以在账号卡片的“代理”里单独设置 SOCKS5 或 HTTP 代理；代理会从登录、上传到下载全程生效。
-代理地址保存在服务器，账号列表只显示脱敏后的地址。建议为不同账号使用不同的代理出口 IP；代理只是隔离网络出口，
-不代表可以绕过 Telegram 的风控或账号限制。
-
-- **任务队列按一个账号计算。** “同时进行的上传任务”设为 1、配了 2 个账号，实际仍然只跑 1 个上传；下载同理。连接池、线程、请求间隔和单个下载连接数也不会因为备用账号而把任务配置翻倍。
-- **一个传输固定走一个账号。** 浏览器分片上传的所有分卷、多线程下载的所有连接，都在同一个账号上，不会跨账号拆分。
-- **限流自动回落。** 收到 FLOOD_WAIT 的主账号会被标记冷却，冷却期间的新任务转给备用账号；正在进行的请求仍由原账号等待重试。
-- **任意账号可读任意文件。** Telegram 的 access_hash 是按账号发放的，所以别的账号读一个文件前会先用消息 id
-  重新解析一次自己的句柄（每个分卷一次，按账号缓存 30 分钟）。这保证备用账号接管老文件时也能正常读取。
-
-删除一个账号不会删除它上传的文件：其它账号会重新解析句柄后继续读取。最后一个启用的账号不允许删除或停用。
-
-## 多用户与权限
-
-管理员可以在“设置 → 用户管理”里为每个账号配置：
-
-- **权限**（12 项）— 浏览、下载、上传、VPS 本地上传、离线下载、新建文件夹、重命名、移动、删除、WebDAV、服务器暂存、生成直链。
-  不单独配置时跟随角色默认值；管理员始终拥有全部权限。
-- **目录范围** — 把账号限定在某个子目录内，该目录就是它看到的根目录。WebUI 和 WebDAV 同时生效。
-- **存储配额** — 按账号上传的文件累计。归属关系写进 Telegram 消息标签（`#own_`），重建索引后依然准确。
-- **启停与会话** — 停用会立即终止该账号所有已登录会话；也可以单独注销某台设备。
-
-所有账号和设置变更都会记录到操作日志，可在“设置 → 索引与日志”里按动作筛选并导出 CSV。
-
-## 下载
-
-从 WebUI 下载时会先询问方式：
-
-| 方式 | 适用场景 |
-|---|---|
-| 直接下载 | 单卷文件。浏览器多线程直连，服务器边从 Telegram 读边发 |
-| 先暂存到服务器 | **分卷文件的推荐方式**。服务器先把各分卷拼成完整文件写到磁盘，再由客户端从本地磁盘高速多线程取走 |
-| 分卷下载后合并 | 不想占服务器磁盘时。每个分卷单独下载，Chrome / Edge 下自动写入同一个目标文件；其它浏览器逐卷下载并附带合并脚本 |
-
-多线程写盘依赖 File System Access API（Chrome / Edge）。其它浏览器可以改用单线程，或者复制直链交给 aria2、IDM 等工具。
-
-无论开多少条连接，服务器都把同一个文件的下载算作**一个**下载任务，因此并发限制和多线程下载不会互相打架。
-
-## WebDAV
-
-WebDAV 默认挂载在 `/dav`，使用与 Web UI 相同的账号密码（HTTP Basic 认证）。
+WebDAV 挂载路径默认为 `/dav`，用户名和密码与网页端管理员（或子用户）账号一致：
 
 ```bash
-# rclone 示例
+# rclone 配置示例
 rclone config create tdrive webdav \
   url=http://localhost:8080/dav \
   vendor=other \
   user=admin \
   pass="$(rclone obscure your-password)"
 
+# 列出文件
 rclone ls tdrive:
 ```
 
-## 技术栈
+### 多 Telegram 账号配置要点
 
-- **后端** — Go, [gotd/td](https://github.com/gotd/td)（MTProto）, [chi](https://github.com/go-chi/chi), [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)（纯 Go SQLite）, [go-plugin](https://github.com/hashicorp/go-plugin)
-- **前端** — React 19, Vite, Tailwind CSS 4, TypeScript；预览用 mediabunny / pdf.js / shiki / SheetJS 等，全部按需懒加载
-- **容器** — 多阶段 Dockerfile, distroless 基础镜像, GitHub Actions CI/CD
+- **手机号要求**：每个账号必须是**不同的手机号**（同一手机号申请多个 API 凭据仍共用相同的限流额度）。
+- **频道权限**：备用账号加入存储频道后，必须拥有**发消息、编辑消息、删除消息**权限。
+- **独立代理**：每个账号均可在后台单独配置专属的 SOCKS5 或 HTTP 代理。
 
-## 构建
+### 常用环境变量速查
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `TDRIVE_ADMIN_USER` | `admin` | 初始管理员用户名（仅首次启动生效） |
+| `TDRIVE_ADMIN_PASSWORD` | 无 | 初始管理员密码（必填，≥8 位） |
+| `TDRIVE_BASE_URL` | 空 | 外部访问地址（配置反代域名时填写，例如 `https://pan.example.com`） |
+| `TDRIVE_DATA_DIR` | `/data` | 数据存放目录（存放数据库、会话等） |
+| `TDRIVE_LISTEN` | `:8080` | HTTP 监听地址与端口 |
+| `TDRIVE_LOCAL_PATH` | `./vps-files` | 宿主机本地文件目录（挂载后供 VPS 本地秒传） |
+
+> **提示**：连接池、下载并发数、分片大小等更多性能参数，登录后可以在 WebUI 的【设置】里直观调节，即时生效，无需重启服务。
+
+---
+
+## 源码构建
 
 ```bash
-# 安装依赖并构建前端
+# 1. 构建前端
 cd ui && pnpm install && pnpm build && cd ..
 
-# 编译
+# 2. 编译二进制
 go build -trimpath -o tdrive ./cmd/tdrive
 ```
 
-或使用内置脚本，它会在源码有变动时自动重新编译：
+---
 
-```bash
-./start.sh
-```
+## 开源协议
 
-## 许可证
-
-MIT
+本项目采用 [MIT](LICENSE) 许可证开源。
