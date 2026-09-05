@@ -60,4 +60,4 @@ function legacyCopy(text: string): boolean {
 
 /** COPY_FAILED is the one message every caller shows, because the cause is
  *  always the same and the answer is always to select the text by hand. */
-export const COPY_FAILED = '浏览器不允许自动复制，请手动选中文本复制'
+export const COPY_FAILED = '浏览器阻止了剪贴板访问，请手动选中文本复制'

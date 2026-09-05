@@ -133,9 +133,9 @@ function applyRules(entries: Entry[], rules: Rules): { previews: Preview[]; rege
 
     let problem: string | undefined
     if (!next.trim()) problem = '名称不能为空'
-    else if (next.includes('/')) problem = '名称不能包含斜杠'
-    else if (next === '.' || next === '..') problem = '这是保留名称'
-    else if (new TextEncoder().encode(next).length > 255) problem = '名称超过 255 字节'
+    else if (next.includes('/')) problem = '名称不可包含斜杠'
+    else if (next === '.' || next === '..') problem = '保留名称不可使用'
+    else if (new TextEncoder().encode(next).length > 255) problem = '名称超出 255 字节限制'
 
     return { entry, next, changed: next !== entry.name, problem }
   })
@@ -149,7 +149,7 @@ function applyRules(entries: Entry[], rules: Rules): { previews: Preview[]; rege
   }
   for (const preview of previews) {
     if (!preview.problem && (counts.get(preview.next) ?? 0) > 1) {
-      preview.problem = '和另一项重名'
+      preview.problem = '与其它项目重名'
     }
   }
 
@@ -197,7 +197,7 @@ export function BatchRename({
       if (result.failed > 0) {
         const first = result.results.find((r) => !r.ok)
         toast(
-          `重命名了 ${result.renamed} 项，${result.failed} 项失败${first?.error ? `：${first.error}` : ''}`,
+          `已重命名 ${result.renamed} 项，${result.failed} 项失败${first?.error ? `：${first.error}` : ''}`,
           'error',
         )
       } else {
@@ -217,7 +217,7 @@ export function BatchRename({
       open={open}
       onClose={onClose}
       title="批量重命名"
-      description={`按顺序应用规则，预览确认后再提交。共 ${entries.length} 项。`}
+      description={`按规则预览后提交，共 ${entries.length} 项。`}
       width="max-w-4xl"
       footer={
         <>
@@ -249,7 +249,7 @@ export function BatchRename({
             </Field>
             <Field
               label="替换为"
-              hint={rules.useRegex ? '可以用 $1 $2 引用捕获组' : undefined}
+              hint={rules.useRegex ? '可用 $1 $2 引用捕获组' : undefined}
             >
               <Input
                 value={rules.replace}
@@ -279,11 +279,11 @@ export function BatchRename({
               <Field label="前缀">
                 <Input value={rules.prefix} onChange={(e) => patch({ prefix: e.target.value })} />
               </Field>
-              <Field label="后缀" hint="加在扩展名之前">
+              <Field label="后缀" hint="加在扩展名前">
                 <Input value={rules.suffix} onChange={(e) => patch({ suffix: e.target.value })} />
               </Field>
             </div>
-            <Field label="删除这些字符" hint="逐个字符匹配，例如 []()">
+            <Field label="删除字符" hint="逐字匹配，如 []()">
               <Input value={rules.strip} onChange={(e) => patch({ strip: e.target.value })} />
             </Field>
             <div className="grid grid-cols-2 gap-3">
@@ -298,7 +298,7 @@ export function BatchRename({
                   <option value="title">首字母大写</option>
                 </Select>
               </Field>
-              <Field label="替换扩展名" hint="留空则不变">
+              <Field label="修改扩展名" hint="留空保持原样">
                 <Input
                   value={rules.newExtension}
                   onChange={(e) => patch({ newExtension: e.target.value })}
@@ -312,8 +312,8 @@ export function BatchRename({
             <Switch
               checked={rules.numbering}
               onChange={(v) => patch({ numbering: v })}
-              label="按顺序编号"
-              hint="按当前列表顺序编号"
+              label="顺序编号"
+              hint="按列表顺序追加编号"
             />
             {rules.numbering && (
               <div className="grid grid-cols-2 gap-3">
@@ -346,9 +346,9 @@ export function BatchRename({
                     value={rules.numberPosition}
                     onChange={(e) => patch({ numberPosition: e.target.value as NumberPosition })}
                   >
-                    <option value="suffix">放在名称后</option>
-                    <option value="prefix">放在名称前</option>
-                    <option value="replace">替换整个名称</option>
+                    <option value="suffix">置于名称后</option>
+                    <option value="prefix">置于名称前</option>
+                    <option value="replace">替换原名称</option>
                   </Select>
                 </Field>
                 <Field label="分隔符">
@@ -366,9 +366,9 @@ export function BatchRename({
           <div className="mb-2 flex items-baseline justify-between">
             <h3 className="text-xs font-medium uppercase tracking-wide text-[var(--faint)]">预览</h3>
             <span className="text-xs text-[var(--muted)]">
-              将修改 {applicable.length} 项
+              {`变更 ${applicable.length} 项`}
               {problems > 0 && (
-                <span className="ml-2 text-[var(--color-danger)]">{problems} 项有问题</span>
+                <span className="ml-2 text-[var(--color-danger)]">{problems} 项有冲突</span>
               )}
             </span>
           </div>
@@ -433,7 +433,7 @@ export function BatchRename({
           </div>
 
           <p className="mt-2 text-xs text-[var(--muted)]">
-            点击某一行可以把它排除在外。互换名称这类会临时冲突的情况由服务器自动处理。
+            点击单行可排除该项。重命名过程中的临时同名冲突由系统自动解决。
           </p>
         </div>
       </div>

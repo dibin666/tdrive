@@ -94,7 +94,7 @@ export function MovePicker({
       open={open}
       onClose={onClose}
       title={sources.length === 1 ? '移动到' : `移动 ${sources.length} 项到`}
-      description="Telegram 上对应消息的标签会同步更新。"
+      description="Telegram 消息中的对应标签将同步更新。"
       width="max-w-lg"
       footer={
         <>
@@ -135,7 +135,7 @@ export function MovePicker({
             </div>
           ) : dirs.length === 0 ? (
             <p className="flex h-full items-center justify-center text-sm text-[var(--muted)]">
-              这里没有子文件夹
+              无子目录
             </p>
           ) : (
             dirs.map((dir) => (
@@ -153,13 +153,13 @@ export function MovePicker({
           )}
         </div>
 
-        <Field label="或在这里新建一个文件夹" error={error ?? undefined}>
+        <Field label="新建子目录" error={error ?? undefined}>
           <div className="flex gap-2">
             <Input
               value={newFolder}
               onChange={(e) => setNewFolder(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && void createFolder()}
-              placeholder="文件夹名称"
+              placeholder="目录名称"
             />
             <Button onClick={() => void createFolder()} disabled={!newFolder.trim() || busy}>
               新建
@@ -168,7 +168,7 @@ export function MovePicker({
         </Field>
 
         {sameParent && (
-          <p className="text-xs text-[var(--faint)]">这些项目已经在这个目录里了。</p>
+          <p className="text-xs text-[var(--faint)]">所选项已在此目录中。</p>
         )}
       </div>
     </Modal>

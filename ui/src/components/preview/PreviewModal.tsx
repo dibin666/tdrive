@@ -254,7 +254,7 @@ function InfoPanel({ entry }: { entry: Entry }) {
             存储分卷 ({segments.length})
           </h3>
           <p className="mb-2 text-xs leading-relaxed text-[var(--muted)]">
-            Telegram 单个对象上限 2 GB，这个文件被拆成 {segments.length} 条消息。播放和下载都会自动拼接。
+            Telegram 单文件上限 2 GB，该文件已拆分为 {segments.length} 条消息存储。播放与下载时自动拼接。
           </p>
           <div className="space-y-1">
             {segments.map((segment) => (
@@ -299,7 +299,7 @@ function Unsupported({
     <Centered>
       <div className="max-w-sm text-center">
         <EntryIcon name={entry.name} mime={entry.mime} isDir={false} size={32} />
-        <p className="mt-4 text-sm text-[var(--muted)]">这种文件没法在浏览器里预览</p>
+        <p className="mt-4 text-sm text-[var(--muted)]">此文件格式不支持浏览器预览</p>
         <div className="mt-5 flex justify-center gap-2">
           <button
             className="btn btn-primary"

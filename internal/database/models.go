@@ -298,8 +298,13 @@ type DownloadJob struct {
 
 // PluginRecord is the local installation metadata for one plugin. Unlike the
 // drive tree this data is not reconstructed from Telegram; it describes the
-// executable and manifest selected by the administrator on this host.
+// executable and manifest selected by the owning account on this host.
 type PluginRecord struct {
+	// UserID is the account that installed this plugin and the only one that
+	// can see or reach it. It carries no JSON tag because every caller is
+	// already scoped to one account, so serialising it would only invite a
+	// client to believe it could ask about somebody else's.
+	UserID         string    `json:"-"`
 	ID             string    `json:"id"`
 	Name           string    `json:"name"`
 	Version        string    `json:"version"`

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   ArrowUpCircle,
   Blocks,
@@ -8,15 +8,16 @@ import {
   Power,
   RefreshCw,
   Trash2,
-  X,
 } from 'lucide-react'
 import {
   api,
+  uiRoute,
   type PluginInspection,
   type PluginStatus,
   type PluginStoreItem,
   type PluginUpdate,
 } from '../../lib/api'
+import { useApp } from '../../app/context'
 import { Button, Drawer, Field, IconButton, Input, Modal, Spinner, Switch, toast } from '../../components/primitives'
 import { Section, StatusDot } from './shared'
 
@@ -31,14 +32,10 @@ function statusTone(status: string): 'ok' | 'warn' | 'error' | 'idle' | 'busy' {
   return 'busy'
 }
 
-/** uiRoute returns the path a plugin declared as its user interface, with the
- *  wildcard suffix stripped so it can be used as a URL. */
-function uiRoute(plugin: PluginStatus): string | null {
-  const route = plugin.manifest.routes?.find((item) => item.ui)
-  return route ? route.path.replace(/\/\*$/, '') : null
-}
-
-export function PluginsPage() {
+export function PluginsPage({ onNavigate }: { onNavigate: (to: string) => void }) {
+  // The sidebar reads the same list from context, so anything that changes an
+  // installation here has to tell it.
+  const { refreshPlugins } = useApp()
   const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [updates, setUpdates] = useState<Record<string, PluginUpdate>>({})
   const [checking, setChecking] = useState(false)
@@ -53,7 +50,6 @@ export function PluginsPage() {
   const [configText, setConfigText] = useState('{}')
   const [configLoading, setConfigLoading] = useState(false)
   const [configSaving, setConfigSaving] = useState(false)
-  const [embedded, setEmbedded] = useState<PluginStatus | null>(null)
 
   /**
    * checkUpdates asks which installed plugins have a newer release.
@@ -71,11 +67,11 @@ export function PluginsPage() {
       setUpdates(Object.fromEntries(report.plugins.map((item) => [item.id, item])))
       if (refresh) {
         toast(
-          report.available > 0 ? `${report.available} 个插件可以更新` : '所有插件都是最新版本',
+          report.available > 0 ? `${report.available} 个插件可更新` : '所有插件均为最新版本',
           report.available > 0 ? 'info' : 'success',
         )
       }
-      if (report.storeError && refresh) toast(`插件商店读取失败：${report.storeError}`, 'error')
+      if (report.storeError && refresh) toast(`无法连接插件商店：${report.storeError}`, 'error')
     } catch (error) {
       // A failed check leaves the list usable; only an explicit one is worth
       // interrupting for.
@@ -119,7 +115,8 @@ export function PluginsPage() {
       const installed = await api.installPlugin(inspection.inspectionId)
       setPlugins((current) => [installed, ...current.filter((item) => item.id !== installed.id)])
       setInspection(null)
-      toast(inspection.isUpdate ? `已更新到 v${inspection.manifest.version}` : '插件已启用', 'success')
+      void refreshPlugins()
+      toast(inspection.isUpdate ? `已更新至 v${inspection.manifest.version}` : '插件已安装并启用', 'success')
       // The report still offers the version that was just installed.
       void checkUpdates(true)
     } catch (error) {
@@ -133,13 +130,14 @@ export function PluginsPage() {
     try {
       const updated = await api.setPluginEnabled(plugin.id, enabled)
       setPlugins((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+      void refreshPlugins()
     } catch (error) {
       toast(errorMessage(error), 'error')
     }
   }
 
   const uninstall = async (plugin: PluginStatus) => {
-    if (!window.confirm(`卸载 ${plugin.manifest.name}？`)) return
+    if (!window.confirm(`确定卸载插件 ${plugin.manifest.name}？`)) return
     try {
       await api.uninstallPlugin(plugin.id)
       setPlugins((current) => current.filter((item) => item.id !== plugin.id))
@@ -149,7 +147,7 @@ export function PluginsPage() {
         return next
       })
       if (configuring?.id === plugin.id) setConfiguring(null)
-      if (embedded?.id === plugin.id) setEmbedded(null)
+      void refreshPlugins()
     } catch (error) {
       toast(errorMessage(error), 'error')
     }
@@ -160,7 +158,7 @@ export function PluginsPage() {
    *  new bytes whether or not an older version of the plugin is already here. */
   const startUpdate = (update: PluginUpdate) => {
     if (!update.manifestUrl) {
-      toast('这个插件没有可用的清单地址，请手动安装新版本', 'error')
+      toast('该插件缺少清单地址，请手动安装更新', 'error')
       return
     }
     void inspectManifest({ manifestUrl: update.manifestUrl, manifestDigest: update.manifestDigest })
@@ -187,7 +185,7 @@ export function PluginsPage() {
     let settings: Record<string, unknown>
     try {
       const parsed: unknown = JSON.parse(configText)
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('配置必须是 JSON 对象')
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('配置内容必须是 JSON 对象')
       settings = parsed as Record<string, unknown>
     } catch (error) {
       toast(errorMessage(error), 'error')
@@ -197,7 +195,7 @@ export function PluginsPage() {
     try {
       await api.updatePluginSettings(configuring.id, settings)
       setConfiguring(null)
-      toast('已保存', 'success')
+      toast('配置已保存', 'success')
     } catch (error) {
       toast(errorMessage(error), 'error')
     } finally {
@@ -209,7 +207,7 @@ export function PluginsPage() {
     <>
       <Section
         icon={<Blocks size={16} />}
-        title="插件"
+        title="插件管理"
         actions={
           <div className="flex flex-wrap gap-2">
             <Button
@@ -220,7 +218,7 @@ export function PluginsPage() {
               检查更新
             </Button>
             <Button icon={<PackageOpen size={15} />} onClick={() => setStoreOpen(true)}>
-              商店
+              插件商店
             </Button>
             <Button variant="primary" icon={<Plus size={15} />} onClick={() => setInstallOpen(true)}>
               安装插件
@@ -231,14 +229,14 @@ export function PluginsPage() {
         {availableUpdates > 0 && (
           <div className="mb-3 flex items-center gap-2 rounded-[var(--radius-control)] bg-[var(--clay-soft)] px-3 py-2 text-xs text-[var(--color-clay)]">
             <ArrowUpCircle size={14} className="shrink-0" />
-            {availableUpdates} 个插件有新版本，点击下面的「更新」按钮查看并安装。
+            {availableUpdates} 个插件有新版本可用，点击「更新」即可安装。
           </div>
         )}
 
         {loading ? (
           <div className="flex justify-center py-6"><Spinner /></div>
         ) : plugins.length === 0 ? (
-          <div className="py-6 text-center text-sm text-[var(--muted)]">暂无插件</div>
+          <div className="py-6 text-center text-sm text-[var(--muted)]">未安装插件</div>
         ) : (
           <div className="divide-y divide-[var(--line)]">
             {plugins.map((plugin) => (
@@ -247,7 +245,7 @@ export function PluginsPage() {
                 plugin={plugin}
                 update={updates[plugin.id]}
                 onEnabled={(enabled) => void setEnabled(plugin, enabled)}
-                onOpen={() => setEmbedded(plugin)}
+                onOpen={() => onNavigate(`/plugin/${encodeURIComponent(plugin.id)}`)}
                 onConfigure={() => void openConfiguration(plugin)}
                 onUninstall={() => void uninstall(plugin)}
                 onUpdate={() => updates[plugin.id] && startUpdate(updates[plugin.id])}
@@ -259,7 +257,7 @@ export function PluginsPage() {
 
       <div className="flex justify-end">
         <IconButton
-          label="刷新插件"
+          label="刷新列表"
           onClick={() => {
             loadPlugins()
             void checkUpdates(true)
@@ -319,58 +317,7 @@ export function PluginsPage() {
           />
         )}
       </Modal>
-
-      {embedded && <PluginFrame plugin={embedded} onClose={() => setEmbedded(null)} />}
     </>
-  )
-}
-
-/**
- * PluginFrame hosts a plugin's own page inside the WebUI.
- *
- * The alternative — a link that opens /plugins/{id} in a new tab — drops the
- * user out of the app and leaves them without the shell, so a plugin whose
- * whole job is configuration would be configured somewhere that does not look
- * like tdrive. The frame is same-origin, so the plugin page can read the theme
- * and the compiled stylesheet, and its requests carry the session cookie.
- */
-function PluginFrame({ plugin, onClose }: { plugin: PluginStatus; onClose: () => void }) {
-  const frame = useRef<HTMLIFrameElement>(null)
-  const path = uiRoute(plugin) ?? '/'
-  const source = `/plugins/${encodeURIComponent(plugin.id)}${path}`
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  return (
-    <div className="fixed inset-0 z-40 flex flex-col bg-[var(--bg)]" role="dialog" aria-modal="true">
-      <header className="flex shrink-0 items-center gap-3 border-b border-[var(--line)] px-4 py-2.5">
-        <Blocks size={16} className="text-[var(--color-clay)]" />
-        <div className="min-w-0 flex-1">
-          <span className="truncate text-sm font-medium">{plugin.manifest.name}</span>
-          <span className="ml-2 text-xs text-[var(--faint)]">v{plugin.manifest.version}</span>
-        </div>
-        <IconButton
-          label="刷新"
-          onClick={() => {
-            // Reassigning src rather than calling location.reload() keeps this
-            // working regardless of what the plugin navigated to inside.
-            if (frame.current) frame.current.src = source
-          }}
-        >
-          <RefreshCw size={15} />
-        </IconButton>
-        <IconButton label="关闭" onClick={onClose}>
-          <X size={15} />
-        </IconButton>
-      </header>
-      <iframe ref={frame} src={source} title={plugin.manifest.name} className="min-h-0 w-full flex-1 border-0" />
-    </div>
   )
 }
 
@@ -465,13 +412,13 @@ function InstallModal({
         <>
           <Button onClick={onClose}>取消</Button>
           <Button variant="primary" loading={loading} disabled={!manifestUrl.trim()} onClick={onInspect}>
-            检查
+            检查清单
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <Field label="插件清单地址" hint="插件发布的 tdrive.plugin.json，通常是 release 资产">
+        <Field label="清单地址" hint="指向 tdrive.plugin.json 的 Release 资源链接">
           <Input
             value={manifestUrl}
             onChange={(event) => onManifestUrlChange(event.target.value)}
@@ -515,8 +462,8 @@ function InspectionModal({
         <div className="space-y-4 text-sm">
           {inspection.isUpdate && (
             <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs text-[var(--muted)]">
-              当前已安装 v{inspection.currentVersion || '未知版本'}，将替换为 v{manifest.version}。
-              插件会重启，配置和数据目录保留。
+              当前版本 v{inspection.currentVersion || '未知'}，将替换为 v{manifest.version}。
+              插件将自动重启，保留既有配置与数据。
             </p>
           )}
           <div className="grid grid-cols-2 gap-3">
@@ -532,7 +479,7 @@ function InspectionModal({
             </div>
           )}
           <div className="rounded-[var(--radius-control)] bg-[var(--clay-soft)] px-3 py-2 text-xs text-[var(--color-clay)]">
-            {inspection.warning || '全信任插件将使用 tdrive 公开的全部功能。'}
+            {inspection.warning || '插件具备宿主完全访问权限，请确保来源可信。'}
           </div>
         </div>
       )}
@@ -587,24 +534,32 @@ function StoreDrawer({
   return (
     <Drawer open={open} onClose={onClose} title="插件商店" width="sm:max-w-lg">
       <div className="space-y-4">
-        <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索" autoFocus />
+        <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索插件" autoFocus />
         {fetching ? (
           <div className="flex justify-center py-8"><Spinner /></div>
         ) : items.length === 0 ? (
-          <div className="py-8 text-center text-sm text-[var(--muted)]">暂无插件</div>
+          <div className="py-8 text-center text-sm text-[var(--muted)]">未找到匹配插件</div>
         ) : (
           <div className="space-y-2">
             {items.map((item) => (
               <div key={item.id} className="panel flex items-center gap-3 p-3">
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-baseline gap-2">
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                     <span className="truncate text-sm font-medium">{item.name}</span>
                     <span className="text-xs text-[var(--faint)]">v{item.version}</span>
+                    {/* The marker is about this account only: somebody else
+                        having installed a plugin says nothing about whether
+                        this account has it. */}
+                    {item.installed && (
+                      <span className="chip">已安装 v{item.installedVersion}</span>
+                    )}
                   </div>
                   <div className="mt-0.5 truncate text-xs text-[var(--muted)]">{item.author}</div>
                   {item.description && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{item.description}</p>}
                 </div>
-                <Button loading={loading} onClick={() => onInspect(item)}>安装</Button>
+                <Button loading={loading} onClick={() => onInspect(item)}>
+                  {item.installed ? '重新安装' : '安装'}
+                </Button>
               </div>
             ))}
           </div>

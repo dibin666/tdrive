@@ -38,8 +38,8 @@ export function SecurityPage({ webdavPath }: { webdavPath?: string }) {
 
       <Section
         icon={<Monitor size={16} />}
-        title="登录设备"
-        description="这些是当前有效的登录会话。注销后，对应设备需要重新登录。"
+        title="登录会话"
+        description="当前账号的有效会话。注销后对应设备需重新登录。"
       >
         {sessions === null ? (
           <Spinner />
@@ -49,7 +49,7 @@ export function SecurityPage({ webdavPath }: { webdavPath?: string }) {
             onRevoke={async (id) => {
               await api.revokeMySession(id)
               loadSessions()
-              toast('该会话已注销', 'success')
+              toast('会话已注销', 'success')
             }}
           />
         )}
@@ -57,13 +57,13 @@ export function SecurityPage({ webdavPath }: { webdavPath?: string }) {
 
       <Section
         icon={<Link2 size={16} />}
-        title="我发出的下载直链"
-        description="每条链接都是一个独立的访问凭据。撤销后立即失效，正在下载的连接也会中断。"
+        title="公开直链"
+        description="已生成的独立访问链接。撤销后立即失效并中断传输。"
       >
         {shares === null ? (
           <Spinner />
         ) : shares.length === 0 ? (
-          <p className="text-xs text-[var(--muted)]">还没有生成过下载直链。</p>
+          <p className="text-xs text-[var(--muted)]">尚未生成任何下载直链。</p>
         ) : (
           <div className="space-y-1.5">
             {shares.map((share) => (
@@ -83,11 +83,11 @@ export function SecurityPage({ webdavPath }: { webdavPath?: string }) {
                   </p>
                 </div>
                 <IconButton
-                  label="撤销这条链接"
+                  label="撤销直链"
                   onClick={async () => {
                     await api.revokeShare(share.id)
                     loadShares()
-                    toast('链接已撤销', 'success')
+                    toast('直链已撤销', 'success')
                   }}
                 >
                   <Trash2 size={14} />
@@ -101,7 +101,7 @@ export function SecurityPage({ webdavPath }: { webdavPath?: string }) {
       <Section
         icon={<LogOut size={16} />}
         title="退出登录"
-        description="只退出当前浏览器；其它设备不受影响。"
+        description="仅退出当前浏览器会话，其它设备不受影响。"
       >
         <Button icon={<LogOut size={15} />} onClick={() => void signOut()}>
           退出登录
@@ -119,13 +119,13 @@ function PasswordSection() {
   const [error, setError] = useState<string | null>(null)
 
   const submit = async () => {
-    if (next.length < 8) return setError('新密码至少 8 位')
+    if (next.length < 8) return setError('新密码至少 8 位字符')
     if (next !== confirm) return setError('两次输入的新密码不一致')
     setBusy(true)
     setError(null)
     try {
       await api.changeOwnPassword(current, next)
-      toast('密码已修改，其它设备需要重新登录', 'success')
+      toast('密码已修改，所有设备需重新登录', 'success')
       setCurrent('')
       setNext('')
       setConfirm('')
@@ -140,7 +140,7 @@ function PasswordSection() {
     <Section
       icon={<KeyRound size={16} />}
       title="修改密码"
-      description="修改后所有已登录的会话都会失效，WebDAV 也要用新密码。"
+      description="修改密码将使当前所有有效会话失效，WebDAV 亦须同步更新。"
     >
       <div className="space-y-3">
         <Field label="当前密码">
@@ -152,7 +152,7 @@ function PasswordSection() {
           />
         </Field>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="新密码" hint="至少 8 位">
+          <Field label="新密码" hint="至少 8 位字符">
             <Input
               type="password"
               value={next}
@@ -170,7 +170,7 @@ function PasswordSection() {
           </Field>
         </div>
         <Button variant="primary" loading={busy} onClick={() => void submit()}>
-          保存
+          更新密码
         </Button>
       </div>
     </Section>
@@ -183,22 +183,22 @@ function WebDAVSection({ path, username }: { path: string; username: string }) {
     <Section
       icon={<Link2 size={16} />}
       title="WebDAV"
-      description="用同一套账号密码挂载。分卷文件在这里也是单个文件，上传下载同样受并发限制约束。"
+      description="使用网盘账号凭据挂载。分卷文件透明合并，并发限制全局生效。"
     >
       <div className="flex items-center gap-2">
         <Input readOnly value={url} className="font-[family-name:var(--font-mono)] text-xs" />
         <Button
           icon={<Copy size={14} />}
           onClick={() => {
-            void copyText(url).then((ok) => toast(ok ? '地址已复制' : COPY_FAILED, ok ? 'success' : 'error'))
+            void copyText(url).then((ok) => toast(ok ? 'WebDAV 地址已复制' : COPY_FAILED, ok ? 'success' : 'error'))
           }}
         >
           复制
         </Button>
       </div>
       <p className="mt-2.5 text-xs leading-relaxed text-[var(--muted)]">
-        用户名 <span className="font-[family-name:var(--font-mono)]">{username}</span>，密码就是登录密码。
-        rclone、Finder、Windows 资源管理器都可以直接挂。账号需要有 WebDAV 权限。
+        用户名 <span className="font-[family-name:var(--font-mono)]">{username}</span>，密码与登录密码一致。
+        支持 rclone、Finder 及 Windows 资源管理器挂载。账号须具备 WebDAV 权限。
       </p>
     </Section>
   )

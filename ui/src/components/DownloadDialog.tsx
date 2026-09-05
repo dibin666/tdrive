@@ -38,17 +38,17 @@ const MODE_META: Record<
   direct: {
     title: '直接下载',
     icon: Zap,
-    blurb: '生成一条带令牌的直链交给浏览器，由浏览器自己下载，服务器边从 Telegram 读边发。',
+    blurb: '生成带 token 的直链，由浏览器边从 Telegram 读取边下载。',
   },
   staged: {
-    title: '先暂存到服务器',
+    title: '服务器暂存',
     icon: Server,
-    blurb: '服务器先把整个文件拼好放到本地磁盘，然后你从磁盘高速取走。',
+    blurb: '服务器先在本地磁盘拼装完整文件，再高速取回本地。',
   },
   segments: {
     title: '分卷下载后合并',
     icon: Layers,
-    blurb: '每个分卷单独下载，再在本地合并成完整文件，不占服务器磁盘。',
+    blurb: '各分卷独立下载并在本地合并，不占用服务器磁盘。',
   },
 }
 
@@ -133,7 +133,7 @@ export function DownloadDialog({
       // in the meantime — a small file handed straight to the browser — says
       // nothing, because its own result is about to arrive.
       setTimeout(() => {
-        if (!settled) toast(`"${entry.name}" 已开始下载，进度在「传输」里`, 'info')
+        if (!settled) toast(`"${entry.name}" 已开始下载，可在「传输」查看进度`, 'info')
       }, 600)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
@@ -150,7 +150,7 @@ export function DownloadDialog({
       const link = await api.share(entry.id, { segments: withSegments })
       setShare(link)
       const copied = await copyText(link.file.url)
-      toast(copied ? '下载直链已生成并复制到剪贴板' : '下载直链已生成，请手动复制', copied ? 'success' : 'info')
+      toast(copied ? '下载直链已复制到剪贴板' : '下载直链已生成，请手动复制', copied ? 'success' : 'info')
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error')
     } finally {
@@ -240,8 +240,8 @@ export function DownloadDialog({
 
           {mode === 'segments' && !supportsDiskWrites() && (
             <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-              当前浏览器不支持直接写入磁盘（需要 Chrome 或 Edge），分卷会逐个下载并附带合并脚本。
-              想要一步到位，可以改用「先暂存到服务器」，或复制下面的直链交给 aria2 / IDM。
+              当前浏览器不支持直接写入磁盘（需 Chrome 或 Edge），将逐卷下载并附带合并脚本。
+              亦可选择「服务器暂存」，或复制下方直链使用 aria2 / IDM 下载。
             </p>
           )}
 
@@ -251,8 +251,7 @@ export function DownloadDialog({
               <h3 className="text-sm font-medium">可复用直链</h3>
             </div>
             <p className="text-xs leading-relaxed text-[var(--muted)]">
-              生成一条带独立令牌的完整下载地址，可以直接粘贴到 aria2、IDM、迅雷或另一台设备上，
-              支持多线程和断点续传。链接可以随时在「设置 → 安全」里撤销。
+              生成带独立 token 的完整下载链接，支持多线程与断点续传，可直接用于 aria2 或 IDM。可在「设置 → 账号与安全」中随时撤销。
             </p>
 
             {share ? (
@@ -279,7 +278,7 @@ export function DownloadDialog({
           {options.cache.limit > 0 && (
             <p className="text-xs text-[var(--faint)]">
               服务器暂存空间：已用 {formatBytes(options.cache.used)} / {formatBytes(options.cache.limit)}
-              {options.staged && '（这个文件已有暂存副本，可以直接高速下载）'}
+              {options.staged && '（该文件已有暂存副本，可直接高速下载）'}
             </p>
           )}
         </div>

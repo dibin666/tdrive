@@ -98,7 +98,7 @@ export async function probeMedia(url: string): Promise<MediaInfo> {
     input = new Input({ formats: ALL_FORMATS, source: new UrlSource(url) })
 
     const expired = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('识别音频格式超时')), PROBE_TIMEOUT_MS)
+      timer = setTimeout(() => reject(new Error('检测音频格式超时')), PROBE_TIMEOUT_MS)
     })
     return await Promise.race([describeInput(input), expired])
   } catch (err) {

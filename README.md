@@ -1,18 +1,18 @@
 # tdrive
 
-Turn your Telegram account into a high-speed, unlimited-storage personal cloud drive.
+Personal cloud storage backed by Telegram. Pure Go backend with React WebUI, WebDAV, chunked uploads, offline downloads, multi-account failover, and subprocess plugins.
 
 **[中文文档](README.zh-CN.md)**
 
 ---
 
-## Quick Installation
+## Quick Start
 
-Once started, open `http://<your-server-ip>:8080` in your browser.
+Open `http://<your-server-ip>:8080` after startup.
 
-### 1. Minimal Installation (Single command, fast trial)
+### 1. Docker Run (Fastest)
 
-Run directly with Docker:
+Run a container:
 
 ```bash
 docker run -d \
@@ -24,17 +24,13 @@ docker run -d \
   ghcr.io/dibin666/tdrive:latest
 ```
 
-Open `http://localhost:8080` and log in with username `admin` and the password set above.
+Open `http://localhost:8080` and log in with username `admin` and your password.
 
 ---
 
-### 2. Detailed Installation (Docker Compose, recommended for production)
+### 2. Docker Compose (Production)
 
-Docker Compose provides easier volume management, reverse proxy setup, and host directory mounting.
-
-#### Step 1: Prepare files
-
-Create a project directory:
+Create a working directory:
 
 ```bash
 mkdir -p tdrive && cd tdrive
@@ -51,15 +47,11 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      # Persistent data directory (SQLite database, Telegram sessions, etc.)
       - tdrive-data:/data
-      # Optional: mount a host directory for direct VPS-local file imports
-      - ./vps-files:/vps:ro
+      - ${TDRIVE_LOCAL_PATH:-./vps-files}:/vps:ro
     environment:
-      # Bootstrap admin credentials (first run only)
       TDRIVE_ADMIN_USER: ${TDRIVE_ADMIN_USER:-admin}
-      TDRIVE_ADMIN_PASSWORD: ${TDRIVE_ADMIN_PASSWORD}
-      # External origin URL (set when using a reverse proxy, e.g. https://drive.example.com)
+      TDRIVE_ADMIN_PASSWORD: ${TDRIVE_ADMIN_PASSWORD:?set this in .env}
       TDRIVE_BASE_URL: ${TDRIVE_BASE_URL:-}
 
 volumes:
@@ -69,15 +61,14 @@ volumes:
 Create `.env`:
 
 ```bash
-# Admin credentials (required, at least 8 characters)
 TDRIVE_ADMIN_USER=admin
 TDRIVE_ADMIN_PASSWORD=change-this-please
 
-# External domain name (uncomment if behind a reverse proxy or using HTTPS)
+# Set when using a reverse proxy or domain name
 # TDRIVE_BASE_URL=https://drive.example.com
 ```
 
-#### Step 2: Start the service
+Start the container:
 
 ```bash
 docker compose up -d
@@ -91,53 +82,60 @@ docker compose logs -f
 
 ---
 
-### 3. Run from Binary (without Docker)
+### 3. Binary (No Docker)
 
-Download pre-built release binaries for your platform:
+Download pre-built binaries from releases:
 
 ```bash
-# Specify data directory and launch
 TDRIVE_DATA_DIR=./data ./tdrive
 ```
 
-Visit `http://localhost:8080` to follow the initial setup wizard.
+Open `http://localhost:8080` to complete initial setup.
 
 ---
 
-## First-time Setup
+## Initial Setup
 
-After signing in as admin, complete these 3 steps to start using your drive:
+Log in as administrator and complete three steps:
 
-1. **Get Telegram credentials**: Go to [my.telegram.org/apps](https://my.telegram.org/apps), log in with your Telegram account, and get your `api_id` and `api_hash`.
-2. **Link Telegram account**: In the drive WebUI, go to **Settings → Telegram**, enter `api_id` and `api_hash`, then sign in with your phone number and SMS code.
-3. **Choose a storage channel**: Select an existing private channel or create a new one to store your files.
-
-Now you can upload and download files freely.
+1. **Get Telegram API credentials**: Visit [my.telegram.org/apps](https://my.telegram.org/apps), log in, and obtain `api_id` and `api_hash`.
+2. **Link Telegram account**: In the WebUI, go to **Settings → Telegram**, enter `api_id` and `api_hash`, then enter your phone number and login code.
+3. **Set storage channel**: Select an existing private channel or create a new one. tdrive uses this channel to store all files.
 
 ---
 
-## Core Features
+## Features
 
-- **Modern Web File Manager**: Drag-and-drop, multi-select, rubber-band selection, right-click actions, batch rename, and touch gesture support.
-- **Rich Online Preview**: Preview images, audio, video, PDF, Markdown, syntax-highlighted code, Office documents, and zip contents directly.
-- **Automatic File Chunking**: Files exceeding 1.9 GB are automatically split to bypass Telegram's 2 GB limit, and transparently joined upon download.
-- **Fast Download & Direct Links**: Multi-threaded parallel downloading and resume support; generate revocable download links for IDM or Aria2.
-- **WebDAV Support**: Mount as a network drive on Windows, macOS, Linux, Rclone, Infuse, or Alist.
-- **Multi-Account Failover**: Configure multiple Telegram accounts as fallbacks. When the primary account hits Telegram rate limits, tasks automatically failover without interruption.
-- **Multi-User & Granular Permissions**: Multi-user isolation, directory-scoped access, storage quotas, and 12 granular permissions.
-- **Remote Fetch & VPS Local Import**: Download remote URLs directly to Telegram without passing through the browser, or import local files on the VPS instantly.
-- **Zero Data Loss**: The local database is only an index cache; files, folder structures, and metadata can be fully reconstructed from the Telegram channel at any time.
-- **Plugin System**: Extend functionality with isolated Go subprocess plugins.
-- **Ultra-lightweight**: Pure Go, single binary + SQLite, zero heavy external dependencies, minimal CPU/memory footprint.
+- **Web File Manager**: Drag-and-drop upload, box selection, multi-select, right-click context menu, batch rename, and touch gestures.
+- **Online Preview**: Preview images, audio, video, PDF, Markdown, syntax-highlighted code, Office documents, and zip archives.
+- **Chunked Uploads**: Automatically splits files exceeding 1.9 GB into segments to stay within Telegram's 2 GB limit. Reassembles segments transparently during download.
+- **Resumable Downloads & Direct Links**: Multi-threaded downloads with range requests and revocable direct links for external download managers.
+- **WebDAV Support**: Mount via `/dav` on Windows, macOS, Linux, Rclone, Infuse, and Alist.
+- **Multi-Account Failover**: Add multiple Telegram accounts. When the active account hits FloodWait rate limits, tasks switch to standby accounts.
+- **Multi-User & 13 Permissions**: User directory scoping, storage quotas, and 13 granular permissions (`read`, `download`, `upload`, `upload_local`, `remote_fetch`, `mkdir`, `rename`, `move`, `delete`, `webdav`, `stage`, `share`, `plugins`).
+- **Offline Download & Local VPS Import**: Fetch remote URLs directly into Telegram on the server. Import host files from a mounted directory without browser bandwidth.
+- **Channel Index Recovery**: The SQLite database functions as an index cache. If local data is lost, tdrive rebuilds directory trees and file metadata from the Telegram channel.
+- **Subprocess Plugins**: Run standalone Go plugins via RPC over local sockets. Verified with SHA-256 digests; requires no host build toolchain.
+
+---
+
+## Plugin System
+
+tdrive plugins run as independent Go subprocesses via RPC (`go-plugin`).
+
+- **Per-Account Isolation**: Plugins install per user account. Each account owns its plugin list, binaries (`<data>/plugins/<user_id>/<plugin_id>`), private data directory (`<data>/plugin-data/<user_id>/<plugin_id>`), and child processes. Different accounts can run different versions of the same plugin.
+- **Permission Bit**: Installation is gated by the `plugins` permission bit. This permission defaults to administrators only. Granting `plugins` allows code execution under the host process privileges.
+- **Direct UI Entry**: Plugins that declare UI routes appear under the **Plugins** section in the left sidebar. Click any item to open `/plugin/{id}` directly. Plugin store, installation, and status toggles remain under **Settings → Plugins**.
+- **Process Limits**: Bound total subprocesses with `TDRIVE_PLUGIN_MAX_PER_USER` (default `4`) and `TDRIVE_PLUGIN_MAX_PROCESSES` (default `32`). Set to `0` or negative for unlimited.
 
 ---
 
 ## WebDAV Usage
 
-WebDAV is mounted at `/dav` by default. Use your drive username and password:
+WebDAV endpoint defaults to `/dav`. Use your tdrive account credentials:
 
 ```bash
-# rclone example
+# Example rclone configuration
 rclone config create tdrive webdav \
   url=http://localhost:8080/dav \
   vendor=other \
@@ -150,28 +148,48 @@ rclone ls tdrive:
 
 ---
 
-## Environment Variables
+## Multi-Account Requirements
+
+- **Separate Phone Numbers**: Each linked account must use a distinct phone number. Multiple API credentials on one number share Telegram rate limits.
+- **Channel Permissions**: Standby accounts joining the storage channel must have permissions to send, edit, and delete messages.
+- **Per-Account Proxy**: Configure independent SOCKS5 or HTTP proxies for each Telegram account in the WebUI.
+
+---
+
+## Configuration
+
+### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `TDRIVE_ADMIN_USER` | `admin` | Bootstrap admin username (first run only) |
-| `TDRIVE_ADMIN_PASSWORD` | *(empty)* | Bootstrap admin password (required, ≥8 chars) |
-| `TDRIVE_BASE_URL` | *(empty)* | External origin URL (required when behind a reverse proxy) |
-| `TDRIVE_DATA_DIR` | `/data` | Data directory for SQLite database and sessions |
-| `TDRIVE_LISTEN` | `:8080` | HTTP listen address and port |
-| `TDRIVE_LOCAL_PATH` | `./vps-files` | Host directory mounted for VPS-local upload |
+| `TDRIVE_ADMIN_USER` | `admin` | Initial admin username (first run only) |
+| `TDRIVE_ADMIN_PASSWORD` | *(empty)* | Initial admin password (required, ≥8 chars) |
+| `TDRIVE_BASE_URL` | *(empty)* | Public origin URL (e.g. `https://drive.example.com`) |
+| `TDRIVE_DATA_DIR` | `/data` or `./data` | Data directory for SQLite database, sessions, and plugins |
+| `TDRIVE_LISTEN` | `:8080` | HTTP listen address |
+| `TDRIVE_LOCAL_PATH` | `./vps-files` | Host directory to bind-mount for server-local imports |
+| `TDRIVE_CACHE_DIR` | `/data/cache` | Directory for staged downloads and spools |
+| `TDRIVE_CACHE_LIMIT` | `20GiB` | Disk cache ceiling for staging split files |
+| `TDRIVE_MAX_DOWNLOAD_CONNS` | `8` | Maximum connections for staged file transfers |
+| `TDRIVE_PLUGIN_DIR` | `<data>/plugins` | Directory for installed plugin executables |
+| `TDRIVE_PLUGIN_STORE_URL` | GitHub raw index | Remote plugin store index JSON URL (empty to disable store) |
+| `TDRIVE_PLUGIN_MAX_BINARY_BYTES` | `256MiB` | Maximum allowed plugin executable size |
+| `TDRIVE_PLUGIN_MAX_PER_USER` | `4` | Maximum installed plugins per user account (≤0 for unlimited) |
+| `TDRIVE_PLUGIN_MAX_PROCESSES` | `32` | Maximum concurrent plugin subprocesses across all accounts (≤0 for unlimited) |
 
-> **Note**: Runtime performance parameters (connection pool size, upload/download threads, chunk size, cache limits) can be configured directly in **WebUI Settings** without restarting the server.
+> Runtime parameters (concurrency, part size, rate limits, connection pools) can be adjusted in **WebUI Settings** without restarting the service.
 
 ---
 
 ## Build from Source
 
+Requirements: Go 1.24+, Node.js 20+, pnpm.
+
 ```bash
 # 1. Build frontend
 cd ui && pnpm install && pnpm build && cd ..
 
-# 2. Compile binary
+# 2. Build binary
 go build -trimpath -o tdrive ./cmd/tdrive
 ```
 
@@ -179,4 +197,4 @@ go build -trimpath -o tdrive ./cmd/tdrive
 
 ## License
 
-MIT
+[MIT](LICENSE)

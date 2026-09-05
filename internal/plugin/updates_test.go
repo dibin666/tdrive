@@ -13,7 +13,7 @@ import (
 	tdriveplugin "github.com/dibin/tdrive/pkg/plugin"
 )
 
-func newUpdateManager(t *testing.T, latest string) (*Manager, *database.DB, *fakeReleaseFetcher) {
+func newUpdateManager(t *testing.T, latest string) (*Manager, *database.DB, *fakeReleaseFetcher, database.User) {
 	t.Helper()
 	ctx := context.Background()
 	db, err := database.Open(ctx, filepath.Join(t.TempDir(), "plugins.db"))
@@ -33,14 +33,14 @@ func newUpdateManager(t *testing.T, latest string) (*Manager, *database.DB, *fak
 	}
 	manager := New(&config.Config{Plugins: config.Plugins{Dir: t.TempDir()}}, db, nil, nil, nil, nil, zap.NewNop())
 	manager.SetFetcher(fetcher)
-	return manager, db, fetcher
+	return manager, db, fetcher, newTestUser(t, db, "owner")
 }
 
-func installRecord(t *testing.T, db *database.DB, version string) {
+func installRecord(t *testing.T, db *database.DB, owner database.User, version string) {
 	t.Helper()
 	now := time.Now()
 	err := db.UpsertPlugin(context.Background(), database.PluginRecord{
-		ID: "example", Name: "Example", Version: version, Author: "Example",
+		UserID: owner.ID, ID: "example", Name: "Example", Version: version, Author: "Example",
 		Enabled: true, Status: database.PluginStatusActive, Source: "release",
 		ManifestURL: "https://example.com/plugin/tdrive.plugin.json",
 		InstalledAt: now, UpdatedAt: now,
@@ -54,10 +54,10 @@ func installRecord(t *testing.T, db *database.DB, version string) {
 // short of visiting its repository, which is the complaint that motivated it.
 func TestCheckUpdatesReportsANewerRelease(t *testing.T) {
 	ctx := context.Background()
-	manager, db, _ := newUpdateManager(t, "1.2.0")
-	installRecord(t, db, "1.1.0")
+	manager, db, _, owner := newUpdateManager(t, "1.2.0")
+	installRecord(t, db, owner, "1.1.0")
 
-	report, err := manager.CheckUpdates(ctx, true)
+	report, err := manager.CheckUpdates(ctx, owner.ID, true)
 	if err != nil {
 		t.Fatalf("CheckUpdates: %v", err)
 	}
@@ -79,10 +79,10 @@ func TestCheckUpdatesReportsANewerRelease(t *testing.T) {
 // version. That is "up to date", not a problem to report.
 func TestCheckUpdatesReportsNothingWhenTheVersionMatches(t *testing.T) {
 	ctx := context.Background()
-	manager, db, _ := newUpdateManager(t, "1.1.0")
-	installRecord(t, db, "1.1.0")
+	manager, db, _, owner := newUpdateManager(t, "1.1.0")
+	installRecord(t, db, owner, "1.1.0")
 
-	report, err := manager.CheckUpdates(ctx, true)
+	report, err := manager.CheckUpdates(ctx, owner.ID, true)
 	if err != nil {
 		t.Fatalf("CheckUpdates: %v", err)
 	}
@@ -98,19 +98,19 @@ func TestCheckUpdatesReportsNothingWhenTheVersionMatches(t *testing.T) {
 // refresh button must be able to.
 func TestCheckUpdatesCachesUntilForced(t *testing.T) {
 	ctx := context.Background()
-	manager, db, fetcher := newUpdateManager(t, "2.0.0")
-	installRecord(t, db, "1.0.0")
+	manager, db, fetcher, owner := newUpdateManager(t, "2.0.0")
+	installRecord(t, db, owner, "1.0.0")
 
-	if _, err := manager.CheckUpdates(ctx, false); err != nil {
+	if _, err := manager.CheckUpdates(ctx, owner.ID, false); err != nil {
 		t.Fatalf("first CheckUpdates: %v", err)
 	}
-	if _, err := manager.CheckUpdates(ctx, false); err != nil {
+	if _, err := manager.CheckUpdates(ctx, owner.ID, false); err != nil {
 		t.Fatalf("second CheckUpdates: %v", err)
 	}
 	if fetcher.manifestCalls != 1 {
 		t.Fatalf("manifest fetched %d times for two checks, want 1", fetcher.manifestCalls)
 	}
-	if _, err := manager.CheckUpdates(ctx, true); err != nil {
+	if _, err := manager.CheckUpdates(ctx, owner.ID, true); err != nil {
 		t.Fatalf("forced CheckUpdates: %v", err)
 	}
 	if fetcher.manifestCalls != 2 {
@@ -121,9 +121,9 @@ func TestCheckUpdatesCachesUntilForced(t *testing.T) {
 // A deployment with no plugins should answer instantly and without a request.
 func TestCheckUpdatesTouchesNoNetworkWithoutPlugins(t *testing.T) {
 	ctx := context.Background()
-	manager, _, fetcher := newUpdateManager(t, "1.0.0")
+	manager, _, fetcher, owner := newUpdateManager(t, "1.0.0")
 
-	report, err := manager.CheckUpdates(ctx, true)
+	report, err := manager.CheckUpdates(ctx, owner.ID, true)
 	if err != nil {
 		t.Fatalf("CheckUpdates: %v", err)
 	}

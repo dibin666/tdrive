@@ -75,6 +75,10 @@ func (manager *Manager) HTTPMiddleware(next http.Handler) http.Handler {
 			UserID:  pluginRequest.UserID,
 			Payload: payload,
 		}
+		// Before dispatches only to the requesting account's plugins, so an
+		// unauthenticated request reaches none of them and a signed-in one
+		// reaches only its own. A plugin cannot use this hook to watch other
+		// people's API traffic.
 		result, err := manager.Before(request.Context(), operation)
 		if err != nil {
 			http.Error(response, "plugin interceptor failed", http.StatusBadGateway)
@@ -124,7 +128,22 @@ func (manager *Manager) servePublicHTTP(response http.ResponseWriter, request *h
 		http.NotFound(response, request)
 		return
 	}
-	active := manager.getActive(pluginID)
+	// A plugin route belongs to the account that installed it. Resolving
+	// against anyone else's installation would let one account's browser reach
+	// another account's child process, which is the whole point of per-account
+	// ownership.
+	//
+	// The answer is 404 rather than 403: PublicHandler has already run the auth
+	// check, so an empty user id means the manager was built without an auth
+	// service, which only happens in package tests. Keeping "this plugin is not
+	// yours" indistinguishable from "no such plugin" is the same choice the API
+	// makes for out-of-scope paths.
+	userID := tdriveplugin.UserIDFromContext(request.Context())
+	if userID == "" {
+		http.NotFound(response, request)
+		return
+	}
+	active := manager.getActive(pluginKey{userID: userID, pluginID: pluginID})
 	if active == nil || !matchesRoute(active.manifest, routePath, request.Method) {
 		http.NotFound(response, request)
 		return
@@ -142,7 +161,7 @@ func (manager *Manager) servePublicHTTP(response http.ResponseWriter, request *h
 		RawQuery:   request.URL.RawQuery,
 		Headers:    cloneHeaders(request.Header),
 		Body:       body,
-		UserID:     tdriveplugin.UserIDFromContext(request.Context()),
+		UserID:     userID,
 		RemoteAddr: request.RemoteAddr,
 	}
 	callCtx, cancel := context.WithTimeout(request.Context(), pluginCallTimeout)
@@ -202,13 +221,13 @@ func (manager *Manager) reportPluginCallError(
 		// it, but let it keep working.
 		manager.log.Warn("plugin HTTP handler timed out",
 			zap.String("plugin", active.record.ID), zap.Error(err))
-		manager.recordPluginFailure(active.record.ID, err)
+		manager.recordPluginFailure(keyOf(active.record), err)
 		http.Error(response, "plugin handler timed out", http.StatusGatewayTimeout)
 		return
 	}
 
 	manager.log.Warn("plugin HTTP handler failed", zap.String("plugin", active.record.ID), zap.Error(err))
-	manager.handlePluginFailure(active.record.ID, err)
+	manager.handlePluginFailure(keyOf(active.record), err)
 	http.Error(response, "plugin handler failed", http.StatusBadGateway)
 }
 

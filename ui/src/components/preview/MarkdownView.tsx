@@ -50,7 +50,7 @@ export default function MarkdownView({ entry, link }: ViewerProps) {
     return (
       <div className="flex h-full items-center justify-center p-8">
         <p className="max-w-sm text-center text-sm text-[var(--muted)]">
-          预览上限是 {formatBytes(TEXT_PREVIEW_LIMIT)}，这个文件有 {formatBytes(entry.size)}。
+          文档超出预览大小上限（{formatBytes(TEXT_PREVIEW_LIMIT)}，当前 {formatBytes(entry.size)}）。请下载后查看。
         </p>
       </div>
     )

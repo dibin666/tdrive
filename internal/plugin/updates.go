@@ -61,30 +61,32 @@ type UpdateReport struct {
 	StoreError string `json:"storeError,omitempty"`
 }
 
+// updateCache holds one report per account, because plugins are installed per
+// account and a report is a statement about one person's installations.
 type updateCache struct {
-	mu     sync.Mutex
-	report UpdateReport
-	fresh  bool
+	mu      sync.Mutex
+	reports map[string]UpdateReport
 }
 
-// CheckUpdates reports which installed plugins have a newer release.
+// CheckUpdates reports which of one account's installed plugins have a newer
+// release.
 //
 // force skips the cache. Without it, a report younger than updateCheckTTL is
 // returned as it stands.
-func (manager *Manager) CheckUpdates(ctx context.Context, force bool) (UpdateReport, error) {
+func (manager *Manager) CheckUpdates(ctx context.Context, userID string, force bool) (UpdateReport, error) {
 	if !force {
-		if cached, ok := manager.cachedUpdates(); ok {
+		if cached, ok := manager.cachedUpdates(userID); ok {
 			return cached, nil
 		}
 	}
 
-	records, err := manager.db.ListPlugins(ctx)
+	records, err := manager.db.ListPlugins(ctx, userID)
 	if err != nil {
 		return UpdateReport{}, err
 	}
 	report := UpdateReport{Plugins: make([]PluginUpdate, 0, len(records)), CheckedAt: time.Now()}
 	if len(records) == 0 {
-		manager.storeUpdates(report)
+		manager.storeUpdates(userID, report)
 		return report, nil
 	}
 
@@ -136,7 +138,7 @@ func (manager *Manager) CheckUpdates(ctx context.Context, force bool) (UpdateRep
 				}
 			}
 		} else {
-			update.Error = "这个插件没有记录安装来源，无法检查更新"
+			update.Error = "未记录插件安装源，无法检查更新。"
 		}
 
 		if update.LatestVersion != "" {
@@ -148,30 +150,34 @@ func (manager *Manager) CheckUpdates(ctx context.Context, force bool) (UpdateRep
 		report.Plugins = append(report.Plugins, update)
 	}
 
-	manager.storeUpdates(report)
+	manager.storeUpdates(userID, report)
 	return report, nil
 }
 
-func (manager *Manager) cachedUpdates() (UpdateReport, bool) {
+func (manager *Manager) cachedUpdates(userID string) (UpdateReport, bool) {
 	manager.updates.mu.Lock()
 	defer manager.updates.mu.Unlock()
-	if !manager.updates.fresh || time.Since(manager.updates.report.CheckedAt) > updateCheckTTL {
+	report, ok := manager.updates.reports[userID]
+	if !ok || time.Since(report.CheckedAt) > updateCheckTTL {
 		return UpdateReport{}, false
 	}
-	return manager.updates.report, true
+	return report, true
 }
 
-func (manager *Manager) storeUpdates(report UpdateReport) {
+func (manager *Manager) storeUpdates(userID string, report UpdateReport) {
 	manager.updates.mu.Lock()
-	manager.updates.report = report
-	manager.updates.fresh = true
+	if manager.updates.reports == nil {
+		manager.updates.reports = make(map[string]UpdateReport)
+	}
+	manager.updates.reports[userID] = report
 	manager.updates.mu.Unlock()
 }
 
-// invalidateUpdates drops the cached report after anything that changes what it
-// would say: an installation, an uninstallation.
-func (manager *Manager) invalidateUpdates() {
+// invalidateUpdatesFor drops one account's cached report after anything that
+// changes what it would say: an installation, an uninstallation. Only that
+// account's report is affected, because nobody else's installations moved.
+func (manager *Manager) invalidateUpdatesFor(userID string) {
 	manager.updates.mu.Lock()
-	manager.updates.fresh = false
+	delete(manager.updates.reports, userID)
 	manager.updates.mu.Unlock()
 }

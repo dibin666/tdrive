@@ -237,6 +237,15 @@ type Plugins struct {
 	// DefaultPluginBinaryLimit, so a hand-built configuration still gets a
 	// bound rather than refusing every download.
 	MaxBinaryBytes int64
+	// MaxPerUser caps how many plugins one account may install. Plugins are
+	// owned per account, so the process budget is accounts x plugins rather
+	// than plugins. Zero or negative disables the cap.
+	MaxPerUser int
+	// MaxProcesses caps plugin children running at once across every account.
+	// It is the backstop the per-account cap cannot provide: fifty accounts
+	// each inside their own allowance still add up. Zero or negative disables
+	// the cap.
+	MaxProcesses int
 }
 
 // Load reads the environment and returns a validated configuration.
@@ -317,6 +326,8 @@ func Load() (*Config, error) {
 			Dir:            pluginDir,
 			StoreURL:       strings.TrimSuffix(envStrAllowEmpty("TDRIVE_PLUGIN_STORE_URL", "https://raw.githubusercontent.com/dibin666/tdrive/main/plugins/index.json"), "/"),
 			MaxBinaryBytes: envSize("TDRIVE_PLUGIN_MAX_BINARY_BYTES", DefaultPluginBinaryLimit),
+			MaxPerUser:     envInt("TDRIVE_PLUGIN_MAX_PER_USER", 4),
+			MaxProcesses:   envInt("TDRIVE_PLUGIN_MAX_PROCESSES", 32),
 		},
 		LogLevel: envStr("TDRIVE_LOG_LEVEL", "info"),
 	}

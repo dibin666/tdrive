@@ -68,7 +68,7 @@ export default function SheetView({ entry, link }: ViewerProps) {
   if (oversize) {
     return (
       <Message>
-        表格预览上限是 {formatBytes(DOC_PREVIEW_LIMIT)}，这个文件有 {formatBytes(entry.size)}。
+        表格超出预览大小上限（{formatBytes(DOC_PREVIEW_LIMIT)}，当前 {formatBytes(entry.size)}）。请下载后查看。
       </Message>
     )
   }
@@ -130,7 +130,7 @@ export default function SheetView({ entry, link }: ViewerProps) {
 
       {(data.truncatedRows || data.truncatedCols) && (
         <p className="shrink-0 border-t border-[var(--line)] px-3 py-1.5 text-xs text-[var(--faint)]">
-          只显示前 {MAX_ROWS} 行 / {MAX_COLS} 列，完整内容请下载后查看。
+          仅显示前 {MAX_ROWS} 行 / {MAX_COLS} 列，完整内容请下载后查看。
         </p>
       )}
     </div>

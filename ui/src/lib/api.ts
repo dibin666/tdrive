@@ -19,6 +19,7 @@ export type Perm =
   | 'webdav'
   | 'stage'
   | 'share'
+  | 'plugins'
 
 export interface User {
   id: string
@@ -205,6 +206,23 @@ export interface PluginStatus {
   updatedAt: string
 }
 
+/** uiRoute returns the path a plugin declared as its user interface, with the
+ *  wildcard suffix stripped so it can be used as a URL. Both the sidebar and
+ *  the settings page ask this question, and two copies of a manifest-parsing
+ *  rule is one copy too many. */
+export function uiRoute(plugin: PluginStatus): string | null {
+  const route = plugin.manifest.routes?.find((item) => item.ui)
+  return route ? route.path.replace(/\/\*$/, '') : null
+}
+
+/** pluginFrameSrc builds the same-origin URL a plugin's own page is served
+ *  from. The page is a browser navigation rather than an XHR, so it carries the
+ *  session cookie instead of the in-memory access token — which is why this
+ *  sits beside rawUrl rather than going through the fetch wrapper. */
+export function pluginFrameSrc(plugin: PluginStatus) {
+  return `/plugins/${encodeURIComponent(plugin.id)}${uiRoute(plugin) ?? '/'}`
+}
+
 export interface PluginInspection {
   inspectionId: string
   manifest: PluginManifest
@@ -232,6 +250,11 @@ export interface PluginStoreItem {
   documentationUrl?: string
   license: string
   tags?: string[]
+  /** Whether the calling account already has this one. The index itself is a
+   *  public document and identical for everybody; only this marker is
+   *  personal, because somebody else's installation says nothing about mine. */
+  installed?: boolean
+  installedVersion?: string
 }
 
 export interface PluginStoreIndex {
@@ -864,6 +887,8 @@ export const api = {
   rebuildIndex: () => request<IndexStatus>('/index/rebuild', { method: 'POST' }),
   indexStatus: () => request<IndexStatus>('/index/status'),
 
+  /** The caller's own installed plugins. Plugins are owned per account, so
+   *  this is never anybody else's list and needs no id to say so. */
   plugins: () => request<PluginStatus[]>('/plugins/'),
   pluginStore: (q = '') => request<PluginStoreIndex>(`/plugins/store${query({ q })}`),
   pluginUpdates: (refresh = false) =>

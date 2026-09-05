@@ -65,7 +65,7 @@ export default function ArchiveView({ entry, link }: ViewerProps) {
           setError(
             err instanceof Error
               ? `无法读取压缩包目录：${err.message}`
-              : '无法读取压缩包目录',
+              : '无法读取压缩包目录。',
           )
         }
       }
@@ -115,7 +115,7 @@ export default function ArchiveView({ entry, link }: ViewerProps) {
   if (!zipLike) {
     return (
       <Message>
-        目前只能在线浏览 zip 压缩包的目录。RAR / 7z 需要下载后用本地工具打开。
+        仅支持在线预览 ZIP 压缩包目录。RAR / 7z 需下载后在本地打开。
       </Message>
     )
   }
@@ -160,7 +160,7 @@ export default function ArchiveView({ entry, link }: ViewerProps) {
 
       <div className="min-h-0 flex-1 overflow-auto p-2">
         {visible.length === 0 ? (
-          <p className="py-12 text-center text-xs text-[var(--muted)]">这个目录是空的</p>
+          <p className="py-12 text-center text-xs text-[var(--muted)]">目录为空</p>
         ) : (
           visible.map((item) => (
             <button

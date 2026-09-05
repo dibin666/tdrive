@@ -91,8 +91,9 @@ func TestInspectionIsSingleUse(t *testing.T) {
 	fetcher := &fakeReleaseFetcher{manifest: manifest, digest: "manifest-digest"}
 	manager := New(&config.Config{Plugins: config.Plugins{Dir: t.TempDir()}}, db, nil, nil, nil, nil, zap.NewNop())
 	manager.SetFetcher(fetcher)
+	owner := newTestUser(t, db, "owner")
 
-	inspection, err := manager.Inspect(ctx, "https://example.com/plugin/tdrive.plugin.json")
+	inspection, err := manager.Inspect(ctx, owner.ID, "https://example.com/plugin/tdrive.plugin.json")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
@@ -107,15 +108,56 @@ func TestInspectionIsSingleUse(t *testing.T) {
 	if fetcher.downloadCalls != 0 {
 		t.Fatalf("inspection downloaded %d binaries, want 0", fetcher.downloadCalls)
 	}
-	consumed, err := manager.consumeInspection(inspection.ID)
+	consumed, err := manager.consumeInspection(inspection.ID, owner.ID)
 	if err != nil {
 		t.Fatalf("consumeInspection: %v", err)
 	}
 	if consumed.ID != inspection.ID {
 		t.Fatalf("consumed the wrong inspection: %+v", consumed)
 	}
-	if _, err := manager.consumeInspection(inspection.ID); err == nil {
+	if _, err := manager.consumeInspection(inspection.ID, owner.ID); err == nil {
 		t.Fatal("inspection was reusable")
+	}
+}
+
+// A review token records one person having read and approved a manifest. Now
+// that installing is a permission rather than a role, several accounts can hold
+// it at once, and a token that anybody could spend would let one of them
+// complete an installation somebody else confirmed.
+func TestInspectionCannotBeConsumedByAnotherAccount(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, filepath.Join(t.TempDir(), "plugins.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	manifest := tdriveplugin.Manifest{
+		ID: "example", Name: "Example", Version: "1.0.0", SDKVersion: "0.1",
+		APIVersion: tdriveplugin.APIVersion, Author: "Example", License: "MIT",
+		RepositoryURL: "https://example.com/plugin",
+		Artifacts: map[string]tdriveplugin.Artifact{
+			tdriveplugin.HostPlatform(): {
+				URL:    "https://example.com/plugin/example",
+				SHA256: strings.Repeat("a", 64),
+			},
+		},
+	}
+	manager := New(&config.Config{Plugins: config.Plugins{Dir: t.TempDir()}}, db, nil, nil, nil, nil, zap.NewNop())
+	manager.SetFetcher(&fakeReleaseFetcher{manifest: manifest, digest: "manifest-digest"})
+	reviewer := newTestUser(t, db, "reviewer")
+	bystander := newTestUser(t, db, "bystander")
+
+	inspection, err := manager.Inspect(ctx, reviewer.ID, "https://example.com/plugin/tdrive.plugin.json")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if _, err := manager.consumeInspection(inspection.ID, bystander.ID); err == nil {
+		t.Fatal("another account spent a review token it did not create")
+	}
+	// The rejected attempt must not have burned the token either.
+	if _, err := manager.consumeInspection(inspection.ID, reviewer.ID); err != nil {
+		t.Fatalf("the reviewer could no longer use their own token: %v", err)
 	}
 }
 
@@ -152,23 +194,24 @@ func TestInstallRejectsABinaryThatDoesNotMatchTheManifest(t *testing.T) {
 	manager.SetFetcher(testServerFetcher(server))
 	defer manager.Close(ctx)
 
-	inspection, err := manager.Inspect(ctx, base+"/tdrive.plugin.json")
+	owner := newTestUser(t, db, "owner")
+	inspection, err := manager.Inspect(ctx, owner.ID, base+"/tdrive.plugin.json")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
 	if inspection.BinaryDigest != declaredDigest {
 		t.Fatalf("inspection pinned %s, want the manifest digest", inspection.BinaryDigest)
 	}
-	if _, err := manager.Install(ctx, inspection.ID); err == nil {
+	if _, err := manager.Install(ctx, owner.ID, inspection.ID); err == nil {
 		t.Fatal("a binary that did not match the manifest digest was installed")
 	}
-	if _, err := os.Stat(filepath.Join(pluginDir, "example")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(pluginDir, owner.ID, "example")); !os.IsNotExist(err) {
 		t.Fatalf("the rejected install left a binary behind: %v", err)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(pluginDir, ".staging")); len(entries) != 0 {
 		t.Fatalf("the rejected install left %d staging entries behind", len(entries))
 	}
-	if _, err := db.PluginByID(ctx, "example"); !errors.Is(err, database.ErrNotFound) {
+	if _, err := db.PluginByID(ctx, owner.ID, "example"); !errors.Is(err, database.ErrNotFound) {
 		t.Fatalf("the rejected install recorded metadata: %v", err)
 	}
 }

@@ -57,10 +57,10 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
   const channelSummary = hasChannel
     ? status?.channelTitle
       ? `「${status.channelTitle}」`
-      : '已选择存储频道'
+      : '已指定存储频道'
     : signedIn
-      ? '尚未选择频道'
-      : '需要先登录账号'
+      ? '未指定存储频道'
+      : '须先登录账号'
 
   return (
     <div className="space-y-4">
@@ -79,7 +79,7 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
               await api.configureTelegram(settings.appId, settings.appHash)
             }
             await onChanged()
-            toast('已重新连接 Telegram', 'success')
+            toast('已重新建立 Telegram 连接', 'success')
           } catch (err) {
             toast(err instanceof Error ? err.message : String(err), 'error')
           } finally {
@@ -87,7 +87,7 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
           }
         }}
         onLogout={async () => {
-          if (!confirm('退出 Telegram 登录？已上传的文件不会被删除，但在重新登录前无法访问。')) return
+          if (!confirm('确定退出当前 Telegram 账号？已存文件保留，但重新登录前不可访问。')) return
           await api.telegramLogout()
           await onChanged()
         }}
@@ -107,12 +107,12 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
         index={2}
         state={loginState}
         title="账号登录"
-        summary={signedIn ? tg.phone || tg.firstName || '已登录' : hasCredentials ? '等待验证码登录' : '需要先填写凭据'}
+        summary={signedIn ? tg.phone || tg.firstName || '已登录' : hasCredentials ? '等待输入验证码' : '需先配置凭据'}
         disabled={!hasCredentials}
       >
         {signedIn ? (
           <p className="text-xs leading-relaxed text-[var(--muted)]">
-            账号已登录。要更换账号，请先在上方的连接卡片里退出登录。
+            当前账号已登录。如需更换，请在上方卡片中退出登录。
           </p>
         ) : (
           <LoginStep onDone={onChanged} />
@@ -129,8 +129,8 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
         {hasChannel ? (
           <div className="space-y-3">
             <p className="text-xs leading-relaxed text-[var(--muted)]">
-              新上传的文件会进入当前频道
-              {status?.channelTitle ? `「${status.channelTitle}」` : ''}。更换频道后，已有文件仍留在原频道并可以正常读取。
+              新上传文件将写入当前频道
+              {status?.channelTitle ? `「${status.channelTitle}」` : ''}。更换频道后已有文件依然保留在原频道且可正常读取。
             </p>
             <Button icon={<Radio size={14} />} onClick={() => setShowChannel(true)}>
               更换存储频道
@@ -149,7 +149,7 @@ export function TelegramPage({ onChanged }: { onChanged: () => Promise<void> }) 
         open={showChannel}
         onClose={() => setShowChannel(false)}
         title="更换存储频道"
-        description="已有文件仍然留在原频道，可以正常读取；新上传会进入新频道。"
+        description="已有文件保留在原频道并支持继续读取；后续上传将写入新频道。"
         width="max-w-lg"
       >
         <ChannelStep
@@ -185,11 +185,11 @@ function ConnectionCard({
   onLogout: () => void | Promise<void>
 }) {
   const meta: Record<string, { tone: 'ok' | 'warn' | 'error' | 'idle' | 'busy'; label: string; hint: string }> = {
-    ready: { tone: 'ok', label: '已连接', hint: '文件可以正常上传和读取' },
-    connecting: { tone: 'busy', label: '连接中', hint: '正在建立 MTProto 连接' },
-    unauthorized: { tone: 'warn', label: '未登录', hint: '凭据已保存，还需要登录 Telegram 账号' },
-    unconfigured: { tone: 'idle', label: '未配置', hint: '还没有填写 api_id 和 api_hash' },
-    error: { tone: 'error', label: '连接失败', hint: error || '请检查凭据和网络' },
+    ready: { tone: 'ok', label: '已连接', hint: '存储服务正常，支持文件读写' },
+    connecting: { tone: 'busy', label: '连接中', hint: '正在建立 MTProto 会话' },
+    unauthorized: { tone: 'warn', label: '未登录', hint: 'API 凭据已就绪，请登录 Telegram 账号' },
+    unconfigured: { tone: 'idle', label: '未配置', hint: '尚未配置 api_id 与 api_hash' },
+    error: { tone: 'error', label: '连接失败', hint: error || '请检查网络或 API 凭据' },
   }
   const current = meta[state] ?? meta.error
 
@@ -326,7 +326,7 @@ function CredentialsForm({
     if (id && hash) {
       setAppId(id[1])
       setAppHash(hash[1])
-      toast('已从粘贴内容里识别出 api_id 和 api_hash', 'success')
+      toast('已从剪贴板内容自动解析 api_id 与 api_hash', 'success')
       return true
     }
     return false
@@ -335,11 +335,11 @@ function CredentialsForm({
   const save = async () => {
     const id = Number(appId.trim())
     if (!Number.isInteger(id) || id <= 0) {
-      setError('api_id 必须是一串数字')
+      setError('api_id 必须为正整数')
       return
     }
     if (!/^[a-f0-9]{32}$/i.test(appHash.trim())) {
-      setError('api_hash 应该是 32 位十六进制字符')
+      setError('api_hash 必须为 32 位十六进制字符')
       return
     }
 
@@ -348,7 +348,7 @@ function CredentialsForm({
     try {
       await api.updateSettings({ appId: id, appHash: appHash.trim() })
       await onSaved()
-      toast('凭据已保存，正在连接 Telegram', 'success')
+      toast('凭据已保存，正在建立连接', 'success')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -361,7 +361,7 @@ function CredentialsForm({
   return (
     <div className="space-y-4">
       <div className="rounded-[var(--radius-card)] bg-[var(--sunk)] p-3 text-xs leading-relaxed text-[var(--muted)]">
-        <p className="mb-1.5 font-medium text-[var(--ink)]">从哪里拿到这两个值</p>
+        <p className="mb-1.5 font-medium text-[var(--ink)]">获取 API 凭据</p>
         <ol className="list-decimal space-y-0.5 pl-4">
           <li>
             打开{' '}
@@ -374,15 +374,15 @@ function CredentialsForm({
               my.telegram.org/apps
               <ExternalLink size={10} />
             </a>{' '}
-            并用你的手机号登录
+            并使用手机号登录
           </li>
-          <li>填写任意 App title 和 Short name，平台选 Desktop，提交</li>
-          <li>页面上会出现 App api_id 和 App api_hash，把它们填到下面</li>
+          <li>填写应用信息（平台选择 Desktop）并提交</li>
+          <li>将生成的 api_id 与 api_hash 填入下方输入框</li>
         </ol>
-        <p className="mt-1.5">凭据只保存在这台服务器上，不会发送到别处。</p>
+        <p className="mt-1.5">凭据仅保存在本地服务器，不向外部泄露。</p>
       </div>
 
-      <Field label="api_id" hint="也可以把整段内容粘贴到任一输入框，会自动拆分">
+      <Field label="api_id" hint="亦可直接粘贴完整网页内容，系统将自动识别">
         <Input
           value={appId}
           inputMode="numeric"
@@ -418,7 +418,7 @@ function CredentialsForm({
       </Field>
 
       <Button variant="primary" icon={<Send size={14} />} loading={busy} onClick={() => void save()}>
-        保存并连接
+        保存并建立连接
       </Button>
     </div>
   )
@@ -443,7 +443,7 @@ function AdvancedSection({ ready, onChanged }: { ready: boolean; onChanged: () =
       link.click()
       link.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 0)
-      toast('Telegram 账号已导出，请妥善保管文件', 'success')
+      toast('Telegram 凭据已导出，请妥善保管配置文件', 'success')
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error')
     } finally {
@@ -456,14 +456,14 @@ function AdvancedSection({ ready, onChanged }: { ready: boolean; onChanged: () =
     const file = input.files?.[0]
     input.value = ''
     if (!file) return
-    if (!confirm('导入会替换当前 Telegram 登录账号，确定继续吗？')) return
+    if (!confirm('导入新配置将覆盖当前 Telegram 登录状态，确定继续？')) return
 
     setBusy(true)
     try {
       const account = JSON.parse(await file.text()) as TelegramAccountExport
       await api.importTelegramAccount(account)
       await onChanged()
-      toast('Telegram 账号已导入', 'success')
+      toast('Telegram 账号配置已导入', 'success')
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error')
     } finally {
@@ -475,7 +475,7 @@ function AdvancedSection({ ready, onChanged }: { ready: boolean; onChanged: () =
     <Section
       icon={<KeyRound size={16} />}
       title="账号迁移"
-      description="导出登录会话和 api 凭据，换服务器时直接导入，无需重新验证手机号。"
+      description="导出登录会话与 API 凭据，换机部署时直接导入，无需重新验证手机号。"
       actions={
         <button
           onClick={() => setOpen((v) => !v)}
@@ -489,7 +489,7 @@ function AdvancedSection({ ready, onChanged }: { ready: boolean; onChanged: () =
       {open && (
         <div className="space-y-3">
           <p className="rounded-[var(--radius-control)] bg-[var(--danger-soft)] px-3 py-2 text-xs leading-relaxed text-[var(--color-danger)]">
-            导出的文件等同于这个 Telegram 账号的登录凭据，拿到它就能读取你的全部文件。请勿发送给他人。
+            导出文件包含 Telegram 登录凭据，持有者可读取存储数据。请勿泄露。
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
@@ -511,7 +511,7 @@ function AdvancedSection({ ready, onChanged }: { ready: boolean; onChanged: () =
               onChange={(event) => void importAccount(event)}
             />
           </div>
-          <Line label="当前状态" value={ready ? '已登录，可以导出' : '未登录，只能导入'} />
+          <Line label="当前状态" value={ready ? '已就绪，支持导出' : '未登录，仅支持导入'} />
         </div>
       )}
     </Section>

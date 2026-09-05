@@ -307,10 +307,10 @@ export function Transfers() {
     if (removable.length === 0) {
       // Deleting a row out from under a running transfer would orphan it, so
       // say what to do instead of doing nothing.
-      toast('选中的传输还在进行中，请先取消再删除', 'info')
+      toast('选中的传输任务仍在进行，请先取消再删除', 'info')
       return
     }
-    if (!confirm(`删除 ${removable.length} 条传输记录？暂存在服务器上的文件也会一并删除。`)) return
+    if (!confirm(`确定删除 ${removable.length} 条传输记录？服务器上的暂存文件将一并清除。`)) return
     try {
       await api.deleteTransfers({ ids: removable.map((r) => r.id) })
       toast(`已删除 ${removable.length} 条记录`, 'success')
@@ -326,8 +326,8 @@ export function Transfers() {
   const clearFinished = async (scope: 'filtered' | 'all') => {
     const message =
       scope === 'all'
-        ? '清空全部已结束的传输记录？暂存在服务器上的文件也会一并删除。'
-        : `清空当前筛选下的 ${finished.length} 条已结束记录？`
+        ? '确定清空所有已结束的传输记录？服务器上的暂存文件将一并清除。'
+        : `确定清空当前筛选出的 ${finished.length} 条已结束记录？`
     if (!confirm(message)) return
     try {
       const result = await api.deleteTransfers(
@@ -511,7 +511,7 @@ export function Transfers() {
                     onClick={() => void deleteSelected()}
                   >
                     <Trash2 size={13} />
-                    删除所选记录
+                    删除所选
                   </button>
                   <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => setSelected(new Set())}>
                     取消选择
@@ -524,13 +524,13 @@ export function Transfers() {
                     className="btn btn-ghost !px-2 !py-1 text-xs"
                     onClick={() => void clearFinished('filtered')}
                   >
-                    清除当前筛选结果
+                    清除当前筛选
                   </button>
                   <button
                     className="btn btn-ghost !px-2 !py-1 text-xs text-[var(--color-danger)]"
                     onClick={() => void clearFinished('all')}
                   >
-                    清空全部历史
+                    清空全部记录
                   </button>
                 </>
               )}
@@ -548,11 +548,11 @@ export function Transfers() {
           ) : visible.length === 0 ? (
             <EmptyState
               icon={<Inbox size={30} />}
-              title={filtersActive ? '没有符合条件的传输' : '还没有任何传输'}
+              title={filtersActive ? '无符合条件的传输任务' : '暂无传输记录'}
               description={
                 filtersActive
-                  ? '换个筛选条件试试，或者清除筛选看全部记录。'
-                  : '上传、下载和离线下载的进度都会出现在这里。'
+                  ? '尝试调整或清除筛选条件以查看全部记录。'
+                  : '文件上传、下载与离线下载进度均在此展示。'
               }
               action={
                 filtersActive ? (

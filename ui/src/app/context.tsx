@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { api, setAccessToken, type Status, type User } from '../lib/api'
+import { api, setAccessToken, type PluginStatus, type Status, type User } from '../lib/api'
 import { events } from '../lib/events'
 
 type Theme = 'light' | 'dark'
@@ -18,6 +18,11 @@ interface AppState {
   status: Status | null
   user: User | null
   theme: Theme
+  /** The signed-in account's own plugins. They live here rather than in the
+   *  sidebar because the sidebar, the plugin list and a plugin's own page all
+   *  need the same array, and all three already read this context. */
+  plugins: PluginStatus[]
+  refreshPlugins: () => Promise<void>
   toggleTheme: () => void
   refreshStatus: () => Promise<void>
   signIn: (username: string, password: string) => Promise<void>
@@ -37,6 +42,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [status, setStatus] = useState<Status | null>(null)
   const [user, setUser] = useState<User | null>(null)
+  const [plugins, setPlugins] = useState<PluginStatus[]>([])
   const [theme, setTheme] = useState<Theme>(() =>
     document.documentElement.classList.contains('dark') ? 'dark' : 'light',
   )
@@ -46,6 +52,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setStatus(await api.status())
     } catch {
       /* the status endpoint is open, so a failure means the server is down */
+    }
+  }, [])
+
+  // A failed fetch is swallowed on purpose: an empty plugin group is the right
+  // degraded state, and it must never be a reason the shell fails to render.
+  const refreshPlugins = useCallback(async () => {
+    try {
+      setPlugins(await api.plugins())
+    } catch {
+      setPlugins([])
     }
   }, [])
 
@@ -59,6 +75,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         try {
           const me = await api.me()
           if (!cancelled) setUser(me)
+          if (!cancelled) await refreshPlugins()
         } catch {
           setAccessToken(null)
         }
@@ -68,7 +85,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true
     }
-  }, [refreshStatus])
+  }, [refreshStatus, refreshPlugins])
 
   // Telegram state changes arrive over the event stream, so the setup wizard
   // advances on its own instead of asking the user to refresh.
@@ -111,8 +128,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setAccessToken(res.tokens.accessToken)
       setUser(res.user)
       await refreshStatus()
+      await refreshPlugins()
     },
-    [refreshStatus],
+    [refreshStatus, refreshPlugins],
   )
 
   const completeSetup = useCallback(
@@ -131,14 +149,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
     } finally {
       setAccessToken(null)
       setUser(null)
+      setPlugins([])
       events.stop()
       await refreshStatus()
     }
   }, [refreshStatus])
 
   const value = useMemo<AppState>(
-    () => ({ ready, status, user, theme, toggleTheme, refreshStatus, signIn, completeSetup, signOut }),
-    [ready, status, user, theme, toggleTheme, refreshStatus, signIn, completeSetup, signOut],
+    () => ({
+      ready, status, user, plugins, refreshPlugins, theme, toggleTheme,
+      refreshStatus, signIn, completeSetup, signOut,
+    }),
+    [
+      ready, status, user, plugins, refreshPlugins, theme, toggleTheme,
+      refreshStatus, signIn, completeSetup, signOut,
+    ],
   )
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

@@ -446,27 +446,24 @@ func (s *Server) failAccount(w http.ResponseWriter, err error, action string) {
 	switch {
 	case errors.Is(err, tgc.ErrLastAccount):
 		writeError(w, http.StatusConflict,
-			"这是最后一个启用的 Telegram 账号，删除或停用它会让整个网盘无法访问")
+			"这是最后一个启用的 Telegram 账号。删除或停用会导致网盘无法访问。")
 	case errors.Is(err, tgc.ErrCannotPromote):
 		writeError(w, http.StatusConflict,
-			"主账号无权在这个频道里授予管理员权限（通常是因为它不是频道创建者）。"+
-				"请在 Telegram 客户端里手动把这个账号设为管理员，并勾选发消息、编辑消息和删除消息。")
+			"主账号在此频道中无权授予管理员权限。请在 Telegram 客户端中将该账号设为管理员，并开启发消息、编辑消息和删除消息权限。")
 	case errors.Is(err, tgc.ErrNotReady):
-		writeError(w, http.StatusConflict, "请先让这个账号登录 Telegram，再把它加入存储频道")
+		writeError(w, http.StatusConflict, "该账号未登录 Telegram，请先登录再加入存储频道。")
 	case errors.Is(err, tgc.ErrPrimaryNotInChannel):
 		writeError(w, http.StatusConflict,
-			"主账号看不到存储频道，所以没法自动邀请别的账号进去（通常是主账号换过号、或者被移出了频道）。"+
-				"请用这个账号在 Telegram 客户端里加入该频道，然后用「手动选择频道」把它对上。")
+			"主账号不在存储频道中，无法发送邀请。请在 Telegram 客户端中将该账号加入频道，再使用「手动选择频道」绑定。")
 	case errors.Is(err, tgc.ErrNotInChannel):
 		writeError(w, http.StatusConflict,
-			"这个账号还不在存储频道里。请先在 Telegram 客户端里用它加入频道，再回来点一次——加入之后这里会自动认出来。")
+			"该账号未加入存储频道。请在 Telegram 客户端中加入频道后重试。")
 	case errors.Is(err, tgc.ErrNoPostRights):
 		writeError(w, http.StatusConflict,
-			"这个账号在频道里，但没有发消息权限。请在 Telegram 客户端里把它设为管理员，"+
-				"并勾选发消息、编辑消息和删除消息。")
+			"该账号缺少发消息权限。请在 Telegram 客户端中将其设为管理员，并开启发消息、编辑消息和删除消息权限。")
 	case errors.Is(err, tgc.ErrWrongChannel):
 		writeError(w, http.StatusBadRequest,
-			"选中的频道不是这个网盘正在使用的存储频道，请选列表里标着「存储频道」的那个。")
+			"选中的频道不是当前存储频道，请选择带有「存储频道」标记的一项。")
 	default:
 		s.fail(w, err, action)
 	}

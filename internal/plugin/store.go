@@ -122,12 +122,16 @@ type StoreStatus struct {
 	InstalledVersion string `json:"installedVersion,omitempty"`
 }
 
-func (manager *Manager) StoreWithStatus(ctx context.Context, query string) ([]StoreStatus, error) {
+// StoreWithStatus marks the store index against one account's installations.
+// The index itself is a public document and stays deployment-wide; only the
+// "installed" marker is personal, because somebody else having installed a
+// plugin says nothing about whether this account has it.
+func (manager *Manager) StoreWithStatus(ctx context.Context, userID, query string) ([]StoreStatus, error) {
 	index, err := manager.Store(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	installed, err := manager.db.ListPlugins(ctx)
+	installed, err := manager.db.ListPlugins(ctx, userID)
 	if err != nil {
 		return nil, err
 	}

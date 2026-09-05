@@ -68,7 +68,7 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
   }
 
   const purge = async () => {
-    if (!confirm('清空全部暂存文件？正在进行的暂存下载会被中断。')) return
+    if (!confirm('确定清空全部暂存文件？正在进行的暂存任务将被中断。')) return
     try {
       const result = await api.purgeCache()
       toast(`已释放 ${formatBytes(result.freed)}`, 'success')
@@ -92,13 +92,13 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
         <Section icon={<HardDrive size={16} />} title="存储概览">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Stat label="文件" value={String(stats.files)} />
-            <Stat label="文件夹" value={String(stats.dirs)} />
+            <Stat label="目录" value={String(stats.dirs)} />
             <Stat label="分卷" value={String(stats.segments)} />
             <Stat label="总大小" value={formatBytes(stats.totalBytes)} />
           </div>
           {stats.brokenFiles > 0 && (
             <p className="mt-3 text-xs text-[var(--color-danger)]">
-              有 {stats.brokenFiles} 个文件缺少分卷，无法完整下载。可以在「索引与维护」里重建索引。
+              {stats.brokenFiles} 个文件存在缺卷，无法完整下载。可在「维护与日志」中重建索引。
             </p>
           )}
         </Section>
@@ -106,12 +106,12 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
 
       <Section
         icon={<FolderOpen size={16} />}
-        title="VPS 本地上传目录"
-        description="服务器上一个可读目录。配置后，有对应权限的账号可以在上传对话框里直接选服务器上的文件，不经过浏览器。"
+        title="VPS 本地上传"
+        description="指定服务器本地只读挂载目录。具备权限的账号可直接添加其中的文件，无需经由浏览器上传。"
       >
         <Field
           label="目录路径"
-          hint="留空表示禁用。Docker Compose 默认把宿主机目录挂载到容器内的 /vps"
+          hint="留空表示停用。Docker Compose 默认挂载至容器内 /vps"
         >
           <Input
             value={localRoot}
@@ -125,7 +125,7 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
       <Section
         icon={<Database size={16} />}
         title="下载暂存"
-        description="分卷文件多线程直连下载容易在卷边界失败。开启暂存后，服务器先把整个文件拼好写到磁盘，再由客户端高速取走。"
+        description="多线程下载大分卷文件时，由服务器先在磁盘组装完整文件，再高速取回，提升稳定性。"
         actions={
           cache && cache.used > 0 ? (
             <Button icon={<Trash2 size={14} />} onClick={() => void purge()}>
@@ -143,12 +143,12 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
               caption={
                 cache.limit > 0
                   ? `${formatBytes(cache.used)} / ${formatBytes(cache.limit)}`
-                  : '已禁用'
+                  : '已停用'
               }
             />
           )}
 
-          <Field label="暂存目录" hint="留空表示使用数据目录下的 cache 子目录">
+          <Field label="暂存目录" hint="留空使用数据目录下的 cache 子目录">
             <Input
               value={cacheDir}
               placeholder={cache?.dir ?? '/data/cache'}
@@ -157,7 +157,7 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
             />
           </Field>
 
-          <Field label="磁盘上限">
+          <Field label="暂存容量上限">
             <Slider
               value={cacheLimitGiB}
               min={0}
@@ -167,8 +167,8 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
               onChange={setCacheLimitGiB}
               format={(value) =>
                 value === 0
-                  ? '设为 0 表示完全关闭暂存功能，分卷文件只能直连或分卷下载。'
-                  : `超过 ${value} GiB 后按最近使用时间自动淘汰旧的暂存文件。`
+                  ? '设为 0 完全关闭暂存，分卷文件仅支持直连或逐卷下载。'
+                  : `超出 ${value} GiB 后按最少使用原则自动清理旧暂存。`
               }
             />
           </Field>
@@ -181,7 +181,7 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
               step={1}
               suffix="小时"
               onChange={setCacheTtlHours}
-              format={(value) => `暂存完成后 ${value} 小时内可以重复下载，之后自动清理。`}
+              format={(value) => `暂存完成后 ${value} 小时内可高速下载，超时自动删除。`}
             />
           </Field>
         </div>
@@ -189,8 +189,8 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
 
       <Section
         icon={<Database size={16} />}
-        title="分享直链"
-        description="生成的下载直链带独立令牌，可以粘贴到 aria2、IDM 等工具，支持多线程和断点续传。"
+        title="公开直链"
+        description="生成的下载链接携带独立 token，支持 aria2、IDM 等工具多线程与断点续传。"
       >
         <Field label="默认有效期">
           <Slider
@@ -202,8 +202,8 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
             onChange={setShareTtlHours}
             format={(value) =>
               value === 0
-                ? '设为 0 表示新生成的链接默认永不过期，需要时手动撤销。'
-                : `新链接默认 ${value} 小时后失效（约 ${(value / 24).toFixed(1)} 天）。`
+                ? '设为 0 表示直链默认永久有效，需手动撤销。'
+                : `新直链将于 ${value} 小时后过期（约 ${(value / 24).toFixed(1)} 天）。`
             }
           />
         </Field>
@@ -213,14 +213,14 @@ export function StoragePage({ onChanged }: { onChanged: () => Promise<void> }) {
         <Switch
           checked={webdavEnabled}
           onChange={setWebdavEnabled}
-          label="启用 WebDAV 挂载"
-          hint="关闭后 /dav 会返回 404，已挂载的客户端会断开"
+          label="开启 WebDAV 服务"
+          hint="关闭后 /dav 端点返回 404，已挂载客户端将断开连接"
         />
       </Section>
 
       {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
       <Button variant="primary" loading={busy} onClick={() => void save()}>
-        保存存储设置
+        保存存储配置
       </Button>
     </div>
   )

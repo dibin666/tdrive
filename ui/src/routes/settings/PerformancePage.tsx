@@ -41,7 +41,7 @@ const PRESETS: Preset[] = [
     id: 'safe',
     label: '保守',
     icon: Feather,
-    blurb: '弱网、家宽或经常被限流时用。请求更稀疏，出错更少。',
+    blurb: '适用于家庭宽带或易受限流网络，请求更平缓。',
     values: {
       uploadPartSize: 256 * KIB,
       segmentSize: 1024 * MIB,
@@ -58,7 +58,7 @@ const PRESETS: Preset[] = [
     id: 'balanced',
     label: '均衡',
     icon: Scale,
-    blurb: '默认配置。绝大多数 VPS 直接用这一档就好。',
+    blurb: '标准配置，适用于绝大多数服务器环境。',
     values: {
       uploadPartSize: 512 * KIB,
       segmentSize: 1900 * MIB,
@@ -75,7 +75,7 @@ const PRESETS: Preset[] = [
     id: 'fast',
     label: '极速',
     icon: Rocket,
-    blurb: '带宽充足的独立服务器。吞吐最高，也最容易撞上 Telegram 限流。',
+    blurb: '适用于高带宽服务器，吞吐最高，但更易触发限流。',
     values: {
       uploadPartSize: 512 * KIB,
       segmentSize: 1900 * MIB,
@@ -180,7 +180,7 @@ export function PerformancePage() {
       <Section
         icon={<Gauge size={16} />}
         title="性能预设"
-        description="先按网络条件挑一档，需要再逐项微调。所有改动保存后立即生效，不需要重启。"
+        description="可直接选择预设或展开微调。修改保存后立即生效，无需重启。"
       >
         <div className="grid gap-2 sm:grid-cols-3">
           {PRESETS.map((preset) => {
@@ -215,7 +215,7 @@ export function PerformancePage() {
 
         {activePreset === null && (
           <p className="mt-3 text-xs text-[var(--muted)]">
-            当前是自定义配置，不完全匹配任何预设。
+            当前为自定义参数，与内置预设不完全一致。
           </p>
         )}
 
@@ -232,13 +232,13 @@ export function PerformancePage() {
         <>
           <Section
             icon={<SlidersHorizontal size={16} />}
-            title="分片"
-            description="决定一个文件怎么被切开存进 Telegram。只影响之后新上传的文件。"
+            title="分片设置"
+            description="决定文件的切分与存储粒度，仅对新上传文件生效。"
           >
             <div className="space-y-5">
               <Field
                 label="Telegram 上传分片"
-                hint="Telegram 只接受能整除 512 KiB 的大小，所以这里是一个固定的选项列表"
+                hint="Telegram 要求分片大小可被 512 KiB 整除"
               >
                 <Select
                   value={draft.uploadPartSize}
@@ -276,8 +276,8 @@ export function PerformancePage() {
 
           <Section
             icon={<SlidersHorizontal size={16} />}
-            title="连接与并发"
-            description="连接池和线程决定单个传输能跑多快；任务数决定同时能有几个传输。"
+            title="连接与吞吐"
+            description="调整单个传输任务所占用的线程与连接资源。"
           >
             <div className="space-y-5">
               <Field label="请求间隔">
@@ -316,7 +316,7 @@ export function PerformancePage() {
                   max={32}
                   onChange={(value) => patch({ poolSize: value })}
                   format={() =>
-                    `每个正在使用的 Telegram 账号使用 ${draft.poolSize} 条 MTProto 连接；备用账号不会增加任务并发额度。`
+                    `当前活跃账号建立 ${draft.poolSize} 条 MTProto 连接。备用账号不额外增加任务并发数。`
                   }
                 />
               </Field>
@@ -328,7 +328,7 @@ export function PerformancePage() {
                   max={32}
                   onChange={(value) => patch({ uploadThreads: value })}
                   format={() =>
-                    `一个分卷内同时发出 ${draft.uploadThreads} 个分片请求；预计峰值并发约 ${peakConnections} 个请求。`
+                    `单卷并发请求 ${draft.uploadThreads} 个分片；预估峰值并发约为 ${peakConnections} 个请求。`
                   }
                 />
               </Field>
@@ -339,7 +339,7 @@ export function PerformancePage() {
                   min={1}
                   max={32}
                   onChange={(value) => patch({ streamConcurrency: value })}
-                  format={() => `读取时同时预取 ${draft.streamConcurrency} 个 1 MiB 数据块。`}
+                  format={() => `读取时并行预取 ${draft.streamConcurrency} 个 1 MiB 分块。`}
                 />
               </Field>
             </div>
@@ -347,11 +347,11 @@ export function PerformancePage() {
 
           <Section
             icon={<SlidersHorizontal size={16} />}
-            title="任务队列"
-            description="这两个额度是整个网盘的全局上限，由 WebUI、VPS 上传、离线下载和 WebDAV 共同占用。超出后排队等待，不会失败；备用账号不会让额度翻倍。"
+            title="全局并发队列"
+            description="全站任务上限，WebUI、VPS 上传、离线下载及 WebDAV 共享此配额。超出部分自动排队。"
           >
             <div className="space-y-5">
-              <Field label="同时进行的上传任务">
+              <Field label="同时上传任务上限">
                 <Slider
                   value={draft.uploadConcurrency}
                   min={1}
@@ -359,12 +359,12 @@ export function PerformancePage() {
                   suffix="个"
                   onChange={(value) => patch({ uploadConcurrency: value })}
                   format={() =>
-                    `最多 ${draft.uploadConcurrency} 个文件同时上传。浏览器上传的多个分卷算作一个任务。备用账号只在主账号不可用时接替。`
+                    `允许最多 ${draft.uploadConcurrency} 个文件并行上传。分卷文件视为单个任务。备用账号仅在主账号受限时接替。`
                   }
                 />
               </Field>
 
-              <Field label="同时进行的下载任务">
+              <Field label="同时下载任务上限">
                 <Slider
                   value={draft.downloadConcurrency}
                   min={1}
@@ -372,12 +372,12 @@ export function PerformancePage() {
                   suffix="个"
                   onChange={(value) => patch({ downloadConcurrency: value })}
                   format={() =>
-                    `最多 ${draft.downloadConcurrency} 个文件同时从 Telegram 读取。一个下载开的多条连接只算一个任务。备用账号只在主账号不可用时接替。`
+                    `允许最多 ${draft.downloadConcurrency} 个文件并行从 Telegram 读取。单个任务的多连接不重复计数。`
                   }
                 />
               </Field>
 
-              <Field label="单个下载允许的连接数">
+              <Field label="单任务下载连接数">
                 <Slider
                   value={draft.maxDownloadConns}
                   min={1}
@@ -385,7 +385,7 @@ export function PerformancePage() {
                   suffix="条"
                   onChange={(value) => patch({ maxDownloadConns: value })}
                   format={() =>
-                    `多线程下载最多开 ${draft.maxDownloadConns} 条连接，超出的请求会收到 429 并自动退避。`
+                    `多线程下载最多分配 ${draft.maxDownloadConns} 条连接，超出时返回 429 并自动退避。`
                   }
                 />
               </Field>
@@ -398,7 +398,7 @@ export function PerformancePage() {
 
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="primary" loading={busy} disabled={!dirty} onClick={() => void save()}>
-          {dirty ? '保存并生效' : '已是最新'}
+          {dirty ? '保存并生效' : '配置未修改'}
         </Button>
         {dirty && (
           <Button icon={<RotateCcw size={14} />} onClick={() => setDraft(settings)}>

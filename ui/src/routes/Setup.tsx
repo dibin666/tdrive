@@ -30,9 +30,9 @@ export function Setup() {
     <div className="mx-auto flex min-h-full max-w-lg flex-col justify-center px-5 py-12">
       <header className="mb-8">
         <Logo />
-        <h1 className="display mt-5 text-2xl">把 Telegram 变成一块硬盘</h1>
+        <h1 className="display mt-5 text-2xl">TDrive 初始设置</h1>
         <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
-          先创建管理员账号即可进入网盘。Telegram 存储可以稍后在设置中完成，超过 2 GB 的文件会自动分卷。
+          创建管理员账号即可开始使用。Telegram 存储可在设置中随时配置，超过 2 GB 的文件会自动分卷。
         </p>
       </header>
 
@@ -99,7 +99,7 @@ function AccountStep({
 
   const submit = async () => {
     if (password !== confirm) return setError('两次输入的密码不一致')
-    if (password.length < 8) return setError('密码至少 8 位')
+    if (password.length < 8) return setError('密码至少 8 位字符')
     setBusy(true)
     setError(null)
     try {
@@ -115,7 +115,7 @@ function AccountStep({
     <div className="space-y-4">
       <StepHeader
         title="创建管理员账号"
-        description="这个账号用来登录网盘，也是 WebDAV 的用户名密码。创建后可以先进入网盘，Telegram 账号和频道稍后再配置。"
+        description="该账号用于登录 WebUI 与 WebDAV。创建后可直接进入系统，Telegram 参数可稍后配置。"
       />
       <Field label="用户名">
         <Input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" />
@@ -138,7 +138,7 @@ function AccountStep({
         />
       </Field>
       <Button variant="primary" className="w-full" loading={busy} onClick={() => void submit()}>
-        创建账号并进入网盘
+        创建管理员并进入系统
       </Button>
     </div>
   )
@@ -152,7 +152,7 @@ export function CredentialsStep({ onDone }: { onDone: () => Promise<void> }) {
 
   const submit = async () => {
     const id = Number(appId.trim())
-    if (!Number.isInteger(id) || id <= 0) return setError('api_id 应该是一串数字')
+    if (!Number.isInteger(id) || id <= 0) return setError('api_id 必须为正整数')
     setBusy(true)
     setError(null)
     try {
@@ -168,8 +168,8 @@ export function CredentialsStep({ onDone }: { onDone: () => Promise<void> }) {
   return (
     <div className="space-y-4">
       <StepHeader
-        title="填入 Telegram API 凭据"
-        description="Telegram 要求第三方客户端使用自己的 api_id 和 api_hash。它们只保存在你这台服务器上。"
+        title="配置 Telegram API 凭据"
+        description="第三方客户端需使用独立 api_id 与 api_hash，凭据仅保存在本地服务器。"
       />
       <a
         href="https://my.telegram.org/apps"
@@ -177,7 +177,7 @@ export function CredentialsStep({ onDone }: { onDone: () => Promise<void> }) {
         rel="noreferrer"
         className="flex items-center gap-1.5 text-sm text-[var(--color-clay)] hover:underline"
       >
-        去 my.telegram.org 申请
+        前往 my.telegram.org 申请
         <ExternalLink size={13} />
       </a>
       <Field label="api_id">
@@ -238,8 +238,8 @@ export function LoginStep({ onDone }: { onDone: () => Promise<void> }) {
   return (
     <div className="space-y-4">
       <StepHeader
-        title="登录 Telegram"
-        description="用你自己的账号登录。文件会存进这个账号的一个私有频道。"
+        title="登录 Telegram 账号"
+        description="登录个人账号以建立存储连接，文件将存入该账号名下的私有频道。"
       />
 
       {stage === 'phone' && (
@@ -269,7 +269,7 @@ export function LoginStep({ onDone }: { onDone: () => Promise<void> }) {
         <>
           <Field
             label="验证码"
-            hint="Telegram 会把验证码发到你已登录的其它设备上"
+            hint="Telegram 会将验证码发送至已登录设备"
             error={error ?? undefined}
           >
             <Input
@@ -305,7 +305,7 @@ export function LoginStep({ onDone }: { onDone: () => Promise<void> }) {
             className="w-full text-xs text-[var(--muted)] hover:text-[var(--ink)]"
             onClick={() => void run(async () => { await api.sendCode(phone) })}
           >
-            没收到？重新发送
+            未收到？重新发送
           </button>
         </>
       )}
@@ -314,7 +314,7 @@ export function LoginStep({ onDone }: { onDone: () => Promise<void> }) {
         <>
           <div className="flex items-start gap-2 rounded-[var(--radius-control)] bg-[var(--sunk)] p-3 text-xs text-[var(--muted)]">
             <ShieldCheck size={15} className="mt-px shrink-0 text-[var(--color-clay)]" />
-            <span>这个账号开启了两步验证{hint ? `，密码提示：${hint}` : ''}。</span>
+            <span>当前账号已启用两步验证{hint ? `，密码提示：${hint}` : ''}。</span>
           </div>
           <Field label="两步验证密码" error={error ?? undefined}>
             <Input
@@ -397,15 +397,15 @@ export function ChannelStep({
   return (
     <div className="space-y-4">
       <StepHeader
-        title="选择存储频道"
-        description="所有文件都存进这个频道。每个文件夹和每个分卷都是一条带 # 标签的消息，索引丢了也能从频道还原。"
+        title="配置存储频道"
+        description="所有文件均存入该频道。目录结构与分卷信息均以标签写入消息，支持随时重建索引。"
       />
 
       <div className="flex gap-1 rounded-[var(--radius-control)] border border-[var(--line)] p-0.5">
         {(
           [
-            ['create', '新建专用频道'],
-            ['existing', '用已有频道'],
+            ['create', '新建专属频道'],
+            ['existing', '使用已有频道'],
           ] as const
         ).map(([value, label]) => (
           <button
@@ -446,7 +446,7 @@ export function ChannelStep({
         </div>
       ) : options.length === 0 ? (
         <p className="py-6 text-center text-sm text-[var(--muted)]">
-          这个账号还没有可用的频道，先新建一个吧。
+          当前账号下未找到可用频道，请先新建频道。
         </p>
       ) : (
         <div className="max-h-64 space-y-1 overflow-y-auto">
@@ -482,8 +482,8 @@ function DoneStep() {
         <Check size={20} className="text-[var(--color-clay)]" />
       </span>
       <div>
-        <h2 className="display text-lg">设置好了</h2>
-        <p className="mt-1.5 text-sm text-[var(--muted)]">现在可以开始上传了。</p>
+        <h2 className="display text-lg">初始化完成</h2>
+        <p className="mt-1.5 text-sm text-[var(--muted)]">存储配置已就绪，可开始上传文件。</p>
       </div>
       <Button variant="primary" className="w-full" onClick={() => (window.location.href = '/files')}>
         进入网盘

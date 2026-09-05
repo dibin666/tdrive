@@ -17,15 +17,15 @@ const ACTION_LABELS: Record<string, string> = {
   'session.revoke': '注销会话',
   'settings.update': '修改设置',
   'telegram.configure': '配置 Telegram',
-  'telegram.logout': '退出 Telegram',
+  'telegram.logout': '退出 Telegram 账号',
   'telegram.import': '导入 Telegram 账号',
   'telegram.export': '导出 Telegram 账号',
-  'telegram.channel': '切换存储频道',
+  'telegram.channel': '更换存储频道',
   'index.rebuild': '重建索引',
   'share.create': '生成直链',
   'share.revoke': '撤销直链',
   'transfer.delete': '删除传输记录',
-  'download.stage': '服务器暂存下载',
+  'download.stage': '服务器暂存',
   'cache.purge': '清理暂存',
   'file.delete': '删除文件',
   'file.batchRename': '批量重命名',
@@ -56,12 +56,12 @@ function IndexSection() {
     <Section
       icon={<Database size={16} />}
       title="重建索引"
-      description="扫描频道里所有带 #tdrive 标签的消息，从标签还原整棵目录树、分卷关系和文件归属。本地索引损坏或换机器时用得上。"
+      description="扫描频道内所有带 #tdrive 标签的消息，还原目录结构、分卷关系与文件归属。用于本地数据库损坏或迁移恢复。"
     >
       {state?.running ? (
         <div className="space-y-2">
           <p className="text-sm text-[var(--muted)]">
-            已扫描 {state.scanned} 条消息，找到 {state.dirs} 个文件夹、{state.files} 个文件
+            已扫描 {state.scanned} 条消息，发现 {state.dirs} 个目录、{state.files} 个文件
           </p>
           <Progress value={100} className="animate-pulse" />
         </div>
@@ -69,15 +69,15 @@ function IndexSection() {
         <>
           {state?.done && !state.error && (
             <p className="mb-3 text-xs text-[var(--muted)]">
-              上次重建：{state.dirs} 个文件夹、{state.files} 个文件、{state.segments} 个分卷
-              {state.broken > 0 && `，其中 ${state.broken} 个文件缺卷`}
+              上次重建：{state.dirs} 个目录、{state.files} 个文件、{state.segments} 个分卷
+              {state.broken > 0 && `（${state.broken} 个文件存在缺卷）`}
             </p>
           )}
           {state?.error && <p className="mb-3 text-xs text-[var(--color-danger)]">{state.error}</p>}
           <Button
             icon={<RefreshCw size={15} />}
             onClick={async () => {
-              if (!confirm('重建会用频道里的内容覆盖当前索引，确定继续？')) return
+              if (!confirm('重建索引将以频道中的消息记录覆盖当前本地数据库，确定继续？')) return
               try {
                 setState(await api.rebuildIndex())
               } catch (err) {
@@ -135,8 +135,8 @@ function AuditSection() {
   return (
     <Section
       icon={<ScrollText size={16} />}
-      title="操作日志"
-      description="账号、设置、索引和分享链接的变更记录。这是这里唯一无法从 Telegram 重建的数据。"
+      title="审计日志"
+      description="记录账号管理、系统设置、索引重建与直链操作变更。此项数据无法从 Telegram 重建。"
       actions={
         <Button icon={<Download size={14} />} onClick={exportCsv} disabled={!entries?.length}>
           导出 CSV
@@ -149,7 +149,7 @@ function AuditSection() {
           value={action}
           onChange={(e) => setAction(e.target.value)}
         >
-          <option value="">全部动作</option>
+          <option value="">全部类型</option>
           {Object.entries(ACTION_LABELS).map(([key, label]) => (
             <option key={key} value={key}>
               {label}
@@ -173,7 +173,7 @@ function AuditSection() {
       {entries === null ? (
         <Spinner />
       ) : entries.length === 0 ? (
-        <p className="py-6 text-center text-xs text-[var(--muted)]">没有匹配的记录</p>
+        <p className="py-6 text-center text-xs text-[var(--muted)]">无匹配记录</p>
       ) : (
         <div className="max-h-[28rem] overflow-y-auto">
           <table className="w-full text-xs">

@@ -103,7 +103,7 @@ func openPool(path string, writer bool) (*sql.DB, error) {
 
 // schemaVersion is what schema.sql describes. Anything older is brought up to
 // it by the steps in migrate.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // upgradeSteps are the statements that take an existing database from the
 // version keyed here to the next one. A fresh database skips all of them,
@@ -325,6 +325,73 @@ var upgradeSteps = map[int][]string{
 			PRIMARY KEY (account_id, quota_date)
 		) WITHOUT ROWID`,
 		`CREATE INDEX IF NOT EXISTS idx_tg_account_usage_date ON tg_account_usage (quota_date)`,
+	},
+	9: {
+		// Plugins become per-account. Before this, "installed" was a property
+		// of the deployment; now it is a property of an account, which is what
+		// lets two people hold the same plugin id at different versions.
+		//
+		// Existing rows are attributed to the oldest administrator. On every
+		// deployment that can have a plugin at all, installing was
+		// admin-only, and the account that ran the setup wizard is the one
+		// that has been able to install for longest. id breaks the tie
+		// because created_at is millisecond resolution and the bootstrap path
+		// can create two accounts inside one millisecond.
+		//
+		// Order is load-bearing: foreign_keys is on, so the child table is
+		// carried aside and dropped before the parent is rebuilt, and the new
+		// composite foreign key is only created once the new parent exists.
+		// A row that cannot be attributed — a database holding plugins with
+		// no administrator, which the CountAdmins guards make unreachable —
+		// is dropped rather than orphaned, because the alternative is a
+		// NOT NULL violation that stops the database opening at all.
+		`CREATE TABLE plugin_data_v10_carry AS SELECT * FROM plugin_data`,
+		`DROP TABLE plugin_data`,
+		`CREATE TABLE IF NOT EXISTS plugins_v10 (
+			user_id         TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+			id              TEXT NOT NULL,
+			name            TEXT NOT NULL,
+			version         TEXT NOT NULL,
+			author          TEXT NOT NULL,
+			enabled         INTEGER NOT NULL DEFAULT 1,
+			status          TEXT NOT NULL DEFAULT 'disabled',
+			source          TEXT NOT NULL,
+			manifest_url    TEXT NOT NULL,
+			manifest_digest TEXT NOT NULL,
+			binary_digest   TEXT NOT NULL,
+			binary_path     TEXT NOT NULL,
+			manifest_json   TEXT NOT NULL,
+			error           TEXT NOT NULL DEFAULT '',
+			installed_at    INTEGER NOT NULL,
+			updated_at      INTEGER NOT NULL,
+			PRIMARY KEY (user_id, id)
+		)`,
+		`INSERT INTO plugins_v10
+			SELECT (SELECT id FROM users WHERE role = 'admin' ORDER BY created_at, id LIMIT 1),
+				id, name, version, author, enabled, status, source, manifest_url,
+				manifest_digest, binary_digest, binary_path, manifest_json, error,
+				installed_at, updated_at
+			FROM plugins
+			WHERE EXISTS (SELECT 1 FROM users WHERE role = 'admin')`,
+		`DROP TABLE plugins`,
+		// Nothing references plugins_v10, so the reference rewriting a modern
+		// SQLite performs on RENAME TO has nothing to do here.
+		`ALTER TABLE plugins_v10 RENAME TO plugins`,
+		`CREATE INDEX IF NOT EXISTS idx_plugins_enabled ON plugins (enabled)`,
+		`CREATE INDEX IF NOT EXISTS idx_plugins_user ON plugins (user_id)`,
+		`CREATE TABLE IF NOT EXISTS plugin_data (
+			user_id    TEXT NOT NULL,
+			plugin_id  TEXT NOT NULL,
+			key        TEXT NOT NULL,
+			value      BLOB NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (user_id, plugin_id, key),
+			FOREIGN KEY (user_id, plugin_id) REFERENCES plugins (user_id, id) ON DELETE CASCADE
+		) WITHOUT ROWID`,
+		`INSERT INTO plugin_data (user_id, plugin_id, key, value, updated_at)
+			SELECT p.user_id, c.plugin_id, c.key, c.value, c.updated_at
+			FROM plugin_data_v10_carry c JOIN plugins p ON p.id = c.plugin_id`,
+		`DROP TABLE plugin_data_v10_carry`,
 	},
 }
 

@@ -195,6 +195,13 @@ func (s *Server) Routes() http.Handler {
 			r.Delete("/{id}", s.handleCancelUpload)
 		})
 
+		// Plugins are installed per account, so the management surface belongs
+		// in the authenticated group rather than the administrator one: every
+		// endpoint acts on the caller's own installations. Which accounts may
+		// install is PermPlugins, applied inside pluginRoutes and held by the
+		// admin role by default.
+		s.pluginRoutes(r)
+
 		r.Route("/tg", func(r chi.Router) {
 			r.Get("/status", s.handleTelegramStatus)
 			r.Group(func(r chi.Router) {
@@ -254,8 +261,6 @@ func (s *Server) Routes() http.Handler {
 
 			r.Post("/index/rebuild", s.handleRebuildIndex)
 			r.Get("/index/status", s.handleIndexStatus)
-
-			s.pluginRoutes(r)
 		})
 	})
 

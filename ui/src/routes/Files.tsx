@@ -183,8 +183,8 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
 
       toast(
         list.length === 1
-          ? `已添加 "${list[0].name}" 到上传队列`
-          : `已添加 ${list.length} 个文件到上传队列`,
+          ? `已将 "${list[0].name}" 加入上传队列`
+          : `已将 ${list.length} 个文件加入上传队列`,
         'info',
       )
 
@@ -211,7 +211,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
     async (targets: Entry[]) => {
       if (targets.length === 0) return
       const names = targets.length === 1 ? `"${targets[0].name}"` : `这 ${targets.length} 项`
-      if (!confirm(`确定删除${names}？Telegram 上的对应消息也会一并删除，无法撤销。`)) return
+      if (!confirm(`确定删除${names}？Telegram 对应消息将一并删除，无法恢复。`)) return
       try {
         await api.remove(targets.map((t) => t.path))
         toast(`已删除 ${targets.length} 项`, 'success')
@@ -238,7 +238,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
     try {
       const link = await api.share(entry.id, {})
       const ok = await copyText(link.file.url)
-      toast(ok ? '下载直链已复制，可直接粘贴到下载工具' : `直链已生成：${link.file.url}`, ok ? 'success' : 'info')
+      toast(ok ? '直链已复制到剪贴板' : `直链已生成：${link.file.url}`, ok ? 'success' : 'info')
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), 'error')
     }
@@ -288,14 +288,14 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
           },
           {
             id: 'new-folder',
-            label: '新建文件夹',
+            label: '新建目录',
             icon: <FolderPlus size={14} />,
             onSelect: () => setNewFolderOpen(true),
             hidden: !canMkdir,
           },
           {
             id: 'remote',
-            label: '从链接下载',
+            label: '离线下载',
             icon: <CloudDownload size={14} />,
             onSelect: () => setRemoteOpen(true),
             hidden: !canRemote,
@@ -342,7 +342,7 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
         },
         {
           id: 'copy-link',
-          label: '复制下载直链',
+          label: '复制直链',
           icon: <Link2 size={14} />,
           onSelect: () => single && void copyLink(single),
           hidden: !single || single.isDir || !canShare,
@@ -618,15 +618,15 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
           ) : error ? (
             <EmptyState
               icon={<AlertTriangle size={30} />}
-              title="打不开这个目录"
+              title="无法打开此目录"
               description={error}
               action={<Button onClick={() => void load()}>重试</Button>}
             />
           ) : !listing || listing.entries.length === 0 ? (
             <EmptyState
               icon={<Layers size={30} />}
-              title="这里还什么都没有"
-              description="把文件拖到这里，或者用上传按钮。超过 2 GB 的文件会自动分卷，在这里仍然显示为一个文件。"
+              title="目录为空"
+              description="拖拽文件至此处或点击上传。单文件超过 2 GB 将自动分卷并在列表中完整显示。"
               action={
                 canWrite ? (
                   <Button variant="primary" icon={<Upload size={15} />} onClick={() => setUploadOpen(true)}>
@@ -669,8 +669,8 @@ export function Files({ path, onNavigate }: { path: string; onNavigate: (to: str
             <div className="flex h-full w-full flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[var(--color-clay)] bg-[var(--clay-soft)]/20 p-6 text-center">
               <div className="panel px-6 py-5 text-center shadow-lg">
                 <Upload size={28} className="mx-auto mb-2 text-[var(--color-clay)]" />
-                <p className="display text-base font-medium">松手即可上传到 {path}</p>
-                <p className="mt-1 text-xs text-[var(--muted)]">支持多文件上传，超过 2 GB 将自动分卷</p>
+                <p className="display text-base font-medium">释放以上传至 {path}</p>
+                <p className="mt-1 text-xs text-[var(--muted)]">支持批量上传，单文件超过 2 GB 将自动分卷</p>
               </div>
             </div>
           </div>
@@ -826,12 +826,12 @@ function Toolbar({
           </div>
 
           {canMkdir && (
-            <IconButton label="新建文件夹" onClick={onNewFolder}>
+            <IconButton label="新建目录" onClick={onNewFolder}>
               <FolderPlus size={16} />
             </IconButton>
           )}
           {canRemote && (
-            <IconButton label="从链接下载" onClick={onRemote}>
+            <IconButton label="离线下载" onClick={onRemote}>
               <CloudDownload size={16} />
             </IconButton>
           )}
@@ -1227,7 +1227,7 @@ function FileRow({
               <BrokenBadge entry={entry} />
             </div>
             <span className="mt-0.5 block truncate text-xs text-[var(--faint)] sm:hidden">
-              {entry.isDir ? `文件夹 · ${formatBytes(entry.size)}` : formatBytes(entry.size)} ·{' '}
+              {entry.isDir ? `目录 · ${formatBytes(entry.size)}` : formatBytes(entry.size)} ·{' '}
               {formatDate(entry.modifiedAt)}
             </span>
           </div>
@@ -1235,7 +1235,7 @@ function FileRow({
 
         <span
           className="hidden text-right text-xs tabular-nums text-[var(--muted)] sm:block"
-          title={entry.isDir ? '文件夹内所有文件的总大小' : undefined}
+          title={entry.isDir ? '目录内文件总大小' : undefined}
         >
           {formatBytes(entry.size)}
         </span>
@@ -1338,7 +1338,7 @@ function GridTile({
       <EntryIcon name={entry.name} mime={entry.mime} isDir={entry.isDir} size={22} />
       <span className="line-clamp-2 w-full break-all pr-6 text-sm leading-snug">{entry.name}</span>
       <span className="flex items-center gap-1.5 text-[11px] text-[var(--faint)]">
-        {entry.isDir ? `文件夹 · ${formatBytes(entry.size)}` : formatBytes(entry.size)}
+        {entry.isDir ? `目录 · ${formatBytes(entry.size)}` : formatBytes(entry.size)}
         <SegmentBadge entry={entry} />
       </span>
     </div>
@@ -1399,7 +1399,7 @@ function SelectionBar({
         </button>
       )}
       {canMove && (
-        <button onClick={onMove} className="btn btn-ghost !px-2 !py-1 text-xs" title="移动到...">
+        <button onClick={onMove} className="btn btn-ghost !px-2 !py-1 text-xs" title="移动到…">
           <FolderInput size={14} className="text-[var(--muted)]" />
           <span className="hidden sm:inline">移动</span>
         </button>
@@ -1436,7 +1436,7 @@ function SelectionBar({
 function SegmentBadge({ entry }: { entry: Entry }) {
   if (entry.isDir || !entry.segmentCount || entry.segmentCount < 2) return null
   return (
-    <span className="chip shrink-0" title={`存储为 ${entry.segmentCount} 个分卷，下载时自动合并`}>
+    <span className="chip shrink-0" title={`共 ${entry.segmentCount} 个存储分卷，下载时自动拼接`}>
       <Layers size={10} />
       {entry.segmentCount}
     </span>
@@ -1448,7 +1448,7 @@ function BrokenBadge({ entry }: { entry: Entry }) {
   return (
     <span
       className="chip shrink-0 !border-[var(--color-danger)]/40 !text-[var(--color-danger)]"
-      title="部分分卷在 Telegram 上找不到了，这个文件无法完整下载"
+      title="部分存储分卷在 Telegram 中丢失，该文件无法完整读取"
     >
       <AlertTriangle size={10} />
       缺卷
@@ -1507,8 +1507,7 @@ function DetailPanel({
               存储分卷
             </h3>
             <p className="mb-2.5 text-xs text-[var(--muted)]">
-              Telegram 单个文件上限 2 GB，这个文件被拆成 {segments.length} 条消息存储。下载、播放和
-              WebDAV 都会自动拼接，你不需要关心。
+              Telegram 单文件上限 2 GB，该文件已切分为 {segments.length} 个分卷存储。下载、播放及 WebDAV 均会自动拼接。
             </p>
             <div className="space-y-1">
               {segments.map((seg) => (
@@ -1580,8 +1579,8 @@ function NewFolderModal({
     <Modal
       open={open}
       onClose={onClose}
-      title="新建文件夹"
-      description="文件夹会作为一条带标签的消息记录到 Telegram，索引丢失后可以还原。"
+      title="新建目录"
+      description="目录信息将以标签形式记录至 Telegram 存储频道，支持通过重建索引恢复。"
       footer={
         <>
           <Button onClick={onClose}>取消</Button>
@@ -1644,7 +1643,7 @@ function RenameModal({
       open={entry !== null}
       onClose={onClose}
       title="重命名"
-      description="Telegram 上每个分卷的标题也会同步更新。"
+      description="Telegram 对应分卷消息的标题将同步更新。"
       footer={
         <>
           <Button onClick={onClose}>取消</Button>
@@ -1764,7 +1763,7 @@ function UploadModal({
       }
       if (started > 0) {
         onLocalStarted()
-        toast(`已添加 ${started} 个 VPS 文件到上传队列`, 'success')
+        toast(`已将 ${started} 个本地文件加入上传队列`, 'success')
       }
       if (failed > 0) {
         setLocalError(`${failed} 个文件添加失败${firstError ? `：${firstError}` : ''}`)
@@ -1801,7 +1800,7 @@ function UploadModal({
             disabled={!localEnabled || selectedCount === 0}
             onClick={() => void startLocalUploads()}
           >
-            上传已选 {selectedCount} 个 VPS 文件
+            上传所选 {selectedCount} 个 VPS 文件
           </Button>
         </>
       }
@@ -1810,11 +1809,11 @@ function UploadModal({
         <section>
           <div className="mb-2 flex items-center gap-2">
             <Upload size={15} className="text-[var(--color-clay)]" />
-            <h3 className="text-sm font-medium">浏览器文件</h3>
+            <h3 className="text-sm font-medium">从浏览器上传</h3>
           </div>
           <div className="flex flex-col gap-3 rounded-[var(--radius-card)] border border-dashed border-[var(--line-strong)] bg-[var(--sunk)]/45 p-4 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs leading-relaxed text-[var(--muted)]">
-              选择当前设备上的文件，文件会从浏览器分片上传到 TDrive。
+              选择当前设备中的文件，由浏览器分片上传至 TDrive。
             </p>
             <Button variant="outline" onClick={() => browserInput.current?.click()}>
               选择文件
@@ -1840,14 +1839,14 @@ function UploadModal({
             <FolderOpen size={15} className="text-[var(--color-clay)]" />
             <div>
               <h3 className="text-sm font-medium">VPS 本地文件</h3>
-              <p className="text-xs text-[var(--muted)]">服务器从挂载目录直接读取，不经过浏览器。</p>
+              <p className="text-xs text-[var(--muted)]">服务器直接读取挂载路径，不占用浏览器带宽与本地连接。</p>
             </div>
           </div>
 
           {!localEnabled ? (
             <p className="rounded-[var(--radius-card)] bg-[var(--sunk)] p-4 text-xs leading-relaxed text-[var(--muted)]">
-              尚未配置 VPS 文件目录，或当前账号没有这个权限。管理员可以前往「设置 → 存储」填写服务器目录（Docker
-              下通常为 <span className="mx-1 font-[family-name:var(--font-mono)]">/vps</span>）。
+              未配置 VPS 挂载目录或当前账号无此权限。管理员可在「设置 → 存储与暂存」中配置挂载路径（Docker
+              默认路径通常为 <span className="mx-1 font-[family-name:var(--font-mono)]">/vps</span>）。
             </p>
           ) : (
             <div className="rounded-[var(--radius-card)] border border-[var(--line)]">
@@ -1890,7 +1889,7 @@ function UploadModal({
                         checked={allFilesSelected}
                         indeterminate={selectedCount > 0 && !allFilesSelected}
                         onChange={selectAllFiles}
-                        label={allFilesSelected ? '取消全选' : '全选本目录文件'}
+                        label={allFilesSelected ? '取消全选' : '全选当前目录'}
                       />
                       <span className="text-[11px] text-[var(--faint)]">
                         {selectedCount > 0 ? `已选 ${selectedCount} 个文件` : `${files.length} 个文件`}
@@ -1928,13 +1927,13 @@ function UploadModal({
                         <span className="truncate text-sm">{entry.name}</span>
                       </span>
                       <span className="shrink-0 text-xs tabular-nums text-[var(--muted)]">
-                        {entry.isDir ? '文件夹' : formatBytes(entry.size)}
+                        {entry.isDir ? '目录' : formatBytes(entry.size)}
                       </span>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="py-10 text-center text-xs text-[var(--muted)]">这个目录为空</p>
+                <p className="py-10 text-center text-xs text-[var(--muted)]">当前目录为空</p>
               )}
             </div>
           )}
@@ -1972,7 +1971,7 @@ function RemoteModal({
     setError(null)
     try {
       await api.remoteUpload({ url: url.trim(), path, name: name.trim() || undefined })
-      toast('已开始下载，进度会显示在传输列表里', 'success')
+      toast('已提交离线下载任务，可在「传输」中查看进度', 'success')
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -1985,13 +1984,13 @@ function RemoteModal({
     <Modal
       open={open}
       onClose={onClose}
-      title="从链接下载"
-      description="服务器直接抓取并存进 Telegram，不经过你的浏览器。"
+      title="离线下载"
+      description="由服务器直接抓取文件并存入 Telegram，不占用浏览器带宽。"
       footer={
         <>
           <Button onClick={onClose}>取消</Button>
           <Button variant="primary" loading={busy} onClick={() => void submit()}>
-            开始
+            开始下载
           </Button>
         </>
       }
@@ -2005,7 +2004,7 @@ function RemoteModal({
             autoFocus
           />
         </Field>
-        <Field label="文件名" hint="留空则使用链接里的名字">
+        <Field label="文件名" hint="留空使用 URL 中的默认文件名">
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="可选" />
         </Field>
       </div>

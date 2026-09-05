@@ -12,6 +12,7 @@ import (
 	"github.com/dibin/tdrive/internal/database"
 	"github.com/dibin/tdrive/internal/drive"
 	"github.com/dibin/tdrive/internal/localfs"
+	"github.com/dibin/tdrive/internal/plugin"
 	"github.com/dibin/tdrive/internal/tgc"
 )
 
@@ -85,6 +86,10 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		writeJSON(w, http.StatusInsufficientStorage, errorBody{Error: err.Error(), Code: "cache_full"})
 	case errors.Is(err, drive.ErrStagingDisabled):
 		writeJSON(w, http.StatusPreconditionRequired, errorBody{Error: err.Error(), Code: "staging_disabled"})
+	case errors.Is(err, plugin.ErrPluginLimit):
+		// The request was well formed and permitted; there is simply no room
+		// left in the process budget, which is a conflict rather than a fault.
+		writeJSON(w, http.StatusConflict, errorBody{Error: err.Error(), Code: "plugin_limit"})
 	case errors.Is(err, drive.ErrTooManyConnections):
 		// A downloader that opens too many sockets should back off and retry,
 		// which is what 429 tells every client that understands it.
@@ -105,7 +110,7 @@ func (s *Server) fail(w http.ResponseWriter, err error, action string) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, tgc.ErrBadProxy):
 		writeError(w, http.StatusBadRequest,
-			"代理地址不可用或格式不正确，请使用 socks5://host:port 或 http://host:port")
+			"代理地址不可用或格式错误，请使用 socks5://host:port 或 http://host:port。")
 	case errors.Is(err, tgc.ErrNotInChannel):
 		// The account is signed in but is not in the storage channel. That is a
 		// configuration gap somebody has to close, not an outage, so it must

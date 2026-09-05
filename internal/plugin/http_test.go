@@ -41,6 +41,7 @@ func TestPluginHTTPFailureDoesNotTurnTheRouteInto404(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer db.Close()
+	owner := newTestUser(t, db, "owner")
 
 	manifest := tdriveplugin.Manifest{
 		ID: "broken", Name: "Broken", Version: "1.0.0", SDKVersion: "0.1",
@@ -49,7 +50,7 @@ func TestPluginHTTPFailureDoesNotTurnTheRouteInto404(t *testing.T) {
 	}
 	manifestJSON, _ := json.Marshal(manifest)
 	if err := db.UpsertPlugin(ctx, database.PluginRecord{
-		ID: "broken", Name: "Broken", Version: "1.0.0", Author: "test", Enabled: true,
+		UserID: owner.ID, ID: "broken", Name: "Broken", Version: "1.0.0", Author: "test", Enabled: true,
 		Status: database.PluginStatusActive, BinaryDigest: strings.Repeat("a", 64),
 		BinaryPath: filepath.Join(t.TempDir(), "does-not-exist"), ManifestJSON: string(manifestJSON),
 		InstalledAt: time.Now(), UpdatedAt: time.Now(),
@@ -59,13 +60,14 @@ func TestPluginHTTPFailureDoesNotTurnTheRouteInto404(t *testing.T) {
 
 	manager := New(&config.Config{Plugins: config.Plugins{Dir: t.TempDir()}}, db, nil, nil, nil, nil, zap.NewNop())
 	defer manager.Close(ctx)
-	manager.active["broken"] = &activePlugin{
-		record: database.PluginRecord{ID: "broken"}, manifest: manifest, client: failingHTTPClient{},
+	manager.active[pluginKey{userID: owner.ID, pluginID: "broken"}] = &activePlugin{
+		record: database.PluginRecord{UserID: owner.ID, ID: "broken"}, manifest: manifest, client: failingHTTPClient{},
 	}
 
 	call := func() *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodGet, "/plugins/broken/", nil)
+		request := httptest.NewRequest(http.MethodGet, "/plugins/broken/", nil).
+			WithContext(tdriveplugin.WithUserID(ctx, owner.ID))
 		manager.servePublicHTTP(recorder, request)
 		return recorder
 	}
@@ -112,6 +114,7 @@ func TestClientCancelledPluginRequestDoesNotRestartThePlugin(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer db.Close()
+	owner := newTestUser(t, db, "owner")
 
 	manifest := tdriveplugin.Manifest{
 		ID: "slow", Name: "Slow", Version: "1.0.0", SDKVersion: "0.1",
@@ -120,7 +123,7 @@ func TestClientCancelledPluginRequestDoesNotRestartThePlugin(t *testing.T) {
 	}
 	manifestJSON, _ := json.Marshal(manifest)
 	if err := db.UpsertPlugin(ctx, database.PluginRecord{
-		ID: "slow", Name: "Slow", Version: "1.0.0", Author: "test", Enabled: true,
+		UserID: owner.ID, ID: "slow", Name: "Slow", Version: "1.0.0", Author: "test", Enabled: true,
 		Status: database.PluginStatusActive, BinaryDigest: strings.Repeat("a", 64),
 		BinaryPath: filepath.Join(t.TempDir(), "does-not-exist"), ManifestJSON: string(manifestJSON),
 		InstalledAt: time.Now(), UpdatedAt: time.Now(),
@@ -131,11 +134,11 @@ func TestClientCancelledPluginRequestDoesNotRestartThePlugin(t *testing.T) {
 	manager := New(&config.Config{Plugins: config.Plugins{Dir: t.TempDir()}}, db, nil, nil, nil, nil, zap.NewNop())
 	defer manager.Close(ctx)
 	active := &activePlugin{
-		record: database.PluginRecord{ID: "slow"}, manifest: manifest, client: blockingHTTPClient{},
+		record: database.PluginRecord{UserID: owner.ID, ID: "slow"}, manifest: manifest, client: blockingHTTPClient{},
 	}
-	manager.active["slow"] = active
+	manager.active[pluginKey{userID: owner.ID, pluginID: "slow"}] = active
 
-	requestCtx, cancelRequest := context.WithCancel(ctx)
+	requestCtx, cancelRequest := context.WithCancel(tdriveplugin.WithUserID(ctx, owner.ID))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/plugins/slow/", nil).WithContext(requestCtx)
 	done := make(chan struct{})
@@ -154,14 +157,14 @@ func TestClientCancelledPluginRequestDoesNotRestartThePlugin(t *testing.T) {
 		t.Fatalf("status = %d, want %d for a client that went away", recorder.Code, clientClosedRequest)
 	}
 	manager.mu.RLock()
-	recovering := manager.recovering["slow"]
+	recovering := manager.recovering[pluginKey{userID: owner.ID, pluginID: "slow"}]
 	failed := active.failed
 	manager.mu.RUnlock()
 	if recovering || failed {
 		t.Fatal("a client-cancelled request was treated as a plugin failure and restarted the child")
 	}
 
-	record, err := db.PluginByID(ctx, "slow")
+	record, err := db.PluginByID(ctx, owner.ID, "slow")
 	if err != nil {
 		t.Fatalf("PluginByID: %v", err)
 	}
@@ -180,6 +183,7 @@ func TestSlowPluginResponseTimesOutWithoutRestartingTheChild(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer db.Close()
+	owner := newTestUser(t, db, "owner")
 
 	manifest := tdriveplugin.Manifest{
 		ID: "busy", Name: "Busy", Version: "1.0.0", SDKVersion: "0.1",
@@ -188,7 +192,7 @@ func TestSlowPluginResponseTimesOutWithoutRestartingTheChild(t *testing.T) {
 	}
 	manifestJSON, _ := json.Marshal(manifest)
 	if err := db.UpsertPlugin(ctx, database.PluginRecord{
-		ID: "busy", Name: "Busy", Version: "1.0.0", Author: "test", Enabled: true,
+		UserID: owner.ID, ID: "busy", Name: "Busy", Version: "1.0.0", Author: "test", Enabled: true,
 		Status: database.PluginStatusActive, BinaryDigest: strings.Repeat("a", 64),
 		BinaryPath: filepath.Join(t.TempDir(), "does-not-exist"), ManifestJSON: string(manifestJSON),
 		InstalledAt: time.Now(), UpdatedAt: time.Now(),
@@ -199,9 +203,9 @@ func TestSlowPluginResponseTimesOutWithoutRestartingTheChild(t *testing.T) {
 	manager := New(&config.Config{Plugins: config.Plugins{Dir: t.TempDir()}}, db, nil, nil, nil, nil, zap.NewNop())
 	defer manager.Close(ctx)
 	active := &activePlugin{
-		record: database.PluginRecord{ID: "busy"}, manifest: manifest, client: failingHTTPClient{},
+		record: database.PluginRecord{UserID: owner.ID, ID: "busy"}, manifest: manifest, client: failingHTTPClient{},
 	}
-	manager.active["busy"] = active
+	manager.active[pluginKey{userID: owner.ID, pluginID: "busy"}] = active
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/plugins/busy/", nil)
@@ -211,7 +215,7 @@ func TestSlowPluginResponseTimesOutWithoutRestartingTheChild(t *testing.T) {
 		t.Fatalf("status = %d, want 504", recorder.Code)
 	}
 	manager.mu.RLock()
-	recovering := manager.recovering["busy"]
+	recovering := manager.recovering[pluginKey{userID: owner.ID, pluginID: "busy"}]
 	failed := active.failed
 	manager.mu.RUnlock()
 	if recovering || failed {

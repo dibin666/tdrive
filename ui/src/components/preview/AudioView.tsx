@@ -50,7 +50,7 @@ export default function AudioView({ entry, link }: ViewerProps) {
         <div className="max-w-sm rounded-[var(--radius-card)] bg-[var(--sunk)] px-4 py-3 text-center">
           <Music size={20} className="mx-auto mb-2 text-[var(--faint)]" />
           <p className="text-xs leading-relaxed text-[var(--muted)]">
-            浏览器无法解码这个音频编码，下载到本地播放即可。
+            浏览器不支持此音频编码，请下载后在本地播放。
           </p>
         </div>
       ) : (

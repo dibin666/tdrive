@@ -358,10 +358,10 @@ class DownloadManager {
     bounds: SegmentBound[],
     signal: AbortSignal,
   ) {
-    this.update(id, { note: '浏览器不支持直接写入磁盘，已改为逐卷下载并附带合并脚本' })
+    this.update(id, { note: '当前浏览器不支持直接落盘，已改为逐卷下载并附带合并脚本' })
     const media = await api.mediaLink(options.fileId)
     const token = new URL(media.download, window.location.origin).searchParams.get('t')
-    if (!token) throw new Error('无法生成分卷下载凭证')
+    if (!token) throw new Error('无法生成分卷下载 token')
 
     for (const bound of bounds) {
       if (signal.aborted) throw new DOMException('aborted', 'AbortError')
@@ -437,10 +437,10 @@ class DownloadManager {
     }
     if (size > MEMORY_LIMIT) {
       throw new Error(
-        '这个浏览器不支持直接写入磁盘，而文件太大无法在内存中拼接。请改用直接下载或先暂存到服务器，或换用 Chrome / Edge。',
+        '当前浏览器不支持直接写入磁盘，且文件大小超出内存拼接限制。请改用直接下载、服务器暂存，或使用 Chrome / Edge。',
       )
     }
-    this.update(id, { note: '浏览器不支持写入磁盘，正在内存中拼接' })
+    this.update(id, { note: '浏览器不支持直接落盘，正在内存中拼接' })
     return memorySink(size, (blob) => {
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
@@ -485,7 +485,7 @@ class DownloadManager {
         const body = await res.arrayBuffer()
         const want = expected ?? end - start + 1
         if (body.byteLength !== want) {
-          throw new Error(`分片长度不对：期望 ${want} 字节，实际 ${body.byteLength} 字节`)
+          throw new Error(`分片大小异常：预期 ${want} 字节，实际 ${body.byteLength} 字节`)
         }
         return body
       } catch (err) {
@@ -514,7 +514,7 @@ export function downloadMergeScript(name: string, parts: number) {
 
   const sh = [
     '#!/bin/sh',
-    '# macOS / Linux：把这个文件和所有分卷放在同一个目录，然后执行 sh merge.sh',
+    '# macOS / Linux：将此脚本与所有分卷放于同一目录，执行 sh merge.sh',
     `cat ${partNames.map(shellQuote).join(' ')} > ${shellQuote(name)}`,
     `printf '%s\\n' ${shellQuote(`已合并为 ${name}`)}`,
     '',
@@ -548,7 +548,7 @@ export function downloadMergeScript(name: string, parts: number) {
 
   const bat = [
     '@echo off',
-    'REM Windows：把这个文件和所有分卷放在同一个目录，然后双击运行',
+    'REM Windows：将此脚本与所有分卷放于同一目录，双击运行',
     `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodeUtf16Base64(powershell)}`,
     'pause',
     '',

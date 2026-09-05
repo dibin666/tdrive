@@ -4,6 +4,7 @@ import { Shell } from './components/Shell'
 import { Spinner, ToastHost } from './components/primitives'
 import { Files } from './routes/Files'
 import { Login } from './routes/Login'
+import { PluginList, PluginView } from './routes/Plugins'
 import { Setup } from './routes/Setup'
 import { Settings } from './routes/settings'
 import { Transfers } from './routes/Transfers'
@@ -68,7 +69,27 @@ function Router() {
   if (path.startsWith('/settings')) {
     return (
       <Shell active="settings" path="/" onNavigate={navigate}>
-        <Settings />
+        <Settings onNavigate={navigate} />
+      </Shell>
+    )
+  }
+
+  // Plugin routes have to be matched before the drive fallthrough below, which
+  // reads any unmatched path as a folder name. The '/plugin/' prefix is spelled
+  // out rather than using startsWith('/plugin') so a future /plugin-something
+  // cannot be swallowed by it.
+  if (path === '/plugin') {
+    return (
+      <Shell active="plugins" path="/" onNavigate={navigate}>
+        <PluginList onNavigate={navigate} />
+      </Shell>
+    )
+  }
+  if (path.startsWith('/plugin/')) {
+    const id = decodeURIComponent(path.slice('/plugin/'.length))
+    return (
+      <Shell active={`plugin:${id}`} path="/" onNavigate={navigate}>
+        <PluginView id={id} onNavigate={navigate} />
       </Shell>
     )
   }

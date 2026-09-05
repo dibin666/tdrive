@@ -96,8 +96,8 @@ export function AccountsSection({
       title="Telegram 账号"
       description={
         usable > 1
-          ? `${usable} 个账号可用；主账号不可用时新任务自动回落到备用账号。上传和下载队列按全局配置执行，不会因账号数量增加而翻倍。`
-          : '添加账号只用于在主账号不可用时回落备用。注意：必须是另一个手机号——Telegram 的限流是按账号算的，同一个号申请多个 api_id 没有任何作用。'
+          ? `${usable} 个账号可用。主账号受限时自动调度备用账号。传输队列按全局并发数执行，不因账号增加而翻倍。`
+          : '添加备用账号可在主账号受限时接替传输。注：必须为不同手机号，同一账号申请多个 api_id 无效。'
       }
       actions={
         <div className="flex flex-wrap gap-2">
@@ -141,8 +141,8 @@ export function AccountsSection({
               onRemove={() => {
                 if (
                   !confirm(
-                    `删除账号「${account.label || account.appId}」？\n\n` +
-                      '它上传的文件不会被删除，其它账号会重新解析句柄后继续读取。',
+                    `确定删除账号「${account.label || account.appId}」？\n\n` +
+                      '该账号上传的文件不会被删除，其它可用账号可继续读取。',
                   )
                 )
                   return
@@ -157,7 +157,7 @@ export function AccountsSection({
         open={adding}
         onClose={() => setAdding(false)}
         title="添加 Telegram 账号"
-        description="需要另一个手机号，以及用那个号在 my.telegram.org 申请的 api_id / api_hash。"
+        description="需准备独立手机号，以及在 my.telegram.org 申请的 api_id 与 api_hash。"
         width="max-w-lg"
       >
         <AddAccountFlow
@@ -174,7 +174,7 @@ export function AccountsSection({
         open={picking !== null}
         onClose={() => setPicking(null)}
         title="手动选择存储频道"
-        description={`挑出「${picking?.label || '这个账号'}」看到的存储频道，把它对上。`}
+        description={`选择「${picking?.label || '当前账号'}」所加入的存储频道以完成绑定。`}
         width="max-w-lg"
       >
         {picking && (
@@ -192,8 +192,8 @@ export function AccountsSection({
       <Modal
         open={proxyAccount !== null}
         onClose={() => setProxyAccount(null)}
-        title="设置账号代理"
-        description={`只影响「${proxyAccount?.label || '这个账号'}」的 Telegram 连接。`}
+        title="配置账号代理"
+        description={`仅作用于「${proxyAccount?.label || '当前账号'}」的 Telegram 网络连接。`}
         width="max-w-lg"
       >
         {proxyAccount && (
@@ -211,8 +211,8 @@ export function AccountsSection({
       <Modal
         open={quotaAccount !== null}
         onClose={() => setQuotaAccount(null)}
-        title="设置每日传输配额"
-        description={`配置「${quotaAccount?.label || (quotaAccount ? `api_id ${quotaAccount.appId}` : '')}」的每日上传与下载额度`}
+        title="配置每日传输配额"
+        description={`配置「${quotaAccount?.label || (quotaAccount ? `api_id ${quotaAccount.appId}` : '')}」的每日上传与下载上限。`}
         width="max-w-lg"
       >
         {quotaAccount && (
@@ -541,8 +541,8 @@ function ProxyEditor({
   return (
     <div className="space-y-4">
       <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-        每个 Telegram 账号可以使用不同的代理出口，建议不要让多个账号共享同一个出口 IP。
-        支持 SOCKS5 和 HTTP 代理；代理密码只保存在服务器，不会返回到浏览器。
+        不同 Telegram 账号可配置独立代理出口，避免多账号共用同一出口 IP。
+        支持 SOCKS5 与 HTTP 代理；代理密码仅保存在服务器，不回传浏览器。
       </p>
 
       {account.proxyUrl ? (
@@ -550,12 +550,12 @@ function ProxyEditor({
           当前代理：<span className="font-[family-name:var(--font-mono)]">{account.proxyUrl}</span>
         </p>
       ) : (
-        <p className="text-xs text-[var(--muted)]">当前未设置代理，账号使用服务器直连。</p>
+        <p className="text-xs text-[var(--muted)]">当前未配置代理，使用服务器直连。</p>
       )}
 
       <Field
         label="代理地址"
-        hint="例如 socks5://user:password@127.0.0.1:1080 或 http://user:password@proxy.example:8080；留空表示直连"
+        hint="例如 socks5://user:password@127.0.0.1:1080 或 http://user:password@proxy.example:8080；留空为直连"
         error={error ?? undefined}
       >
         <Input
@@ -634,8 +634,7 @@ function ChannelPicker({
   return (
     <div className="space-y-4">
       <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-        下面是这个账号自己能看到的频道。选中标着「存储频道」的那个就行——它必须已经加入该频道，
-        并且拥有发消息、编辑消息和删除消息的权限。要把网盘切换到另一个频道，请使用账号列表上方的「切换频道」。
+        下方为该账号可见的频道列表。请选择标有「存储频道」的一项。该账号须已加入频道并拥有发消息、编辑消息和删除消息权限。
       </p>
 
       {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
@@ -646,7 +645,7 @@ function ChannelPicker({
         </div>
       ) : data === null ? null : data.channels.length === 0 ? (
         <p className="py-6 text-center text-sm text-[var(--muted)]">
-          这个账号一个频道都看不到。请先在 Telegram 客户端里用它加入「{data.storage.title}」。
+          未发现可用频道。请先在 Telegram 客户端中加入「{data.storage.title}」。
         </p>
       ) : (
         <div className="max-h-64 space-y-1 overflow-y-auto">
@@ -678,7 +677,7 @@ function ChannelPicker({
 
       {data !== null && !storageChannelFound && data.channels.length > 0 && (
         <p className="text-xs leading-relaxed text-[var(--muted)]">
-          列表里没有「{data.storage.title}」。请先在 Telegram 客户端里用这个账号加入该频道，再点下面的刷新。
+          列表中未找到「{data.storage.title}」。请先在 Telegram 客户端中加入该频道，再点击刷新。
         </p>
       )}
 
@@ -715,25 +714,25 @@ function describe(
     return {
       tone: 'warn',
       label: account.inChannel
-        ? `在频道「${account.channelTitle || '存储频道'}」里但没有发消息权限，还不能存文件`
-        : `还没加入频道「${account.channelTitle || '存储频道'}」，暂时不参与传输`,
+        ? `已加入频道「${account.channelTitle || '存储频道'}」，但缺少发消息权限`
+        : `尚未加入频道「${account.channelTitle || '存储频道'}」，暂不参与传输`,
     }
   }
   if (cooldownSeconds > 0) {
-    return { tone: 'warn', label: `被 Telegram 限流，${cooldownSeconds} 秒后恢复；新任务会回落到备用账号` }
+    return { tone: 'warn', label: `Telegram 限流中，${cooldownSeconds} 秒后解除；任务将由备用账号接替` }
   }
   const uploadExhausted = account.uploadDailyQuota > 0 && account.uploadRemainingToday <= 0
   const downloadExhausted = account.downloadDailyQuota > 0 && account.downloadRemainingToday <= 0
   if (uploadExhausted && downloadExhausted) {
-    return { tone: 'warn', label: '今日上传与下载配额均已耗尽，新任务会回落到备用账号（按 UTC 0 点重置）' }
+    return { tone: 'warn', label: '今日上传与下载配额已耗尽，任务由备用账号接替（UTC 0 点重置）' }
   }
   if (uploadExhausted) {
-    return { tone: 'warn', label: '今日上传配额已耗尽，新上传任务会回落到备用账号（按 UTC 0 点重置）' }
+    return { tone: 'warn', label: '今日上传配额已耗尽，新上传任务由备用账号接替（UTC 0 点重置）' }
   }
   if (downloadExhausted) {
-    return { tone: 'warn', label: '今日下载配额已耗尽，新下载任务会回落到备用账号（按 UTC 0 点重置）' }
+    return { tone: 'warn', label: '今日下载配额已耗尽，新下载任务由备用账号接替（UTC 0 点重置）' }
   }
-  return { tone: 'ok', label: '正常，可以承担上传和下载' }
+  return { tone: 'ok', label: '正常运行，可承载上传与下载' }
 }
 
 const QUOTA_UNITS = [
@@ -942,13 +941,13 @@ function QuotaEditor({
   return (
     <div className="space-y-4">
       <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-        每日上传和下载配额按 <b>UTC 0 点</b>（北京时间 08:00）自动重置。单位为字节，填 <b>0</b> 或留空表示<b>不限额</b>。
-        当某个账号的当日配额耗尽后，网盘会自动将后续传输调度给其它可用账号。
+        每日配额于 <b>UTC 0 点</b>（北京时间 08:00）重置。设为 <b>0</b> 或留空表示<b>不设限</b>。
+        单账号配额耗尽后，后续传输将自动调度至其它可用账号。
       </p>
 
       {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
 
-      <Field label="账号备注名" hint="便于在多账号列表与传输记录中识别">
+      <Field label="账号备注" hint="用于在账号列表与传输记录中标识">
         <Input
           value={label}
           onChange={(e) => setLabel(e.target.value)}
@@ -1054,10 +1053,10 @@ function AddAccountFlow({
     return (
       <div className="space-y-4">
         <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-          这必须是<b>另一个手机号</b>的账号。Telegram 的限流和传输配额是按账号算的，用同一个号再申请一组
-          api_id 只是多一个登录会话，速度不会有任何变化。
+          须为<b>不同手机号</b>注册的账号。Telegram 按账号实施限流与配额控制，
+          同一手机号申请多组 api_id 无法提升性能或绕过限制。
         </p>
-        <Field label="备注名" hint="只用来在这个列表里区分账号">
+        <Field label="账号备注" hint="用于在账号列表中标识">
           <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="备用账号" />
         </Field>
         <Field label="api_id">
@@ -1078,7 +1077,7 @@ function AddAccountFlow({
         </Field>
         <Field
           label="代理地址（可选）"
-          hint="支持 socks5://host:port 或 http://host:port，也支持 user:password@；建议每个账号使用不同的出口 IP"
+          hint="支持 socks5://host:port 或 http://host:port；建议各账号使用不同出口 IP"
         >
           <Input
             value={proxyUrl}
@@ -1098,7 +1097,7 @@ function AddAccountFlow({
               const id = Number(appId.trim())
               if (!Number.isInteger(id) || id <= 0) throw new Error('api_id 必须是一串数字')
               if (!/^[a-f0-9]{32}$/i.test(appHash.trim()))
-                throw new Error('api_hash 应该是 32 位十六进制字符')
+                throw new Error('api_hash 必须为 32 位十六进制字符')
               const created = await api.addTelegramAccount({
                 label: label.trim(),
                 appId: id,
@@ -1154,7 +1153,7 @@ function AddAccountFlow({
       <div className="space-y-4">
         <Field
           label="验证码"
-          hint="Telegram 会把验证码发到这个号已登录的其它设备上"
+          hint="Telegram 会将验证码发送至该账号已登录的设备"
           error={error ?? undefined}
         >
           <Input
@@ -1223,8 +1222,7 @@ function AddAccountFlow({
     return (
       <div className="space-y-4">
         <p className="text-xs leading-relaxed text-[var(--muted)]">
-          自动加入没成功。用这个账号在 Telegram 客户端里加入存储频道（并给它管理员权限），
-          然后在下面把频道对上。
+          自动加入失败。请在 Telegram 客户端中将该账号加入存储频道并赋予管理员权限，随后在下方绑定。
         </p>
         <ChannelPicker accountId={accountId} onLinked={onDone} />
         <button
@@ -1240,8 +1238,7 @@ function AddAccountFlow({
   return (
     <div className="space-y-4">
       <p className="text-xs leading-relaxed text-[var(--muted)]">
-        最后一步：把这个账号加入存储频道，并授予发消息、编辑消息和删除消息的权限。
-        编辑和删除是重命名、移动、删除文件时需要的——那些操作会改写别的账号发出的消息。
+        最后一步：将该账号加入存储频道，并授予发消息、编辑消息与删除消息权限（重命名、移动与删除文件需改写消息内容）。
       </p>
       {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
       <Button
@@ -1270,7 +1267,7 @@ function AddAccountFlow({
         onClick={() => void onDone()}
         className="w-full text-xs text-[var(--muted)] transition-colors hover:text-[var(--ink)]"
       >
-        稍后再说（这个账号暂时不会参与传输）
+        稍后配置（该账号暂不参与传输）
       </button>
     </div>
   )

@@ -99,7 +99,7 @@ func MaskProxyURL(raw string) string {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "(无法识别的代理地址)"
+		return "(代理地址无效)"
 	}
 	if parsed.User != nil {
 		if _, hasPassword := parsed.User.Password(); hasPassword {

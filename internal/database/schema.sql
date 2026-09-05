@@ -322,10 +322,19 @@ CREATE INDEX idx_audit_actor ON audit_log (actor_id);
 -- Installed plugins are local configuration, not Telegram index data. They are
 -- kept separate so an index rebuild can never enable, disable, or remove a
 -- plugin. manifest_url and manifest_digest identify the published manifest the
--- administrator confirmed; the manifest itself is stored as received and
+-- installing account confirmed; the manifest itself is stored as received and
 -- validated again before a binary is started.
+--
+-- A plugin is owned by one account. An administrator is an account like any
+-- other here and sees only what they installed themselves. The composite key
+-- is what makes that possible: two people can hold the same plugin id at
+-- different versions, each with its own binary, child process and data
+-- directory. Ownership decides whose data and whose traffic a plugin sees; it
+-- does not sandbox what the plugin can ask the host to do, which is why
+-- installing is gated behind a permission rather than open to everyone.
 CREATE TABLE plugins (
-    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    id              TEXT NOT NULL,
     name            TEXT NOT NULL,
     version         TEXT NOT NULL,
     author          TEXT NOT NULL,
@@ -339,16 +348,22 @@ CREATE TABLE plugins (
     manifest_json   TEXT NOT NULL,
     error           TEXT NOT NULL DEFAULT '',
     installed_at    INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY (user_id, id)
 );
 CREATE INDEX idx_plugins_enabled ON plugins (enabled);
+CREATE INDEX idx_plugins_user ON plugins (user_id);
 
 -- Namespaced plugin state is deliberately opaque to the core. A plugin can
--- persist small settings without opening the host database itself.
+-- persist small settings without opening the host database itself. The
+-- namespace is (owner, plugin), so two accounts running the same plugin do not
+-- share one settings blob.
 CREATE TABLE plugin_data (
-    plugin_id  TEXT NOT NULL REFERENCES plugins (id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    plugin_id  TEXT NOT NULL,
     key        TEXT NOT NULL,
     value      BLOB NOT NULL,
     updated_at INTEGER NOT NULL,
-    PRIMARY KEY (plugin_id, key)
+    PRIMARY KEY (user_id, plugin_id, key),
+    FOREIGN KEY (user_id, plugin_id) REFERENCES plugins (user_id, id) ON DELETE CASCADE
 ) WITHOUT ROWID;

@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/dibin/tdrive/internal/database"
+	"github.com/dibin/tdrive/internal/plugin"
 )
 
 type pluginInspectRequest struct {
@@ -28,7 +29,16 @@ type pluginEnabledRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
-// pluginRoutes is mounted only inside the authenticated administrator group.
+// pluginRoutes is mounted inside the authenticated group rather than the
+// administrator one, because plugins are installed per account: every endpoint
+// here acts on the caller's own installations and can see nobody else's.
+//
+// Which accounts may install is a permission (PermPlugins, held by the admin
+// role by default) rather than a role. Reading and configuring what you
+// already own needs nothing extra — the list is yours by construction, and the
+// plugin's own UI writes the same state through the host data bridge anyway.
+// Everything that reaches the network or starts a child process is gated.
+//
 // The installation endpoint deliberately has one boolean confirmation and no
 // capability array: the plugin trust model is explicit and all-or-nothing.
 func (s *Server) pluginRoutes(r chi.Router) {
@@ -37,19 +47,23 @@ func (s *Server) pluginRoutes(r chi.Router) {
 	}
 	r.Route("/plugins", func(r chi.Router) {
 		r.Get("/", s.handleListPlugins)
-		r.Get("/updates", s.handlePluginUpdates)
-		r.Get("/store", s.handlePluginStore)
-		r.Post("/inspect", s.handleInspectPlugin)
-		r.Post("/install", s.handleInstallPlugin)
-		r.Post("/{id}/enable", s.handleSetPluginEnabled)
 		r.Get("/{id}/settings", s.handlePluginSettings)
 		r.Put("/{id}/settings", s.handleUpdatePluginSettings)
-		r.Delete("/{id}", s.handleUninstallPlugin)
+
+		r.Group(func(r chi.Router) {
+			r.Use(s.auth.RequirePerm(database.PermPlugins))
+			r.Get("/updates", s.handlePluginUpdates)
+			r.Get("/store", s.handlePluginStore)
+			r.Post("/inspect", s.handleInspectPlugin)
+			r.Post("/install", s.handleInstallPlugin)
+			r.Post("/{id}/enable", s.handleSetPluginEnabled)
+			r.Delete("/{id}", s.handleUninstallPlugin)
+		})
 	})
 }
 
 func (s *Server) handleListPlugins(w http.ResponseWriter, r *http.Request) {
-	plugins, err := s.plugins.List(r.Context())
+	plugins, err := s.plugins.List(r.Context(), currentUser(r).ID)
 	if err != nil {
 		s.fail(w, err, "list plugins")
 		return
@@ -64,7 +78,7 @@ func (s *Server) handleListPlugins(w http.ResponseWriter, r *http.Request) {
 // installation — the plugin trust model does not soften because the plugin is
 // already there. refresh=1 bypasses the cached answer.
 func (s *Server) handlePluginUpdates(w http.ResponseWriter, r *http.Request) {
-	report, err := s.plugins.CheckUpdates(r.Context(), r.URL.Query().Get("refresh") == "1")
+	report, err := s.plugins.CheckUpdates(r.Context(), currentUser(r).ID, r.URL.Query().Get("refresh") == "1")
 	if err != nil {
 		s.fail(w, err, "check plugin updates")
 		return
@@ -72,13 +86,22 @@ func (s *Server) handlePluginUpdates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
+// handlePluginStore returns the store index marked up with what the caller has
+// already installed. The index itself is a public document and the same for
+// everybody; only the "installed" flag is personal.
 func (s *Server) handlePluginStore(w http.ResponseWriter, r *http.Request) {
-	index, err := s.plugins.Store(r.Context(), r.URL.Query().Get("q"))
+	items, err := s.plugins.StoreWithStatus(r.Context(), currentUser(r).ID, r.URL.Query().Get("q"))
 	if err != nil {
 		s.fail(w, err, "plugin store")
 		return
 	}
-	writeJSON(w, http.StatusOK, index)
+	writeJSON(w, http.StatusOK, pluginStoreResponse{Plugins: items})
+}
+
+// pluginStoreResponse keeps the wire shape the WebUI already reads. The
+// per-user installed markers ride along inside each entry.
+type pluginStoreResponse struct {
+	Plugins []plugin.StoreStatus `json:"plugins"`
 }
 
 func (s *Server) handleInspectPlugin(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +109,7 @@ func (s *Server) handleInspectPlugin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	inspection, err := s.plugins.Inspect(r.Context(), request.ManifestURL, request.ManifestDigest)
+	inspection, err := s.plugins.Inspect(r.Context(), currentUser(r).ID, request.ManifestURL, request.ManifestDigest)
 	if err != nil {
 		s.fail(w, err, "inspect plugin")
 		return
@@ -108,7 +131,7 @@ func (s *Server) handleInstallPlugin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "plugin installation requires one confirmation")
 		return
 	}
-	installed, err := s.plugins.Install(r.Context(), request.InspectionID)
+	installed, err := s.plugins.Install(r.Context(), currentUser(r).ID, request.InspectionID)
 	if err != nil {
 		s.fail(w, err, "install plugin")
 		return
@@ -123,7 +146,7 @@ func (s *Server) handleSetPluginEnabled(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	status, err := s.plugins.SetEnabled(r.Context(), id, request.Enabled)
+	status, err := s.plugins.SetEnabled(r.Context(), currentUser(r).ID, id, request.Enabled)
 	if err != nil {
 		s.fail(w, err, "set plugin state")
 		return
@@ -138,7 +161,7 @@ func (s *Server) handleSetPluginEnabled(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleUninstallPlugin(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.plugins.Uninstall(r.Context(), id); err != nil {
+	if err := s.plugins.Uninstall(r.Context(), currentUser(r).ID, id); err != nil {
 		s.fail(w, err, "uninstall plugin")
 		return
 	}
@@ -147,7 +170,7 @@ func (s *Server) handleUninstallPlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePluginSettings(w http.ResponseWriter, r *http.Request) {
-	value, err := s.plugins.Settings(r.Context(), chi.URLParam(r, "id"))
+	value, err := s.plugins.Settings(r.Context(), currentUser(r).ID, chi.URLParam(r, "id"))
 	if err != nil {
 		s.fail(w, err, "read plugin settings")
 		return
@@ -169,7 +192,7 @@ func (s *Server) handleUpdatePluginSettings(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "plugin settings must be valid JSON")
 		return
 	}
-	if err := s.plugins.UpdateSettings(r.Context(), chi.URLParam(r, "id"), value); err != nil {
+	if err := s.plugins.UpdateSettings(r.Context(), currentUser(r).ID, chi.URLParam(r, "id"), value); err != nil {
 		s.fail(w, err, "update plugin settings")
 		return
 	}

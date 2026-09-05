@@ -86,7 +86,7 @@ func (s *Server) handlePermissionCatalog(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"all":         database.AllPermNames(),
 		"userDefault": database.PermNames(database.DefaultUserPerms),
-		"adminNote":   "管理员始终拥有全部权限，无法逐项关闭",
+		"adminNote":   "管理员始终拥有全部权限，不可逐项关闭。",
 	})
 }
 
@@ -115,7 +115,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.QuotaBytes < 0 {
-		writeError(w, http.StatusBadRequest, "配额不能是负数")
+		writeError(w, http.StatusBadRequest, "配额不能为负数。")
 		return
 	}
 
@@ -190,7 +190,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		if !*req.Enabled {
 			if id == currentUser(r).ID {
-				writeError(w, http.StatusBadRequest, "不能停用自己的账号")
+				writeError(w, http.StatusBadRequest, "无法停用当前登录的账号。")
 				return
 			}
 			// The same reasoning as refusing to delete the last admin: a
@@ -203,7 +203,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if admins <= 1 {
-					writeError(w, http.StatusBadRequest, "不能停用最后一个可用的管理员")
+					writeError(w, http.StatusBadRequest, "系统必须保留至少一个启用的管理员账号。")
 					return
 				}
 			}
@@ -230,7 +230,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 	if req.QuotaBytes != nil {
 		if *req.QuotaBytes < 0 {
-			writeError(w, http.StatusBadRequest, "配额不能是负数")
+			writeError(w, http.StatusBadRequest, "配额不能为负数。")
 			return
 		}
 		profile.QuotaBytes = req.QuotaBytes
@@ -261,6 +261,12 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err, "update user")
 			return
 		}
+		// Its plugin children would otherwise keep running with the host's
+		// privileges, and an account whose code still executes is not
+		// disabled. The rows stay, so re-enabling brings the plugins back.
+		if s.plugins != nil {
+			s.plugins.StopAllForUser(r.Context(), id)
+		}
 	}
 	if err := s.drive.EnsureScopeRoot(r.Context(), drive.ScopeOf(fresh)); err != nil {
 		s.log.Warn("could not create an account's home directory",
@@ -288,7 +294,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == currentUser(r).ID {
-		writeError(w, http.StatusBadRequest, "不能删除自己的账号")
+		writeError(w, http.StatusBadRequest, "无法删除当前登录的账号。")
 		return
 	}
 
@@ -306,7 +312,19 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if admins <= 1 {
-			writeError(w, http.StatusBadRequest, "不能删除最后一个管理员")
+			writeError(w, http.StatusBadRequest, "系统必须保留至少一个管理员账号。")
+			return
+		}
+	}
+
+	// The cascade on plugins.user_id removes the rows, but a database delete
+	// cannot stop a child process or reclaim a binary. Tearing the account's
+	// plugins down first means a failure here leaves the account — and its
+	// plugins — intact, rather than leaving orphaned processes running with
+	// tdrive's privileges and nobody to own them.
+	if s.plugins != nil {
+		if err := s.plugins.RemoveAllForUser(r.Context(), id); err != nil {
+			s.fail(w, err, "delete user")
 			return
 		}
 	}
@@ -393,7 +411,7 @@ func (s *Server) handleSetUserRole(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if admins <= 1 {
-				writeError(w, http.StatusBadRequest, "不能降级最后一个管理员")
+				writeError(w, http.StatusBadRequest, "系统必须保留至少一个管理员账号。")
 				return
 			}
 		}

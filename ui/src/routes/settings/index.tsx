@@ -10,7 +10,7 @@ import {
   SlidersHorizontal,
   Users,
 } from 'lucide-react'
-import { api, type RuntimeSettings } from '../../lib/api'
+import { api, can, type Perm, type RuntimeSettings } from '../../lib/api'
 import { useApp } from '../../app/context'
 import { formatBytes } from '../../lib/format'
 import { Button, Meter, Select, Spinner, toast } from '../../components/primitives'
@@ -40,25 +40,30 @@ interface TabItem {
   label: string
   icon: typeof SlidersHorizontal
   adminOnly?: boolean
+  /** A permission gate, for pages an administrator can hand out without
+   *  handing out the role. */
+  permission?: Perm
 }
 
 const TABS: TabItem[] = [
-  { id: 'account', label: '概览', icon: Gauge },
+  { id: 'account', label: '用量与权限', icon: Gauge },
   { id: 'security', label: '账号与安全', icon: KeyRound },
-  { id: 'users', label: '用户管理', icon: Users, adminOnly: true },
+  { id: 'users', label: '账号管理', icon: Users, adminOnly: true },
   { id: 'telegram', label: 'Telegram', icon: Send, adminOnly: true },
   { id: 'performance', label: '性能参数', icon: SlidersHorizontal, adminOnly: true },
   { id: 'storage', label: '存储与暂存', icon: HardDrive, adminOnly: true },
-  { id: 'maintenance', label: '索引与日志', icon: Database, adminOnly: true },
-  { id: 'plugins', label: '插件', icon: Blocks, adminOnly: true },
+  { id: 'maintenance', label: '维护与日志', icon: Database, adminOnly: true },
+  { id: 'plugins', label: '插件管理', icon: Blocks, permission: 'plugins' },
 ]
 
-export function Settings() {
+export function Settings({ onNavigate }: { onNavigate: (to: string) => void }) {
   const { user, status, refreshStatus } = useApp()
   const [tab, setTab] = useState<Tab>('account')
 
   const isAdmin = user?.role === 'admin'
-  const visibleTabs = TABS.filter((t) => !t.adminOnly || isAdmin)
+  const visibleTabs = TABS.filter(
+    (t) => (!t.adminOnly || isAdmin) && (!t.permission || can(user, t.permission)),
+  )
 
   return (
     <div className="h-full min-h-0 flex-1 overflow-y-auto">
@@ -66,7 +71,7 @@ export function Settings() {
         <header className="mb-6">
           <h1 className="display text-xl">设置</h1>
           <p className="mt-1 text-sm text-[var(--muted)]">
-            已登录为 {user?.username}
+            当前登录：{user?.username}
             {isAdmin ? '（管理员）' : ''}
           </p>
         </header>
@@ -102,7 +107,7 @@ export function Settings() {
             {tab === 'performance' && isAdmin && <PerformancePage />}
             {tab === 'storage' && isAdmin && <StoragePage onChanged={refreshStatus} />}
             {tab === 'maintenance' && isAdmin && <MaintenancePage />}
-            {tab === 'plugins' && isAdmin && <PluginsPage />}
+            {tab === 'plugins' && can(user, 'plugins') && <PluginsPage onNavigate={onNavigate} />}
           </div>
         </div>
       </div>
@@ -130,7 +135,7 @@ function OverviewPage() {
 
   return (
     <div className="space-y-4">
-      <Section icon={<Gauge size={16} />} title="我的用量">
+      <Section icon={<Gauge size={16} />} title="存储用量">
         <div className="space-y-3">
           {quotaSet ? (
             <Meter
@@ -148,9 +153,8 @@ function OverviewPage() {
 
           {user.scopePath && (
             <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs text-[var(--muted)]">
-              这个账号被限定在{' '}
-              <span className="font-[family-name:var(--font-mono)] text-[var(--ink)]">{user.scopePath}</span>{' '}
-              目录内，在文件页看到的根目录就是它。
+              当前账号根目录限定于{' '}
+              <span className="font-[family-name:var(--font-mono)] text-[var(--ink)]">{user.scopePath}</span>。
             </p>
           )}
         </div>
@@ -158,9 +162,9 @@ function OverviewPage() {
 
       <Section
         icon={<KeyRound size={16} />}
-        title="我的权限"
+        title="账号权限"
         description={
-          user.permsInherited ? '当前跟随角色的默认权限。' : '管理员为这个账号单独配置过权限。'
+          user.permsInherited ? '继承角色的默认权限。' : '管理员单独分配的权限。'
         }
       >
         <div className="flex flex-wrap gap-1.5">
@@ -198,18 +202,18 @@ function OverviewPage() {
       {isAdmin && settings && (
         <Section
           icon={<SlidersHorizontal size={16} />}
-          title="当前运行参数"
-          description="完整调整在「性能参数」和「存储与暂存」里。"
+          title="运行参数摘要"
+          description="完整配置请前往「性能参数」与「存储与暂存」。"
         >
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Stat label="存储分片" value={formatBytes(settings.segmentSize)} />
             <Stat label="上传分片" value={`${settings.uploadPartSize / 1024} KiB`} />
-            <Stat label="同时上传" value={`${settings.uploadConcurrency} 个`} />
-            <Stat label="同时下载" value={`${settings.downloadConcurrency} 个`} />
+            <Stat label="上传并发" value={`${settings.uploadConcurrency} 项`} />
+            <Stat label="下载并发" value={`${settings.downloadConcurrency} 项`} />
           </div>
           <p className="mt-3 text-xs text-[var(--muted)]">
-            版本 {status?.version ?? '—'} · WebDAV{' '}
-            {settings.webdavEnabled ? `已启用（${status?.webdavPath ?? '/dav'}）` : '已关闭'}
+            系统版本 {status?.version ?? '—'} · WebDAV{' '}
+            {settings.webdavEnabled ? `已开启（${status?.webdavPath ?? '/dav'}）` : '已停用'}
           </p>
         </Section>
       )}
@@ -236,11 +240,12 @@ const PERM_TEXT: Record<string, string> = {
   upload: '上传',
   uploadLocal: 'VPS 本地上传',
   remoteFetch: '离线下载',
-  mkdir: '新建文件夹',
+  mkdir: '新建目录',
   rename: '重命名',
   move: '移动',
   delete: '删除',
   webdav: 'WebDAV',
   stage: '服务器暂存',
   share: '生成直链',
+  plugins: '插件',
 }

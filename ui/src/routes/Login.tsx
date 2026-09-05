@@ -26,7 +26,7 @@ export function Login() {
     <div className="mx-auto flex min-h-full max-w-sm flex-col justify-center px-5 py-12">
       <div className="mb-8">
         <Logo />
-        <h1 className="display mt-5 text-2xl">欢迎回来</h1>
+        <h1 className="display mt-5 text-2xl">登录网盘</h1>
       </div>
 
       {/* A real form so password managers offer to fill it. */}
@@ -53,7 +53,7 @@ export function Login() {
       </form>
 
       <p className="mt-5 text-center text-xs leading-relaxed text-[var(--faint)]">
-        同一套账号密码也用于 WebDAV。
+        此账号密码同时适用于 WebDAV。
       </p>
     </div>
   )

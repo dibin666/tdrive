@@ -188,12 +188,12 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Items) == 0 {
-		writeError(w, http.StatusBadRequest, "没有要重命名的项目")
+		writeError(w, http.StatusBadRequest, "未选择要重命名的项目。")
 		return
 	}
 	if len(req.Items) > MaxBatchRename {
 		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("一次最多重命名 %d 项", MaxBatchRename))
+			fmt.Sprintf("单次最多重命名 %d 项。", MaxBatchRename))
 		return
 	}
 
@@ -219,7 +219,7 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if real == drive.Root {
-			writeError(w, http.StatusBadRequest, "不能重命名根目录")
+			writeError(w, http.StatusBadRequest, "禁止重命名根目录。")
 			return
 		}
 		name := strings.TrimSpace(item.Name)
@@ -228,7 +228,7 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if seen[real] {
-			writeError(w, http.StatusBadRequest, "同一项在一次批量重命名里出现了两次")
+			writeError(w, http.StatusBadRequest, "批量重命名列表中包含重复项。")
 			return
 		}
 		seen[real] = true
@@ -251,7 +251,7 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 		target := drive.Join(parent, name)
 		if targets[target] {
 			writeError(w, http.StatusBadRequest,
-				fmt.Sprintf("重命名后会有两项都叫 %q", name))
+				fmt.Sprintf("重命名结果产生重复名称：%q。", name))
 			return
 		}
 		targets[target] = true
@@ -278,7 +278,7 @@ func (s *Server) handleBatchRename(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if taken {
-			writeError(w, http.StatusConflict, fmt.Sprintf("目标名称 %q 已存在", p.newName))
+			writeError(w, http.StatusConflict, fmt.Sprintf("目标名称 %q 已存在。", p.newName))
 			return
 		}
 	}

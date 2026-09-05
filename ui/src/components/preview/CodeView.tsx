@@ -59,8 +59,7 @@ export default function CodeView({ entry, link }: ViewerProps) {
     return (
       <div className="flex h-full items-center justify-center p-8">
         <p className="max-w-sm text-center text-sm text-[var(--muted)]">
-          文本预览上限是 {formatBytes(TEXT_PREVIEW_LIMIT)}，这个文件有 {formatBytes(entry.size)}。
-          下载后用编辑器打开吧。
+          文本超出预览大小上限（{formatBytes(TEXT_PREVIEW_LIMIT)}，当前 {formatBytes(entry.size)}）。请下载后在本地查看。
         </p>
       </div>
     )

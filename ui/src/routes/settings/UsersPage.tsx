@@ -44,18 +44,23 @@ import { Section } from './shared'
  */
 
 const PERM_LABELS: Record<Perm, { label: string; hint: string; group: string }> = {
-  read: { label: '浏览', hint: '查看目录和文件列表', group: '基础' },
-  download: { label: '下载', hint: '读取文件内容、预览、生成媒体链接', group: '基础' },
+  read: { label: '浏览', hint: '查看目录结构与文件列表', group: '基础' },
+  download: { label: '下载', hint: '下载文件、在线预览与媒体流读取', group: '基础' },
   upload: { label: '上传', hint: '从浏览器上传文件', group: '写入' },
-  mkdir: { label: '新建文件夹', hint: '', group: '写入' },
-  rename: { label: '重命名', hint: '包含批量重命名', group: '写入' },
-  move: { label: '移动', hint: '', group: '写入' },
-  delete: { label: '删除', hint: '会同时删除 Telegram 上的消息', group: '写入' },
-  webdav: { label: 'WebDAV', hint: '允许用这套账号密码挂载网络驱动器', group: '接入方式' },
-  share: { label: '生成直链', hint: '创建可复用的下载链接', group: '接入方式' },
-  uploadLocal: { label: 'VPS 本地上传', hint: '可读取服务器上挂载的目录', group: '服务器资源' },
-  remoteFetch: { label: '离线下载', hint: '让服务器代为抓取外部 URL', group: '服务器资源' },
-  stage: { label: '服务器暂存', hint: '下载前先在服务器磁盘上拼装文件', group: '服务器资源' },
+  mkdir: { label: '新建目录', hint: '创建子目录', group: '写入' },
+  rename: { label: '重命名', hint: '单项与批量重命名', group: '写入' },
+  move: { label: '移动', hint: '调整文件或目录所在路径', group: '写入' },
+  delete: { label: '删除', hint: '同步删除 Telegram 对应存储消息', group: '写入' },
+  webdav: { label: 'WebDAV', hint: '使用此账号凭据挂载 WebDAV 驱动器', group: '接入方式' },
+  share: { label: '生成直链', hint: '生成可复用的文件直链', group: '接入方式' },
+  uploadLocal: { label: 'VPS 本地上传', hint: '直接添加服务器本地挂载目录中的文件', group: '服务器资源' },
+  remoteFetch: { label: '离线下载', hint: '由服务器代下载远程 URL 文件', group: '服务器资源' },
+  stage: { label: '服务器暂存', hint: '下载前在服务器本地组装分卷文件', group: '服务器资源' },
+  plugins: {
+    label: '插件管理',
+    hint: '安装、更新与卸载个人插件。插件以独立子进程运行并具备 tdrive 宿主权限',
+    group: '服务器资源',
+  },
 }
 
 const PERM_GROUPS = ['基础', '写入', '接入方式', '服务器资源']
@@ -105,7 +110,7 @@ export function UsersPage({ currentUserId }: { currentUserId: string }) {
   }
 
   const remove = async (user: User) => {
-    if (!confirm(`删除账号 ${user.username}？该账号上传的文件不会被删除，但会失去归属。`)) return
+    if (!confirm(`确定删除账号 ${user.username}？该账号上传的文件将保留，但归属标记将清除。`)) return
     try {
       await api.deleteUser(user.id)
       toast(`已删除 ${user.username}`, 'success')
@@ -116,7 +121,7 @@ export function UsersPage({ currentUserId }: { currentUserId: string }) {
   }
 
   const revokeAll = async (user: User) => {
-    if (!confirm(`注销 ${user.username} 的全部登录会话？`)) return
+    if (!confirm(`确定注销 ${user.username} 的所有登录会话？`)) return
     try {
       await api.revokeUserSessions(user.id)
       toast('已注销该账号的全部会话', 'success')
@@ -137,7 +142,7 @@ export function UsersPage({ currentUserId }: { currentUserId: string }) {
     },
     {
       id: 'role',
-      label: user.role === 'admin' ? '降级为普通用户' : '提升为管理员',
+      label: user.role === 'admin' ? '设为普通用户' : '设为管理员',
       icon: <ShieldCheck size={14} />,
       onSelect: async () => {
         try {
@@ -172,8 +177,8 @@ export function UsersPage({ currentUserId }: { currentUserId: string }) {
     <>
       <Section
         icon={<Users size={16} />}
-        title="账号"
-        description="所有账号共用同一个网盘。权限决定一个账号能做什么，目录范围决定它能看到哪一部分。"
+        title="账号列表"
+        description="所有账号共享网盘存储。可通过权限与限定目录隔离各自的访问范围。"
         actions={
           <Button icon={<UserPlus size={15} />} onClick={() => setCreating(true)}>
             添加账号
@@ -196,7 +201,7 @@ export function UsersPage({ currentUserId }: { currentUserId: string }) {
             options={[
               { value: 'all', label: '全部角色' },
               { value: 'admin', label: '管理员' },
-              { value: 'user', label: '普通' },
+              { value: 'user', label: '普通用户' },
             ]}
           />
           <Segmented
@@ -479,15 +484,15 @@ function UserDrawer({
           <h3 className="mb-2 text-sm font-medium">权限</h3>
           {isAdmin ? (
             <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-              管理员始终拥有全部权限，无法逐项关闭。要限制这个账号，请先把它降级为普通用户。
+              管理员始终拥有全部权限，不可逐项调整。如需限制权限，请先将该账号设为普通用户。
             </p>
           ) : (
             <>
               <Switch
                 checked={inherit}
                 onChange={setInherit}
-                label="跟随角色默认权限"
-                hint="关闭后可以逐项控制这个账号能做什么"
+                label="继承角色默认权限"
+                hint="关闭后可单独为此账号分配权限"
               />
               {!inherit && (
                 <div className="mt-4 border-t border-[var(--line)] pt-4">
@@ -499,10 +504,10 @@ function UserDrawer({
         </section>
 
         <section className="border-t border-[var(--line)] pt-5">
-          <h3 className="mb-2 text-sm font-medium">目录范围</h3>
+          <h3 className="mb-2 text-sm font-medium">根目录限定</h3>
           <Field
             label="限定目录"
-            hint="留空表示可以访问整个网盘。填写后这个账号只能看到该目录，并把它当作自己的根目录。"
+            hint="留空表示可访问全盘。填写后该目录将作为该账号的根目录。"
           >
             <Input
               value={scope}
@@ -540,12 +545,12 @@ function UserDrawer({
             </div>
           )}
           <p className="mt-2 text-xs leading-relaxed text-[var(--faint)]">
-            配额按这个账号上传的文件累计。归属信息会写进 Telegram 消息标签，重建索引后依然准确。
+            配额按该账号上传的文件大小累计。归属标记写入 Telegram 消息标签，重建索引后不丢失。
           </p>
         </section>
 
         <section className="border-t border-[var(--line)] pt-5">
-          <Field label="备注" hint="只有管理员看得到">
+          <Field label="备注" hint="仅管理员可见">
             <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="例如：家里的电视盒子" />
           </Field>
         </section>
@@ -558,7 +563,7 @@ function UserDrawer({
           {sessions === null ? (
             <Spinner />
           ) : sessions.length === 0 ? (
-            <p className="text-xs text-[var(--muted)]">当前没有登录中的会话。</p>
+            <p className="text-xs text-[var(--muted)]">暂无活动会话。</p>
           ) : (
             <div className="space-y-1.5">
               {sessions.map((session) => (
@@ -606,13 +611,13 @@ function UserDrawer({
             </Button>
           </div>
           <p className="mt-1.5 text-xs text-[var(--faint)]">
-            重置后这个账号的全部会话都会失效，WebDAV 也要用新密码。
+            重置后该账号的所有登录会话将失效，WebDAV 需使用新密码重新挂载。
           </p>
         </section>
 
         {isSelf && (
           <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs text-[var(--muted)]">
-            这是你自己的账号，无法在这里停用或删除。
+            当前登录账号不可在此停用或删除。
           </p>
         )}
       </div>
@@ -712,7 +717,7 @@ function NewUserModal({
           </Field>
         </div>
 
-        <Field label="角色" hint="管理员可以修改设置、管理账号和重建索引">
+        <Field label="角色" hint="管理员拥有系统设置、账号管理及索引维护权限">
           <Select value={role} onChange={(e) => setRole(e.target.value as 'user' | 'admin')}>
             <option value="user">普通用户</option>
             <option value="admin">管理员</option>
@@ -720,7 +725,7 @@ function NewUserModal({
         </Field>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="限定目录" hint="留空表示整个网盘">
+          <Field label="限定目录" hint="留空表示全盘">
             <Input
               value={scope}
               onChange={(e) => setScope(e.target.value)}
@@ -751,7 +756,7 @@ function NewUserModal({
               checked={customPerms}
               onChange={setCustomPerms}
               label="自定义权限"
-              hint="默认给予浏览、下载、上传、改名、移动、删除和 WebDAV"
+              hint="默认包含浏览、下载、上传、重命名、移动、删除及 WebDAV"
             />
             {customPerms && (
               <div className="mt-4">
@@ -804,7 +809,7 @@ export function SessionList({
   onRevoke: (id: string) => void
 }) {
   if (sessions.length === 0) {
-    return <p className="text-xs text-[var(--muted)]">当前没有其它登录中的会话。</p>
+    return <p className="text-xs text-[var(--muted)]">暂无其它活动会话。</p>
   }
   return (
     <div className="space-y-1.5">

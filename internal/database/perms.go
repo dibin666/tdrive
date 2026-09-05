@@ -41,6 +41,16 @@ const (
 	PermStage
 	// PermShare allows minting durable, reusable download links.
 	PermShare
+	// PermPlugins allows installing, updating, enabling and removing this
+	// account's own plugins.
+	//
+	// It is deliberately absent from DefaultUserPerms. A plugin is a
+	// standalone executable that runs as a child of tdrive with the tdrive
+	// process's full privileges (see internal/plugin/manager.go). Per-account
+	// ownership decides whose data and whose traffic a plugin sees; it does
+	// not sandbox what a plugin can ask the host to do. Granting this is
+	// granting code execution, not a feature toggle.
+	PermPlugins
 )
 
 // permNames is the wire vocabulary. The bitmask is a storage detail; the API
@@ -62,13 +72,14 @@ var permNames = []struct {
 	{PermWebDAV, "webdav"},
 	{PermStage, "stage"},
 	{PermShare, "share"},
+	{PermPlugins, "plugins"},
 }
 
 // AllPerms is every permission set at once, which is what an administrator
 // effectively holds.
 const AllPerms = PermRead | PermDownload | PermUpload | PermUploadLocal |
 	PermRemoteFetch | PermMkdir | PermRename | PermMove | PermDelete |
-	PermWebDAV | PermStage | PermShare
+	PermWebDAV | PermStage | PermShare | PermPlugins
 
 // DefaultUserPerms is what a plain account gets when nothing has been
 // customised. It matches exactly what every account could do before
@@ -76,7 +87,9 @@ const AllPerms = PermRead | PermDownload | PermUpload | PermUploadLocal |
 //
 // PermUploadLocal, PermRemoteFetch and PermStage are excluded: each of them
 // spends a server-side resource (the host filesystem, outbound bandwidth,
-// disk) rather than only the account's own bytes.
+// disk) rather than only the account's own bytes. PermPlugins is excluded for
+// a stronger reason — it runs a chosen executable with tdrive's privileges,
+// so it is admin-only until somebody deliberately hands it out.
 const DefaultUserPerms = PermRead | PermDownload | PermUpload | PermMkdir |
 	PermRename | PermMove | PermDelete | PermWebDAV | PermShare
 

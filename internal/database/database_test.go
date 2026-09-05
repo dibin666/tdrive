@@ -291,6 +291,116 @@ func TestMigrateV3PreservesDownloadHistory(t *testing.T) {
 	}
 }
 
+// The v9 step rebuilds both plugin tables to add an owner column, which under
+// foreign_keys=1 means dropping and recreating them in a load-bearing order. A
+// mistake here does not fail a query, it stops the database opening at all —
+// and it can silently drop a plugin's persisted settings on the way.
+func TestMigrateV9AttributesPluginsToTheOldestAdministrator(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v9.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Two administrators, created in a known order. The migration has to pick
+	// the older one, because that is the account that has been able to install
+	// plugins for longest.
+	first, err := db.CreateUser(ctx, "first-admin", "hash", RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := db.write.ExecContext(ctx,
+		`UPDATE users SET created_at = 1000 WHERE id = ?`, first.ID); err != nil {
+		t.Fatalf("age the first admin: %v", err)
+	}
+	second, err := db.CreateUser(ctx, "second-admin", "hash", RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := db.write.ExecContext(ctx,
+		`UPDATE users SET created_at = 2000 WHERE id = ?`, second.ID); err != nil {
+		t.Fatalf("age the second admin: %v", err)
+	}
+
+	// Rewind to the v9 shape: plugin tables keyed by plugin id alone.
+	for _, stmt := range []string{
+		`DROP TABLE plugin_data`,
+		`DROP TABLE plugins`,
+		`CREATE TABLE plugins (
+			id              TEXT PRIMARY KEY,
+			name            TEXT NOT NULL,
+			version         TEXT NOT NULL,
+			author          TEXT NOT NULL,
+			enabled         INTEGER NOT NULL DEFAULT 1,
+			status          TEXT NOT NULL DEFAULT 'disabled',
+			source          TEXT NOT NULL,
+			manifest_url    TEXT NOT NULL,
+			manifest_digest TEXT NOT NULL,
+			binary_digest   TEXT NOT NULL,
+			binary_path     TEXT NOT NULL,
+			manifest_json   TEXT NOT NULL,
+			error           TEXT NOT NULL DEFAULT '',
+			installed_at    INTEGER NOT NULL,
+			updated_at      INTEGER NOT NULL
+		)`,
+		`CREATE TABLE plugin_data (
+			plugin_id  TEXT NOT NULL REFERENCES plugins (id) ON DELETE CASCADE,
+			key        TEXT NOT NULL,
+			value      BLOB NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (plugin_id, key)
+		) WITHOUT ROWID`,
+		`INSERT INTO plugins VALUES ('aliyunpan', 'Aliyun', '1.0.0', 'dibin', 1, 'active',
+			'release', 'https://example.com/tdrive.plugin.json', 'md', 'bd',
+			'/plugins/aliyunpan', '{}', '', 1, 1)`,
+		`INSERT INTO plugin_data VALUES ('aliyunpan', 'settings', '{"token":"keep-me"}', 1)`,
+		`PRAGMA user_version = 9`,
+	} {
+		if _, err := db.write.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rewind to v9 (%s): %v", stmt, err)
+		}
+	}
+	db.Close()
+
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen after the v9 migration: %v", err)
+	}
+	defer upgraded.Close()
+
+	record, err := upgraded.PluginByID(ctx, first.ID, "aliyunpan")
+	if err != nil {
+		t.Fatalf("the plugin did not land on the oldest administrator: %v", err)
+	}
+	if record.Version != "1.0.0" || record.BinaryPath != "/plugins/aliyunpan" {
+		t.Fatalf("the row changed across the migration: %+v", record)
+	}
+	if _, err := upgraded.PluginByID(ctx, second.ID, "aliyunpan"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the plugin was also attributed to the newer administrator: %v", err)
+	}
+
+	// A plugin's settings are the part that cannot be reconstructed — the
+	// aliyunpan plugin keeps its OAuth tokens there — so the carry-across
+	// matters more than the metadata.
+	value, err := upgraded.PluginData(ctx, first.ID, "aliyunpan", "settings")
+	if err != nil {
+		t.Fatalf("plugin settings did not survive the migration: %v", err)
+	}
+	if string(value) != `{"token":"keep-me"}` {
+		t.Fatalf("plugin settings changed across the migration: %s", value)
+	}
+
+	var violations int
+	if err := upgraded.read.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		t.Fatalf("foreign_key_check: %v", err)
+	}
+	if violations != 0 {
+		t.Fatalf("the migration left %d foreign key violations", violations)
+	}
+}
+
 func TestPluginMetadataAndDataAreIndependentFromDriveIndex(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, filepath.Join(t.TempDir(), "plugins.db"))
@@ -299,7 +409,13 @@ func TestPluginMetadataAndDataAreIndependentFromDriveIndex(t *testing.T) {
 	}
 	defer db.Close()
 
+	owner, err := db.CreateUser(ctx, "owner", "hash", RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
 	pluginRecord := PluginRecord{
+		UserID:         owner.ID,
 		ID:             "example",
 		Name:           "Example",
 		Version:        "1.0.0",
@@ -318,10 +434,10 @@ func TestPluginMetadataAndDataAreIndependentFromDriveIndex(t *testing.T) {
 	if err := db.UpsertPlugin(ctx, pluginRecord); err != nil {
 		t.Fatalf("UpsertPlugin: %v", err)
 	}
-	if err := db.SetPluginData(ctx, pluginRecord.ID, "settings", []byte(`{"enabled":true}`)); err != nil {
+	if err := db.SetPluginData(ctx, owner.ID, pluginRecord.ID, "settings", []byte(`{"enabled":true}`)); err != nil {
 		t.Fatalf("SetPluginData: %v", err)
 	}
-	value, err := db.PluginData(ctx, pluginRecord.ID, "settings")
+	value, err := db.PluginData(ctx, owner.ID, pluginRecord.ID, "settings")
 	if err != nil {
 		t.Fatalf("PluginData: %v", err)
 	}
@@ -329,24 +445,24 @@ func TestPluginMetadataAndDataAreIndependentFromDriveIndex(t *testing.T) {
 		t.Fatalf("plugin data changed: %s", value)
 	}
 
-	updated, err := db.UpdatePluginState(ctx, pluginRecord.ID, false, PluginStatusDisabled, "")
+	updated, err := db.UpdatePluginState(ctx, owner.ID, pluginRecord.ID, false, PluginStatusDisabled, "")
 	if err != nil {
 		t.Fatalf("UpdatePluginState: %v", err)
 	}
 	if updated.Enabled || updated.Status != PluginStatusDisabled {
 		t.Fatalf("plugin state was not updated: %+v", updated)
 	}
-	updated, err = db.UpdatePluginStatus(ctx, pluginRecord.ID, PluginStatusError, "temporary failure")
+	updated, err = db.UpdatePluginStatus(ctx, owner.ID, pluginRecord.ID, PluginStatusError, "temporary failure")
 	if err != nil {
 		t.Fatalf("UpdatePluginStatus: %v", err)
 	}
 	if updated.Enabled || updated.Status != PluginStatusError || updated.Error != "temporary failure" {
 		t.Fatalf("status update changed the wrong fields: %+v", updated)
 	}
-	if _, err := db.UpdatePluginStatusIfEnabled(ctx, pluginRecord.ID, PluginStatusActive, ""); !errors.Is(err, ErrNotFound) {
+	if _, err := db.UpdatePluginStatusIfEnabled(ctx, owner.ID, pluginRecord.ID, PluginStatusActive, ""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("UpdatePluginStatusIfEnabled on disabled plugin = %v, want ErrNotFound", err)
 	}
-	plugins, err := db.ListPlugins(ctx)
+	plugins, err := db.ListPlugins(ctx, owner.ID)
 	if err != nil || len(plugins) != 1 {
 		t.Fatalf("ListPlugins = %#v, %v", plugins, err)
 	}

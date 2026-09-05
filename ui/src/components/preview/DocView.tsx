@@ -53,14 +53,14 @@ export default function DocView({ entry, link }: ViewerProps) {
   if (legacy) {
     return (
       <Message>
-        这是旧版 .doc 格式，浏览器里没法解析。转成 .docx 或下载后用 Word / WPS 打开。
+        旧版 .doc 格式不支持浏览器预览。请转为 .docx 或下载后在本地打开。
       </Message>
     )
   }
   if (oversize) {
     return (
       <Message>
-        文档预览上限是 {formatBytes(DOC_PREVIEW_LIMIT)}，这个文件有 {formatBytes(entry.size)}。
+        文档超出预览大小上限（{formatBytes(DOC_PREVIEW_LIMIT)}，当前 {formatBytes(entry.size)}）。请下载后查看。
       </Message>
     )
   }
@@ -84,7 +84,7 @@ export default function DocView({ entry, link }: ViewerProps) {
       {warnings.length > 0 && (
         <div className="mx-auto max-w-3xl px-6 pt-4">
           <p className="rounded-[var(--radius-control)] bg-[var(--sunk)] px-3 py-2 text-xs text-[var(--muted)]">
-            部分格式没能完整还原：{warnings.join('；')}
+            部分排版未能完全还原：{warnings.join('；')}
           </p>
         </div>
       )}

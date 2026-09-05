@@ -259,7 +259,7 @@ func (s *Server) handleDeleteTransfer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if n == 0 {
-			writeError(w, http.StatusConflict, "只能删除已结束的传输记录")
+			writeError(w, http.StatusConflict, "仅可删除已结束的传输记录。")
 			return
 		}
 	case "download":
@@ -278,7 +278,7 @@ func (s *Server) handleDeleteTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 		switch job.Status {
 		case database.DownloadPending, database.DownloadRunning:
-			writeError(w, http.StatusConflict, "这个下载还在进行中，请先取消")
+			writeError(w, http.StatusConflict, "该下载正在进行，请先取消再删除。")
 			return
 		}
 		if err := s.drive.DeleteStaged(r.Context(), job); err != nil {

@@ -18,12 +18,41 @@ import (
 	tdriveplugin "github.com/dibin/tdrive/pkg/plugin"
 )
 
-// managerHost is the concrete implementation of the public Host bridge. A
-// host instance is scoped to a plugin ID so plugin data cannot accidentally
-// overlap with another plugin's namespace.
+// managerHost is the concrete implementation of the public Host bridge. A host
+// instance is scoped to one account's installation of one plugin, so plugin
+// data cannot overlap with another plugin's namespace — nor with the same
+// plugin installed by somebody else.
 type managerHost struct {
 	manager  *Manager
 	pluginID string
+	// userID is the account that installed this plugin. It is what makes the
+	// data namespace personal and what the two administrator-only host methods
+	// are checked against.
+	userID string
+}
+
+// owner loads the account that installed this plugin. It is read on demand
+// rather than captured at attach time because a role can change while a plugin
+// is running, and the answer that matters is the one at the moment of the call.
+func (host *managerHost) owner(ctx context.Context) (database.User, error) {
+	if host.userID == "" {
+		return database.User{}, errors.New("插件缺少所有者账号。")
+	}
+	return host.manager.db.UserByID(ctx, host.userID)
+}
+
+// requireAdminOwner gates the host methods whose HTTP equivalents are
+// administrator-only. A plugin acts for its owner, so it must not be a way to
+// reach something the owner could not reach through the WebUI.
+func (host *managerHost) requireAdminOwner(ctx context.Context) error {
+	owner, err := host.owner(ctx)
+	if err != nil {
+		return err
+	}
+	if owner.Role != database.RoleAdmin {
+		return errors.New("插件所有者非管理员，无权读取或修改运行参数。")
+	}
+	return nil
 }
 
 func (host *managerHost) Call(ctx context.Context, method string, request any, response any) error {
@@ -260,22 +289,28 @@ func (host *managerHost) dispatch(ctx context.Context, method string, request js
 		}{Data: data})
 
 	case "users.list":
-		users, err := host.manager.db.ListUsers(ctx)
+		// A plugin belongs to one account, so the host tells it about that
+		// account and no other. Enumerating the user table was harmless while
+		// only an administrator could install a plugin; the moment anyone else
+		// can, it is an account directory handed to third-party code.
+		owner, err := host.owner(ctx)
 		if err != nil {
 			return nil, err
 		}
-		publicUsers := make([]tdriveplugin.User, 0, len(users))
-		for _, user := range users {
-			publicUsers = append(publicUsers, tdriveplugin.User{
-				ID: user.ID, Username: user.Username, Role: string(user.Role), Enabled: user.Enabled,
-			})
-		}
-		return encodeHostResponse(publicUsers)
+		return encodeHostResponse([]tdriveplugin.User{{
+			ID: owner.ID, Username: owner.Username, Role: string(owner.Role), Enabled: owner.Enabled,
+		}})
 
 	case "settings.get":
+		if err := host.requireAdminOwner(ctx); err != nil {
+			return nil, err
+		}
 		return encodeHostResponse(host.manager.cfg.RuntimeSettings())
 
 	case "settings.update":
+		if err := host.requireAdminOwner(ctx); err != nil {
+			return nil, err
+		}
 		var updates map[string]json.RawMessage
 		if err := decodeHostRequest(request, &updates); err != nil {
 			return nil, err
@@ -316,7 +351,7 @@ func (host *managerHost) dispatch(ctx context.Context, method string, request js
 		if err := validatePluginDataKey(input.Key); err != nil {
 			return nil, err
 		}
-		value, err := host.manager.db.PluginData(ctx, host.pluginID, input.Key)
+		value, err := host.manager.db.PluginData(ctx, host.userID, host.pluginID, input.Key)
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +368,7 @@ func (host *managerHost) dispatch(ctx context.Context, method string, request js
 		if err := validatePluginDataKey(input.Key); err != nil {
 			return nil, err
 		}
-		return nil, host.manager.db.SetPluginData(ctx, host.pluginID, input.Key, input.Value)
+		return nil, host.manager.db.SetPluginData(ctx, host.userID, host.pluginID, input.Key, input.Value)
 
 	case "data.delete":
 		var input struct {
@@ -345,7 +380,7 @@ func (host *managerHost) dispatch(ctx context.Context, method string, request js
 		if err := validatePluginDataKey(input.Key); err != nil {
 			return nil, err
 		}
-		return nil, host.manager.db.DeletePluginData(ctx, host.pluginID, input.Key)
+		return nil, host.manager.db.DeletePluginData(ctx, host.userID, host.pluginID, input.Key)
 
 	default:
 		return nil, fmt.Errorf("unknown host method %q", method)

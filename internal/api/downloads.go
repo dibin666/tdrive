@@ -110,25 +110,25 @@ func (s *Server) handleDownloadOptions(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case !split:
 		direct.Recommended = true
-		direct.Reason = "这个文件只有一卷，直接下载即可，支持多线程和断点续传"
-		staged.Reason = "文件不分卷时暂存没有收益，只会多占一份服务器磁盘"
-		segments.Reason = "文件只有一卷，没有可分开下载的部分"
+		direct.Reason = "文件无需分卷，支持直接下载、多线程与断点续传。"
+		staged.Reason = "无需分卷的文件不必暂存，避免占用服务器磁盘。"
+		segments.Reason = "文件无需分卷，无分卷可供下载。"
 	case staged.Available:
 		staged.Recommended = true
-		staged.Reason = "服务器先把各分卷拼成完整文件，再由你多线程下载，最稳"
-		direct.Reason = "边读边拼，多线程时跨分卷边界容易失败，大文件不建议"
-		segments.Reason = "各分卷分别下载到本地后再合并，不占服务器磁盘"
+		staged.Reason = "由服务器先拼装为完整文件，再多线程下载，传输更稳定。"
+		direct.Reason = "流式拼装在跨分卷边界时容易失败，不推荐用于大文件。"
+		segments.Reason = "各分卷下载到本地后合并，不占用服务器磁盘。"
 	default:
 		segments.Recommended = true
-		segments.Reason = "各分卷分别下载到本地后再合并，不占服务器磁盘"
-		direct.Reason = "边读边拼，多线程时跨分卷边界容易失败，大文件不建议"
+		segments.Reason = "各分卷下载到本地后合并，不占用服务器磁盘。"
+		direct.Reason = "流式拼装在跨分卷边界时容易失败，不推荐用于大文件。"
 		switch {
 		case !user.Can(database.PermStage):
-			staged.Reason = "当前账号没有使用服务器暂存的权限"
+			staged.Reason = "当前账号无权使用服务器暂存。"
 		case settings.CacheLimit <= 0:
-			staged.Reason = "管理员没有为下载暂存分配磁盘空间"
+			staged.Reason = "未配置下载暂存磁盘配额。"
 		case !fitsInCache:
-			staged.Reason = "这个文件比暂存空间上限还大"
+			staged.Reason = "文件大小超出暂存磁盘配额。"
 		}
 	}
 	out.Modes = []downloadModeInfo{direct, staged, segments}
