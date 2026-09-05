@@ -433,7 +433,7 @@ export function Transfers() {
 
             <div className="flex flex-wrap items-center gap-1.5">
               {Object.entries(SOURCE_META)
-                .filter(([key]) => ['webui', 'webdav', 'local', 'remote', 'staged'].includes(key))
+                .filter(([key]) => ['webui', 'webdav', 'local', 'remote', 'aliyunpan', 'staged'].includes(key))
                 .map(([key, meta]) => (
                   <Chip
                     key={key}

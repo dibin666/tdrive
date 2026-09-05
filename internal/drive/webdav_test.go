@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/net/webdav"
+
+	"github.com/dibin/tdrive/internal/database"
 )
 
 // WebDAV is where segment transparency has to hold for real clients. rclone,
@@ -340,6 +342,104 @@ func TestWebDAVRangeRequests(t *testing.T) {
 				t.Errorf("range [%d,%d] does not match the original", tc.start, tc.end)
 			}
 		})
+	}
+}
+
+// Server-driven streams must create their transfer row before waiting for the
+// global slot. WebDAV writes otherwise disappear from the transfer page while
+// another upload is active.
+func TestWebDAVChunkedUploadIsListedWhileSpooling(t *testing.T) {
+	h := newHarness(t, 4096)
+	ctx := context.Background()
+	reader, writer := io.Pipe()
+	result := make(chan error, 1)
+	go func() {
+		_, err := h.svc.UploadUnsized(ctx, UploadRequest{
+			DirPath: "/", Name: "chunked-webdav.bin", Source: "webdav",
+		}, reader, nil)
+		result <- err
+	}()
+
+	var jobs []database.UploadJob
+	var err error
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err = h.db.ListJobs(ctx, "", 20)
+		if err != nil {
+			t.Fatalf("list jobs: %v", err)
+		}
+		if len(jobs) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(jobs) != 1 || jobs[0].Source != "webdav" || jobs[0].Status != database.JobPending {
+		t.Fatalf("spooling WebDAV jobs = %#v, want one pending webdav job", jobs)
+	}
+
+	if _, err := writer.Write([]byte("data")); err != nil {
+		t.Fatalf("write chunked body: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close chunked body: %v", err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("complete chunked WebDAV upload: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("chunked WebDAV upload did not finish")
+	}
+}
+
+// Server-driven streams must create their transfer row before waiting for the
+// global slot. WebDAV writes otherwise disappear from the transfer page while
+// another upload is active.
+func TestWebDAVUploadIsListedWhileWaitingForTaskSlot(t *testing.T) {
+	h := newHarness(t, 4096)
+	ctx := context.Background()
+	h.cfg.Transfer.UploadConcurrency = 1
+	h.cfg.Transfer.DownloadConcurrency = 1
+	h.svc.SetTransferConcurrency(1, 1)
+
+	held, err := h.svc.acquireUploadTask(ctx, 1)
+	if err != nil {
+		t.Fatalf("hold upload slot: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := h.svc.UploadStream(ctx, UploadRequest{
+			DirPath: "/", Name: "waiting-webdav.bin", Size: 4, Source: "webdav",
+		}, bytes.NewReader([]byte("data")), nil)
+		result <- err
+	}()
+
+	var jobs []database.UploadJob
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		jobs, err = h.db.ListJobs(ctx, "", 20)
+		if err != nil {
+			t.Fatalf("list jobs: %v", err)
+		}
+		if len(jobs) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(jobs) != 1 || jobs[0].Source != "webdav" || jobs[0].Status != database.JobPending {
+		t.Fatalf("waiting WebDAV jobs = %#v, want one pending webdav job", jobs)
+	}
+
+	held.release()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("complete WebDAV upload: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WebDAV upload did not finish after the task slot was released")
 	}
 }
 

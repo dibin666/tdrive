@@ -104,9 +104,10 @@ type Service struct {
 	// fetch worker, a plugin's segment stream. Cancelling a transfer has to
 	// reach all of them. Marking the row cancelled and stopping there is what
 	// left an upload running against a job the panel already showed as stopped.
-	jobCancelMu sync.Mutex
-	jobCancels  map[string]map[uint64]context.CancelFunc
-	jobCancelID atomic.Uint64
+	jobCancelMu   sync.Mutex
+	jobCancels    map[string]map[uint64]context.CancelFunc
+	jobCancelWake map[string]chan struct{}
+	jobCancelID   atomic.Uint64
 
 	// stageMu serialises the decide-then-insert of a staged download, so two
 	// requests for the same file cannot both conclude they are the first one.
@@ -137,6 +138,7 @@ func New(cfg *config.Config, db *database.DB, cluster Cluster, log *zap.Logger) 
 		clientJobs:       make(map[string]*clientDownload),
 		jobRuns:          make(map[string]struct{}),
 		jobCancels:       make(map[string]map[uint64]context.CancelFunc),
+		jobCancelWake:    make(map[string]chan struct{}),
 		stageRuns:        make(map[string]struct{}),
 		stageCancels:     make(map[string]context.CancelFunc),
 	}

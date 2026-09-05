@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -423,6 +424,12 @@ func (s *Service) WatchUploadJob(ctx context.Context, jobID string) (context.Con
 		watchers = make(map[uint64]context.CancelFunc)
 		s.jobCancels[jobID] = watchers
 	}
+	if s.jobCancelWake == nil {
+		s.jobCancelWake = make(map[string]chan struct{})
+	}
+	if _, ok := s.jobCancelWake[jobID]; !ok {
+		s.jobCancelWake[jobID] = make(chan struct{})
+	}
 	watchers[token] = cancel
 	s.jobCancelMu.Unlock()
 
@@ -433,6 +440,10 @@ func (s *Service) WatchUploadJob(ctx context.Context, jobID string) (context.Con
 			delete(watchers, token)
 			if len(watchers) == 0 {
 				delete(s.jobCancels, jobID)
+				if wake, ok := s.jobCancelWake[jobID]; ok {
+					close(wake)
+					delete(s.jobCancelWake, jobID)
+				}
 			}
 		}
 		s.jobCancelMu.Unlock()
@@ -452,6 +463,42 @@ func (s *Service) stopUploadWork(jobID string) {
 	}
 }
 
+// waitUploadWork waits until all server-side writers registered for a job have
+// unwound. A plugin's cancellation endpoint returns before its transfer
+// goroutine naturally reaches its deferred cleanup; allowing a retry in that
+// window races the old writer against the new job and makes the retry appear
+// to be rejected at random.
+func (s *Service) waitUploadWork(ctx context.Context, jobID string) error {
+	if jobID == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		s.jobCancelMu.Lock()
+		if len(s.jobCancels[jobID]) == 0 {
+			s.jobCancelMu.Unlock()
+			return nil
+		}
+		if s.jobCancelWake == nil {
+			s.jobCancelWake = make(map[string]chan struct{})
+		}
+		wake, ok := s.jobCancelWake[jobID]
+		if !ok {
+			wake = make(chan struct{})
+			s.jobCancelWake[jobID] = wake
+		}
+		s.jobCancelMu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wake:
+		}
+	}
+}
+
 // CancelUpload stops a transfer and records it as cancelled.
 //
 // The order matters. The workers are interrupted first, so that by the time
@@ -468,6 +515,19 @@ func (s *Service) CancelUpload(ctx context.Context, jobID string) error {
 		return err
 	}
 	s.stopUploadWork(jobID)
+
+	// Do not return while a plugin/HTTP writer still owns the job. The cleanup
+	// context is detached from a client disconnect so cancellation itself can
+	// finish even when the caller goes away; the timeout is only a guard for a
+	// broken stream that refuses to unwind.
+	waitCtx, cancelWait := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	waitErr := s.waitUploadWork(waitCtx, jobID)
+	cancelWait()
+	if waitErr != nil && s.log != nil {
+		s.log.Warn("upload cancellation wait timed out",
+			zap.String("job", jobID), zap.Error(waitErr))
+	}
+
 	switch {
 	case job.Status == database.JobComplete:
 		return fmt.Errorf("%w: %q has already finished uploading", database.ErrJobFinished, job.Name)
@@ -494,6 +554,10 @@ func (s *Service) Abort(ctx context.Context, jobID, reason string, status databa
 	if status != database.JobFailed && status != database.JobCancelled {
 		return fmt.Errorf("invalid upload abort status %q", status)
 	}
+	// Abort is also the host API used by plugins. Stop any stream before
+	// deleting the file row; otherwise a plugin-side manual cancellation can
+	// leave a writer pushing bytes into a job that is already shown as stopped.
+	s.stopUploadWork(jobID)
 	defer s.ReleaseUploadJob(jobID)
 
 	job, err := s.db.JobByID(ctx, jobID)
@@ -550,28 +614,45 @@ func (s *Service) abortAfterFailure(ctx context.Context, jobID string, cause err
 // of order. Parallel segments are available to callers that can seek, which in
 // practice means the browser slicing a local file.
 func (s *Service) UploadStream(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
-	lease, err := s.acquireUploadTask(ctx, req.Size)
+	// Insert the pending job before waiting for the global Telegram slot. A
+	// server-driven stream (in particular WebDAV) may wait behind another
+	// upload for a long time; hiding it until admission makes the transfer list
+	// look idle and gives the client no way to understand the backpressure.
+	job, file, err := s.Begin(ctx, req)
 	if err != nil {
 		return database.File{}, err
 	}
 
-	return s.uploadStream(ctx, lease, req, r, progress)
+	lease, err := s.acquireUploadTask(ctx, file.Size)
+	if err != nil {
+		// The job has already been exposed as pending. Leave a terminal history
+		// row and remove its pending file if admission is cancelled or fails, so
+		// neither the transfer list nor the tree retains an unowned placeholder.
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
+		return database.File{}, err
+	}
+
+	return s.uploadStream(ctx, lease, job, file, r, progress)
 }
 
 // uploadStream is the implementation shared by known-size and unsized
-// uploads. Callers must already hold the task slot before entering it, and pass
-// the account it was taken on so every segment lands on the same login.
-func (s *Service) uploadStream(ctx context.Context, lease *lease, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
+// uploads. Callers must already hold the task slot and have created the
+// pending job before entering it, passing the account it was taken on so every
+// segment lands on the same login.
+func (s *Service) uploadStream(
+	ctx context.Context,
+	lease *lease,
+	job database.UploadJob,
+	file database.File,
+	r io.Reader,
+	progress Progress,
+) (database.File, error) {
 	var leaseBytes int64
 	defer func() {
 		lease.recordQuotaBytes(leaseBytes)
 		lease.release()
 	}()
 	account := lease.account
-	job, file, err := s.Begin(ctx, req)
-	if err != nil {
-		return database.File{}, err
-	}
 	defer s.bindUploadAccount(job.ID, account)()
 
 	ctx, release := s.WatchUploadJob(ctx, job.ID)
@@ -628,11 +709,22 @@ func (s *Service) uploadStream(ctx context.Context, lease *lease, req UploadRequ
 // cannot be told the size afterwards. Callers that do know the length should
 // use UploadStream and skip the disk entirely.
 func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Reader, progress Progress) (database.File, error) {
+	// Create the pending row before spooling. Chunked WebDAV bodies can take a
+	// long time to finish, and the transfer must be visible during that period
+	// even though its final segment geometry is not known yet.
+	req.Size = 0
+	job, file, err := s.Begin(ctx, req)
+	if err != nil {
+		return database.File{}, err
+	}
+
 	if err := os.MkdirAll(s.cfg.Storage.SpoolDir, 0o750); err != nil {
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
 		return database.File{}, fmt.Errorf("create spool directory: %w", err)
 	}
 	spool, err := os.CreateTemp(s.cfg.Storage.SpoolDir, "upload-*.part")
 	if err != nil {
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
 		return database.File{}, fmt.Errorf("create spool file: %w", err)
 	}
 	defer func() {
@@ -645,18 +737,41 @@ func (s *Service) UploadUnsized(ctx context.Context, req UploadRequest, r io.Rea
 
 	size, err := io.Copy(spool, r)
 	if err != nil {
-		return database.File{}, fmt.Errorf("spool upload: %w", err)
-	}
-	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		return database.File{}, fmt.Errorf("rewind spool file: %w", err)
-	}
-
-	req.Size = size
-	lease, err := s.acquireUploadTask(ctx, req.Size)
-	if err != nil {
+		err = fmt.Errorf("spool upload: %w", err)
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
 		return database.File{}, err
 	}
-	return s.uploadStream(ctx, lease, req, spool, progress)
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		err = fmt.Errorf("rewind spool file: %w", err)
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
+		return database.File{}, err
+	}
+
+	// The placeholder created a one-segment, zero-byte geometry. Update both
+	// rows before acquiring Telegram so a queued transfer is listed with its
+	// real size and the account quota reserves the whole content.
+	segmentCount := s.cfg.SegmentCount(size)
+	if err := s.CheckQuota(ctx, req.UserID, size); err != nil {
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
+		return database.File{}, err
+	}
+	if err := s.db.SetFileSize(ctx, file.ID, size, segmentCount); err != nil {
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
+		return database.File{}, err
+	}
+	if err := s.db.SetJobSize(ctx, job.ID, size, segmentCount); err != nil {
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
+		return database.File{}, err
+	}
+	file.Size, file.SegmentCount = size, segmentCount
+	job.TotalSize, job.SegmentCount = size, segmentCount
+
+	lease, err := s.acquireUploadTask(ctx, file.Size)
+	if err != nil {
+		s.abortAfterFailure(context.WithoutCancel(ctx), job.ID, err)
+		return database.File{}, err
+	}
+	return s.uploadStream(ctx, lease, job, file, spool, progress)
 }
 
 // PutSegmentsParallel uploads several independently-sourced segments at once.

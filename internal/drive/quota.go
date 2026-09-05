@@ -123,6 +123,22 @@ func (t *quotaTracker) mayStart(accountID string, direction quotaDirection, limi
 	return reserved == 0
 }
 
+// fits reports whether a content can be covered by the bytes that remain on
+// this account. The scheduler uses it to prefer an account that can fit the
+// whole content over one that would cross its quota boundary.
+func (t *quotaTracker) fits(accountID string, direction quotaDirection, limit, size int64) bool {
+	if size <= 0 || limit <= 0 {
+		return true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	used, reserved := t.valuesLocked(accountID, direction)
+	if used >= limit || reserved >= limit-used {
+		return false
+	}
+	return size <= limit-used-reserved
+}
+
 // reserve atomically claims the expected size for a content transfer.
 func (t *quotaTracker) reserve(accountID string, direction quotaDirection, limit, size int64) (*quotaReservation, bool) {
 	if size < 0 {
@@ -347,6 +363,10 @@ func directionFor(upload bool) quotaDirection {
 
 func (s *Service) quotaMayStart(account Account, upload bool, size int64) bool {
 	return s.quotaTracker().mayStart(account.ID(), directionFor(upload), quotaLimit(account, upload), size)
+}
+
+func (s *Service) quotaFits(account Account, upload bool, size int64) bool {
+	return s.quotaTracker().fits(account.ID(), directionFor(upload), quotaLimit(account, upload), size)
 }
 
 func (s *Service) reserveQuota(account Account, upload bool, size int64) (*quotaReservation, bool) {

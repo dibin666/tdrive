@@ -219,15 +219,32 @@ func (host *managerHost) dispatch(ctx context.Context, method string, request js
 			JobID  string `json:"jobId"`
 			Reason string `json:"reason"`
 			State  string `json:"state"`
+			Status string `json:"status"` // compatibility with older plugin builds
 		}
 		if err := decodeHostRequest(request, &input); err != nil {
 			return nil, err
 		}
-		state := database.JobCancelled
-		if input.State == string(database.JobFailed) {
-			state = database.JobFailed
+		state := input.State
+		if state == "" {
+			state = input.Status
 		}
-		return nil, host.manager.drive.Abort(ctx, input.JobID, input.Reason, state)
+		if state == "" {
+			// Older plugins omitted the state field; the historical host
+			// default for that request was cancellation.
+			state = string(database.JobCancelled)
+		}
+		if state == string(database.JobCancelled) {
+			// A plugin's queue cancellation arrives through this host method,
+			// not the WebUI DELETE endpoint. Use the full cancellation path so
+			// active brokered streams are interrupted and fully unwound before
+			// the plugin is told that a retry may be started.
+			return nil, host.manager.drive.CancelUpload(ctx, input.JobID)
+		}
+		abortState := database.JobFailed
+		if state != string(database.JobFailed) {
+			abortState = database.JobCancelled
+		}
+		return nil, host.manager.drive.Abort(ctx, input.JobID, input.Reason, abortState)
 
 	case "downloads.stage":
 		var input struct {
@@ -426,7 +443,7 @@ func (host *managerHost) OpenStream(ctx context.Context, method string, request 
 		// registered against the job. Without this the plugin kept pushing bytes
 		// into a transfer the panel had already recorded as cancelled.
 		segmentCtx, release := host.manager.drive.WatchUploadJob(ctx, input.JobID)
-		stream := newUploadStream()
+		stream := newUploadStream(segmentCtx)
 		go func() {
 			defer release()
 			// PutSegment itself is deliberately a low-level primitive. The
@@ -488,24 +505,59 @@ type uploadStream struct {
 	pipeReader *io.PipeReader
 	pipeWriter *io.PipeWriter
 	done       chan struct{}
+	watchStop  chan struct{}
 
-	mu        sync.Mutex
-	err       error
-	closeOnce sync.Once
+	mu              sync.Mutex
+	err             error
+	finishOnce      sync.Once
+	writerCloseOnce sync.Once
+	watchStopOnce   sync.Once
 }
 
-func newUploadStream() *uploadStream {
+func newUploadStream(ctx context.Context) *uploadStream {
 	reader, writer := io.Pipe()
-	return &uploadStream{pipeReader: reader, pipeWriter: writer, done: make(chan struct{})}
+	stream := &uploadStream{
+		pipeReader: reader,
+		pipeWriter: writer,
+		done:       make(chan struct{}),
+		watchStop:  make(chan struct{}),
+	}
+	if ctx != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				stream.abort(ctx.Err())
+			case <-stream.watchStop:
+			}
+		}()
+	}
+	return stream
 }
 
 func (stream *uploadStream) reader() io.Reader { return stream.pipeReader }
 
+// abort closes the producer half of the pipe. Context cancellation does not
+// otherwise interrupt io.PipeReader.Read, so without this a Telegram upload
+// worker can remain blocked forever after the plugin queue says cancelled.
+func (stream *uploadStream) abort(err error) {
+	// Closing the writer with an error wakes a blocked PipeReader and makes a
+	// producer that is currently writing see a closed pipe. Closing the reader
+	// as well would cause the reader side to lose the useful cancellation error
+	// and report only io.ErrClosedPipe.
+	stream.writerCloseOnce.Do(func() { _ = stream.pipeWriter.CloseWithError(err) })
+}
+
 func (stream *uploadStream) finish(err error) {
-	stream.mu.Lock()
-	stream.err = err
-	stream.mu.Unlock()
-	close(stream.done)
+	if err != nil {
+		stream.abort(err)
+	}
+	stream.finishOnce.Do(func() {
+		stream.mu.Lock()
+		stream.err = err
+		stream.mu.Unlock()
+		close(stream.done)
+		stream.watchStopOnce.Do(func() { close(stream.watchStop) })
+	})
 }
 
 func (stream *uploadStream) Read(buffer []byte) (int, error) {
@@ -524,7 +576,7 @@ func (stream *uploadStream) Write(buffer []byte) (int, error) {
 }
 
 func (stream *uploadStream) Close() error {
-	stream.closeOnce.Do(func() {
+	stream.writerCloseOnce.Do(func() {
 		_ = stream.pipeWriter.Close()
 	})
 	<-stream.done

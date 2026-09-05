@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Choosing which Telegram account runs a transfer.
@@ -131,10 +132,20 @@ func (s *Service) acquire(ctx context.Context, upload bool, _ string, expectedSi
 		observedQuotaGeneration := quota.generationNow()
 		account := firstAccountForTransfer(s, accounts, upload, size)
 		if account == nil {
-			// Every account has committed or reserved its budget. A quota
-			// reservation is held until its current content finishes, so the
-			// ordinary wake-up is the next UTC day (or an administrator changing
-			// a quota, which also signals this tracker).
+			// If all candidates are cooling down or are otherwise unavailable,
+			// quota.wait alone could sleep until midnight. Poll the account
+			// state instead; a login or a FLOOD_WAIT expiry is an equally valid
+			// admission wake-up.
+			if !hasAvailableAccount(accounts) {
+				if err := waitForAccountOrQuota(ctx, quota, observedQuotaGeneration); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			// Every available account has committed or reserved its budget. A
+			// quota reservation is held until its current content finishes, so
+			// the ordinary wake-up is the next UTC day (or an administrator
+			// changing a quota, which also signals this tracker).
 			if err := quota.wait(ctx, observedQuotaGeneration); err != nil {
 				return nil, err
 			}
@@ -149,10 +160,11 @@ func (s *Service) acquire(ctx context.Context, upload bool, _ string, expectedSi
 			return nil, err
 		}
 
-		// The account list can change while this request waits for the global
-		// slot. Re-evaluate it before committing the account choice so a newly
-		// cooled primary falls back promptly.
-		if !containsAccount(s.cluster.Accounts(), account.ID()) {
+		// The account list and health state can change while this request waits
+		// for the global slot. Choose again from the current eligible set rather
+		// than pinning a queued request to a primary that just hit FLOOD_WAIT.
+		account = firstAccountForTransfer(s, s.cluster.Accounts(), upload, size)
+		if account == nil {
 			release()
 			continue
 		}
@@ -170,9 +182,22 @@ func (s *Service) acquire(ctx context.Context, upload bool, _ string, expectedSi
 
 // firstAccountForTransfer follows the cluster's primary-first order. A later
 // account is considered only when an earlier account cannot start the transfer,
-// including when its daily quota is exhausted.
+// including when its daily quota is exhausted. Accounts that can fit the whole
+// content are preferred over an account that would cross its quota boundary;
+// crossing remains a last resort when no account can fit it.
 func firstAccountForTransfer(s *Service, accounts []Account, upload bool, size int64) Account {
 	for _, account := range accounts {
+		if account == nil || !account.Available() {
+			continue
+		}
+		if s.quotaMayStart(account, upload, size) && s.quotaFits(account, upload, size) {
+			return account
+		}
+	}
+	for _, account := range accounts {
+		if account == nil || !account.Available() {
+			continue
+		}
 		if s.quotaMayStart(account, upload, size) {
 			return account
 		}
@@ -180,13 +205,43 @@ func firstAccountForTransfer(s *Service, accounts []Account, upload bool, size i
 	return nil
 }
 
-func containsAccount(accounts []Account, id string) bool {
+func hasAvailableAccount(accounts []Account) bool {
 	for _, account := range accounts {
-		if account.ID() == id {
+		if account != nil && account.Available() {
 			return true
 		}
 	}
 	return false
+}
+
+// waitForAccountOrQuota waits for either a quota reservation to be released or
+// an account to become usable. Account health can change without a local
+// notification (for example when a FLOOD_WAIT expires), so a short poll also
+// covers accounts that are still connecting or a Cluster implementation that
+// does not expose a readiness notification.
+func waitForAccountOrQuota(
+	ctx context.Context,
+	quota *quotaTracker,
+	observed uint64,
+) error {
+	quota.mu.Lock()
+	if quota.generation != observed {
+		quota.mu.Unlock()
+		return nil
+	}
+	wakeup := quota.wakeup
+	quota.mu.Unlock()
+
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-wakeup:
+		return nil
+	case <-timer.C:
+		return nil
+	}
 }
 
 // leaseUpload reserves one global upload slot and assigns one account.

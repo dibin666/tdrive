@@ -39,6 +39,47 @@ func TestDailyQuotaMovesNewContentToAnotherAccount(t *testing.T) {
 	}
 }
 
+// A browser/plugin job carries its size in the persisted job row. The job
+// lease must reserve that size before the global slot is released; otherwise a
+// new job can choose the same account while the old job is still running.
+func TestUploadJobQuotaMovesQueuedContentToAnotherAccount(t *testing.T) {
+	h := newHarnessN(t, 1<<20, 2)
+	ctx := context.Background()
+	h.tg.account(0).uploadQuota = 100
+	h.tg.account(1).uploadQuota = 100
+
+	firstJob, _, err := h.svc.Begin(ctx, UploadRequest{
+		DirPath: "/", Name: "first.bin", Size: 100,
+	})
+	if err != nil {
+		t.Fatalf("begin first job: %v", err)
+	}
+	first, firstRelease, err := h.svc.AcquireUploadJob(ctx, firstJob.ID)
+	if err != nil {
+		t.Fatalf("acquire first job: %v", err)
+	}
+	defer firstRelease()
+	if first.ID() != "acct-1" {
+		t.Fatalf("first job used %s, want acct-1", first.ID())
+	}
+
+	secondJob, _, err := h.svc.Begin(ctx, UploadRequest{
+		DirPath: "/", Name: "second.bin", Size: 1,
+	})
+	if err != nil {
+		t.Fatalf("begin second job: %v", err)
+	}
+	second, secondRelease, err := h.svc.AcquireUploadJob(ctx, secondJob.ID)
+	if err != nil {
+		t.Fatalf("acquire second job: %v", err)
+	}
+	defer secondRelease()
+	if second.ID() != "acct-2" {
+		t.Fatalf("queued job used %s, want the fallback acct-2 while acct-1 is reserved", second.ID())
+	}
+	h.svc.ReleaseUploadJob(secondJob.ID)
+}
+
 func TestDailyQuotaDoesNotMoveAnActiveContent(t *testing.T) {
 	svc := limiterTestService(2, 2, time.Millisecond, 8, 2)
 	cluster := svc.cluster.(*fakeTelegram)
@@ -65,6 +106,35 @@ func TestDailyQuotaDoesNotMoveAnActiveContent(t *testing.T) {
 	if first.account.ID() == "" {
 		t.Fatal("the active content lost its account assignment")
 	}
+}
+
+func TestDailyQuotaPrefersAnAccountThatFits(t *testing.T) {
+	svc := limiterTestService(2, 2, time.Millisecond, 8, 2)
+	cluster := svc.cluster.(*fakeTelegram)
+	cluster.account(0).uploadQuota = 100
+	cluster.account(1).uploadQuota = 100
+
+	first, err := svc.acquire(context.Background(), true, "", 60)
+	if err != nil {
+		t.Fatalf("acquire first content: %v", err)
+	}
+	if first.account.ID() != cluster.account(0).id {
+		t.Fatalf("first content used %s, want the primary", first.account.ID())
+	}
+	first.recordQuotaBytes(60)
+	first.release()
+
+	// The primary has only 40 bytes left. The fallback can fit the whole
+	// content, so the scheduler must not spend the primary's one allowed
+	// boundary-crossing admission and strand a later upload there.
+	second, err := svc.acquire(context.Background(), true, "", 50)
+	if err != nil {
+		t.Fatalf("acquire follow-up content: %v", err)
+	}
+	if second.account.ID() != cluster.account(1).id {
+		t.Fatalf("follow-up content used %s, want the fitting fallback acct-2", second.account.ID())
+	}
+	second.release()
 }
 
 func TestDailyQuotaAllowsAContentToCrossTheBoundary(t *testing.T) {

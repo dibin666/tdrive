@@ -26,7 +26,13 @@ func TestCancelUploadInterruptsWorkAlreadyInFlight(t *testing.T) {
 	// Stand in for a browser segment request, a fetch worker or a plugin's
 	// segment stream: something moving bytes outside the request that cancels.
 	workerCtx, release := h.svc.WatchUploadJob(ctx, job.ID)
-	defer release()
+	// Model the worker's deferred cleanup: once cancellation reaches its
+	// context, the worker is done and unregisters itself, allowing the cancel
+	// endpoint to return only after that point.
+	go func() {
+		<-workerCtx.Done()
+		release()
+	}()
 
 	if err := h.svc.CancelUpload(ctx, job.ID); err != nil {
 		t.Fatalf("CancelUpload: %v", err)
@@ -51,6 +57,29 @@ func TestCancelUploadInterruptsWorkAlreadyInFlight(t *testing.T) {
 	err = h.svc.PutSegment(ctx, job, 1, bytes.NewReader(make([]byte, 1024)), 1024, nil)
 	if !errors.Is(err, database.ErrJobFinished) {
 		t.Fatalf("PutSegment after cancel = %v, want ErrJobFinished", err)
+	}
+}
+
+// Plugins use files.abortUpload directly for a failed/cancelled attempt. That
+// host path must stop a stream too; otherwise only the WebUI DELETE endpoint
+// interrupts in-flight work.
+func TestAbortUploadInterruptsPluginWork(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1024)
+	job, _, err := h.svc.Begin(ctx, UploadRequest{DirPath: "/", Name: "plugin.bin", Size: 1024})
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	workerCtx, release := h.svc.WatchUploadJob(ctx, job.ID)
+	defer release()
+
+	if err := h.svc.Abort(ctx, job.ID, "plugin cancelled", database.JobCancelled); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	select {
+	case <-workerCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("files.abortUpload left plugin work running")
 	}
 }
 

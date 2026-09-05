@@ -99,7 +99,7 @@ func (d *DB) FilterUploads(ctx context.Context, f TransferFilter) ([]UploadJob, 
 		matched := false
 		for _, s := range f.Sources {
 			switch s {
-			case "webui", "local", "remote", "webdav":
+			case "webui", "local", "remote", "webdav", "aliyunpan":
 				matched = true
 			}
 		}
